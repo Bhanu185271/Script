@@ -1,0 +1,61 @@
+"""
+Module to check authorization for admin routes
+"""
+from flask import request
+import pkg_resources
+import io
+import yaml
+from databricks import sql as dbsql
+from Api import DatabricksToken as dt
+
+cfile_global = pkg_resources.resource_filename('ApiData','/Global/Config/global_config.yml')
+
+with io.open(cfile_global, 'r') as configfile_global:
+    global_config_data = yaml.safe_load(configfile_global)
+
+def check_role(fun):
+    """
+    This is function applied on admin routes to check
+    whether the request databricks token is of an admin or not
+    """
+    def auth_decorator(*args, **kwargs):
+        try:
+            # db_token = request.headers.get('dbToken')
+            client_id =  request.headers.get('Clientid')
+            client_secret =  request.headers.get('Clientsecret')
+            tenantId = global_config_data['tenantId']
+            subscription_id = global_config_data['subscription_id']
+            resource_group = global_config_data['resource_group']
+            databricks_workspace = global_config_data['databricks_workspace']
+            dbricks_location = global_config_data['dbricks_location']
+
+            databricks_token = dt.DatabricksToken(client_id,client_secret,tenantId, subscription_id,
+                                                        resource_group, databricks_workspace, dbricks_location)
+                                
+            connection = dbsql.connect( 
+                                        server_hostname = global_config_data['server-hostname'],
+                                        http_path = global_config_data['http-path'],
+                                        access_token = databricks_token
+                                        )
+                                        
+        
+
+    # check if client_id is added in the access_table and retrieve role
+            query_string = "SHOW TABLES IN admin"
+            with connection.cursor() as cursor: 
+                # Get the data 
+                cursor.execute(query_string) 
+                objects = cursor.fetchall()
+            
+            values = [value[1] for value in objects]
+            
+            if len(values) > 0:
+                return fun(*args, **kwargs)
+            else:
+                return "This is an admin route please check your access."
+        except Exception as exception:
+            return 'Error in connection to Databricks due to '+str(exception)
+
+    auth_decorator.__name__ = fun.__name__
+
+    return auth_decorator
