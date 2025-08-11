@@ -1,3 +1,26 @@
+still getting same error .
+
+let's start over. let's do 1 thing . can we add this requirement to existing original code that my collegue wrote. 
+
+Note : don't change anything that is existing. I repeat no change to existing one. just add llm_mwe_api requirement . just create new endpoint and add validation and insert thing that we are doing.
+
+I am adding the original code in the attchement.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 """
 Module to define all available routes
 """
