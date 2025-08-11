@@ -1,0 +1,230 @@
+"""
+Module to fetch data from Databricks
+"""
+import pkg_resources
+import io
+import yaml
+from databricks import sql as dbsql
+from databricks import sql
+import os
+# from ApiData import *
+import math
+import pandas as pd
+
+class DatabricksData:
+    " Class - DatabricksData"
+    def __init__(self, db_token, server_hostname, http_path, project, source, market):
+        """
+        The class DatabricksData gets initialized by
+        the clientId, tenantId, clientSecret, subscription_id, resource_group, databricks_workspace, dbricks_location and yaml_data
+        """
+        self.database = source
+        self.table = project
+        self.project = project
+        self.market = market
+
+        # Define the connection to the SQL endpoint 
+        self.connection = dbsql.connect( 
+                        server_hostname = server_hostname,
+                        http_path = http_path,
+                        access_token = db_token
+                        )
+    
+    def column_check(self, col, param):
+        """
+        this will check whether column passed as parameter
+        is available for filtering or not
+        :param col: this is list of available column for each source and table
+        :type col:list
+        :param param: parameter passed in the url for filtering data
+        :type param: dict
+        :return: None if condition satisfied, or string if column not present
+        """
+        filter_col = list(param.keys())
+        col_ = []
+
+        for columns_filter in filter_col:
+            if columns_filter.upper() not in col:
+                col_.append(columns_filter)
+        if len(col_) > 0:
+            return "{} column/columns not available for filtering ".format(col_) +\
+                        " for kpi {}".format(self.table) + ", available columns are {}".format(str(col))  # noqa
+        else:
+            return None
+    
+    def get_col(self, object):
+        """
+        this will fetch the existing columns of the required table
+        or tables in existing database based on value of param object
+        """
+
+        if object == 'COLUMNS':
+            index = 0
+            with self.connection.cursor() as cursor:
+                cursor.execute(f"SHOW COLUMNS IN {self.database}.{self.table}") 
+                objects = cursor.fetchall()
+
+        values = [value[index] for value in objects]
+        return values
+    
+    def return_filters_globalkpi(self, param):
+        """
+        This function returns the WHERE clause string
+        to be used to extract data from the databricks
+        :param param: request parameters
+        :type param: dictionary
+        :return: None if param in empty, WHERE clause string otherwise
+        :return type: list
+        """
+        if (param is None) or (len(param) == 0):
+            return ['']
+
+        filter_string = ''
+        for i, filter_param in enumerate(param.items()):
+		  
+            filter_string += f' AND '
+            filter_string += f'{filter_param[0]} in ('
+            for j, filter_ in enumerate(str(filter_param[1]).split(',')):
+                  
+                  if str(filter_).isnumeric():
+                      if j>0:
+                          filter_string += f',{filter_}'
+                      else:
+                          filter_string += f'{filter_}'                         
+                  else:
+                      if j>0:
+                          filter_string += f',"{filter_}"'
+                      else:
+                          filter_string += f'"{filter_}"'
+            filter_string += ')'
+
+        return [filter_string]
+    
+    def get_table_filters(self, param):
+
+        """
+        this will return the filter if relevant parameter
+        is passed in query string
+        :param param: query string in dictionary form
+        :param type: dict
+        """
+
+        try:
+            
+            col = self.get_col('COLUMNS')
+
+            if len(param) == 0:
+                return self.return_filters_globalkpi(param)
+
+            elif len(param) > 0:
+                col_check = self.column_check(col, param)
+
+                if col_check is not None:
+                    return col_check
+
+                return self.return_filters_globalkpi(param)
+        except Exception as err:
+            return str(err)
+    
+    def get_data_databricks(self, filter_param):
+        """
+        This function creates the json output after
+        fetching data from databricks using the filter
+        parameter
+        :param filter_param: filter string
+        :type filter_param: list
+        """
+
+        #query_string = f"SELECT * FROM {self.database}.{self.table} WHERE MARKETNAME='{self.market}'" + filter_param[0]
+        #query_string = f"SELECT * FROM {self.database}.{self.table} WHERE MARKET='{self.market}'" + filter_param[0]
+        query_string = f"SELECT * FROM {self.database}.{self.table} limit 10" #added by Awanish 20250702
+        print(query_string)
+
+        with self.connection.cursor() as cursor: 
+            # Get the data 
+            cursor.execute(query_string) 
+            data = cursor.fetchall()
+        
+        #columns = self.get_col('COLUMNS')
+        #df = pd.DataFrame(data=data, columns=columns)
+        results = []
+        for row in data:
+            final_dict = row.asDict()
+            if 'HCPS' in final_dict.keys():
+                final_dict['HCPS'] = eval(final_dict['HCPS'])
+            results.append(final_dict)
+        return results
+
+    
+    def get_page_data(self, filter_param):
+        """
+        This function creates the json output after
+        fetching data from databricks using the filter
+        parameter
+        :param filter_param: filter string
+        :type filter_param: list
+        """
+
+        # original_query_string = f"SELECT count(*) FROM {self.database}.{self.table} WHERE MARKETNAME='{self.market}'" + original_filter_param[0]
+        print("FILTER PARAM")
+        print(filter_param)
+        #query_string = f"SELECT PAGE_ID, count(*) as COUNT FROM {self.database}.{self.table} WHERE MARKETNAME='{self.market}'" + filter_param[0] + " GROUP BY PAGE_ID ORDER BY COUNT desc"
+        query_string = f"SELECT PAGE_ID, count(*) as COUNT FROM {self.database}.{self.table} WHERE MARKET='{self.market}'" + filter_param[0] + " GROUP BY PAGE_ID ORDER BY COUNT desc"
+        print(query_string)
+
+        with self.connection.cursor() as cursor: 
+            # Get the data 
+            cursor.execute(query_string) 
+            data = cursor.fetchall()
+
+            cursor.execute(query_string)
+            original_data = cursor.fetchall()
+        
+        list_of_dicts = []
+        for row in original_data:
+            list_of_dicts.append({row.PAGE_ID: row.COUNT})
+        
+        return list_of_dicts
+
+
+
+ 
+
+'''DATABRICKS_ACCESS_TOKEN = os.environ['db_token']
+DATABRICKS_HTTP_PATH = os.environ['adb_sqlwarehouse_path']
+DATABRICKS_SERVER_HOSTNAME = os.environ['server_hostname']'''
+
+DATABRICKS_SERVER_HOSTNAME = "adb-192341293048.8.azuredatabricks.net"
+DATABRICKS_HTTP_PATH = "/sql/1.0/warehouses/87e203ea72dc"
+DATABRICKS_ACCESS_TOKEN = "dapide6717021f661821a7e3"
+
+def create_connection():
+    """Create a Databricks SQL connection."""
+    return sql.connect(
+        server_hostname=DATABRICKS_SERVER_HOSTNAME,
+        http_path=DATABRICKS_HTTP_PATH,
+        access_token=DATABRICKS_ACCESS_TOKEN
+    )
+
+def execute_query(query):
+    """Execute a SQL query and return a DataFrame."""
+    try:
+        print("\nExecuting query:\n", query)
+        with create_connection().cursor() as cursor:
+            cursor.execute(query)
+            columns = [desc[0] for desc in cursor.description]
+            rows = cursor.fetchall()
+            print(f"Returned {len(rows)} rows")
+            return pd.DataFrame(rows, columns=columns)
+    except Exception as e:
+        print("SQL execution error:", str(e))
+        raise
+
+def execute_non_query(query):
+    """Execute a non-returning SQL query (e.g., INSERT, UPDATE)."""
+    try:
+        with create_connection().cursor() as cursor:
+            cursor.execute(query)
+    except Exception as e:
+        print("SQL execution error:", str(e))
+        raise
