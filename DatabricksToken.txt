@@ -1,0 +1,82 @@
+"""
+Module to generate Databricks Personal Access Token
+"""
+import requests
+import adal
+
+class DatabricksToken:
+    def __init__(self, clientId, clientSecret, tenantId, subscription_id, resource_group,
+                 databricks_workspace, dbricks_location):
+        self.clientId = clientId
+        self.clientSecret = clientSecret
+        self.tenantId = tenantId
+        self.subscription_id = subscription_id
+        self.resource_group = resource_group
+        self.databricks_workspace = databricks_workspace
+        self.dbricks_location = dbricks_location
+
+    def db_access_token(self):
+        """
+        This is used to generate the Databricks PAT
+        :raises Error: if unable to generate Databricks PAT using provided credentials 
+        :return: json containing Databricks PAT
+        :return type: dict
+        """
+        try:
+            # Acquire a token to authenticate against Azure management API
+            authority_url = 'https://login.microsoftonline.com/' + self.tenantId
+            context = adal.AuthenticationContext(authority_url)
+            token = context.acquire_token_with_client_credentials(
+                resource='https://management.core.windows.net/',
+                client_id = self.clientId,
+                client_secret = self.clientSecret
+            )
+            azToken = token.get('accessToken')
+            # print(azToken)
+
+
+            # Acquire a token to authenticate against the Azure Databricks Resource
+            token = context.acquire_token_with_client_credentials(
+                resource="2ff814a6-3304-4ab8-85cb-cd0e6f879c1d",
+                client_id = self.clientId,
+                client_secret = self.clientSecret
+            )
+            adbToken = token.get('accessToken')
+            # print("Not PAT ",adbToken)
+
+
+            # Format Request API Url
+            dbricks_api = "https://{}.azuredatabricks.net/api/2.0".format(self.dbricks_location)
+
+
+            # Request Authentication
+            dbricks_auth = {
+                "Authorization": "Bearer {}".format(adbToken),
+                "X-Databricks-Azure-SP-Management-Token": azToken,
+                "X-Databricks-Azure-Workspace-Resource-Id": 
+                ("/subscriptions/{}/resourceGroups/{}/providers/Microsoft.Databricks/workspaces/{}"
+                .format(self.subscription_id, self.resource_group, self.databricks_workspace) )
+                }
+
+
+            # Optional Paramters 
+            payload = {
+                "comment": "This token is generated through AAD and Databricks APIs", # optional parameter
+                "lifetime_seconds": 3600 # optional parameter. If not passed then it is indefinte
+            }
+
+
+            # Request and Send Data to Create a Databricks Token
+            data = requests.post("{}/token/create".format(dbricks_api), headers= dbricks_auth, json=payload)
+
+            # display the response data
+            data.status_code
+            data.content
+
+            # Decode response, get token, and print token
+            # dict_content = json.loads(data.content.decode('utf-8'))
+            # token = dict_content.get('token_value')
+            # print("This is the databricks token: {}".format(token))
+            return data
+        except Exception as err:
+            return str(err)
