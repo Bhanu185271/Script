@@ -1,0 +1,173 @@
+https://dev.api.gsk.com/ffn/deployment/add_new_llm_prompt_default
+
+
+
+from flask import Flask, request, jsonify
+from databricks import sql
+import traceback
+ 
+app = Flask(__name__)
+app.url_map.strict_slashes = False
+ 
+DATABRICKS_SERVER_HOSTNAME = "adb-192347048.8.azuredatabricks.net"
+DATABRICKS_HTTP_PATH = "/sql/1.0/warehouses/87e7f87ea72dc"
+DATABRICKS_ACCESS_TOKEN = "dapide6717021f389a3a195ae43-2"
+ 
+TABLE_FQN = "hive_metastore.fieldforce_navigator_deployment.llm_medical_words_examples"
+ 
+def _clean(x):
+    if x is None:
+        return ""
+    return " ".join(str(x).strip().split())
+ 
+def _need(body, fields):
+    missing = [f for f in fields if f not in body or _clean(body.get(f)) == ""]
+    return (len(missing) == 0, missing)
+ 
+def _connect():
+    # 
+    return sql.connect(
+        server_hostname=DATABRICKS_SERVER_HOSTNAME,
+        http_path=DATABRICKS_HTTP_PATH,
+        access_token=DATABRICKS_ACCESS_TOKEN,
+    )
+ 
+def _rows_to_dicts(cursor, rows):
+    cols = [d[0] for d in cursor.description] if cursor.description else []
+    out = []
+    for r in rows:
+        item = {}
+        for i, c in enumerate(cols):
+            item[c] = r[i] if i < len(r) else None
+        out.append(item)
+    return out
+ 
+# endpoints 
+@app.get("/flask_up")
+def flask_up():
+    return jsonify({"status": "Flask is running"}), 200
+ 
+@app.get("/check_db")
+def check_db():
+    
+    try:
+        with _connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1 AS ok")
+                row = cur.fetchone()
+        return jsonify({"status": "ok", "select1": row}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e), "traceback": traceback.format_exc()}), 500
+ 
+@app.get("/test_query")
+def test_query():
+    #  test: SELECT * LIMIT N
+    try:
+        limit = request.args.get("limit", 5, type=int)
+        limit = max(1, min(limit, 1000))
+        query = f"""
+            SELECT *
+            FROM {TABLE_FQN}
+            LIMIT {limit}
+        """
+        with _connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, ())
+                rows = cur.fetchall()
+                data = _rows_to_dicts(cur, rows)
+        return jsonify({"status": "ok", "count": len(data), "rows": data}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e), "traceback": traceback.format_exc()}), 500
+ 
+@app.route("/llm_mwe_table", methods=["GET", "POST", "OPTIONS"])
+def llm_mwe_table():
+    if request.method == "OPTIONS":
+        return ("", 204)
+ 
+    if request.method == "GET":
+        brand = _clean(request.args.get("brand"))
+        incorrect = _clean(request.args.get("incorrect_term"))
+        corrected = _clean(request.args.get("corrected_term"))
+        try:
+            limit = int(request.args.get("limit", "100"))
+        except ValueError:
+            limit = 100
+        limit = max(1, min(limit, 1000))
+ 
+        where = []
+        params = []
+        if brand:
+            where.append("UPPER(TRIM(BRAND)) = UPPER(TRIM(?))")
+            params.append(brand)
+        if incorrect:
+            where.append("UPPER(TRIM(INCORRECT_TERM)) = UPPER(TRIM(?))")
+            params.append(incorrect)
+        if corrected:
+            where.append("UPPER(TRIM(CORRECTED_TERM)) = UPPER(TRIM(?))")
+            params.append(corrected)
+ 
+        where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+        query = f"""
+            SELECT BRAND, INCORRECT_TERM, CORRECTED_TERM, ADDED_BY, ENTRY_TIME
+            FROM {TABLE_FQN}
+            {where_sql}
+            ORDER BY ENTRY_TIME DESC
+            LIMIT {limit}
+        """
+        try:
+            with _connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(query, tuple(params) if params else ())
+                    rows = cur.fetchall()
+                    data = _rows_to_dicts(cur, rows)
+            return jsonify({"status": "success", "count": len(data), "data": data}), 200
+        except Exception as e:
+            return jsonify({"status": "error", "where": "database", "message": str(e), "traceback": traceback.format_exc()}), 500
+ 
+    # POST : insert with duplicate check
+    try:
+        body = request.get_json(force=True, silent=True) or {}
+        ok, missing = _need(body, ["BRAND", "INCORRECT_TERM", "CORRECTED_TERM", "ADDED_BY"])
+        if not ok:
+            return jsonify({"status": "error", "message": f"Missing required fields: {', '.join(missing)}"}), 400
+ 
+        brand     = _clean(body["BRAND"])
+        incorrect = _clean(body["INCORRECT_TERM"])
+        corrected = _clean(body["CORRECTED_TERM"])
+        added_by  = _clean(body["ADDED_BY"])
+ 
+        exists_sql = f"""
+            SELECT 1
+            FROM {TABLE_FQN}
+            WHERE UPPER(TRIM(BRAND)) = UPPER(TRIM(?))
+              AND UPPER(TRIM(INCORRECT_TERM)) = UPPER(TRIM(?))
+              AND UPPER(TRIM(CORRECTED_TERM)) = UPPER(TRIM(?))
+            LIMIT 1
+        """
+        insert_sql = f"""
+            INSERT INTO {TABLE_FQN} (BRAND, INCORRECT_TERM, CORRECTED_TERM, ADDED_BY, ENTRY_TIME)
+            VALUES (?, ?, ?, ?, current_timestamp())
+        """
+ 
+        with _connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(exists_sql, (brand, incorrect, corrected))
+                if cur.fetchone() is not None:
+                    return jsonify({
+                        "status": "error",
+                        "message": "Record already existing (case-insensitive).",
+                        "conflict_on": {"BRAND": brand, "INCORRECT_TERM": incorrect, "CORRECTED_TERM": corrected}
+                    }), 409
+                cur.execute(insert_sql, (brand, incorrect, corrected, added_by))
+ 
+        return jsonify({
+            "status": "success",
+            "message": "Record inserted.",
+            "data": {"BRAND": brand, "INCORRECT_TERM": incorrect, "CORRECTED_TERM": corrected, "ADDED_BY": added_by}
+        }), 201
+ 
+    except Exception as e:
+        return jsonify({"status": "error", "where": "server", "message": str(e), "traceback": traceback.format_exc()}), 500
+ 
+if __name__ == "__main__":
+    app.run(debug=False, use_reloader=False)
