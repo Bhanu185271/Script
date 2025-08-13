@@ -1,3 +1,15 @@
+
+{"db_connection":"error","message":"No module named 'thrift.transport.THttpClient'","traceback":"Traceback (most recent call last):\n  File \"C:\\Users\\cc588755\\OneDrive - GSK\\GSK\\FFN\\Repo-PharmaDA-R-Fieldforce-Navigator-Deployment\\API\\ApiPackage\\Api\\mwe_config.py\", line 47, in rt_diag\n    df = dc.execute_query(\"SELECT 1 AS ok\")\n  File \"C:\\Users\\cc588755\\OneDrive - GSK\\GSK\\FFN\\Repo-PharmaDA-R-Fieldforce-Navigator-Deployment\\API\\ApiPackage\\Api\\DataConsumption.py\", line 213, in execute_query\n    with create_connection().cursor() as cursor:\n  File \"C:\\Users\\cc588755\\OneDrive - GSK\\GSK\\FFN\\Repo-PharmaDA-R-Fieldforce-Navigator-Deployment\\API\\ApiPackage\\Api\\DataConsumption.py\", line 203, in create_connection\n    return sql.connect(\n  File \"C:\\Users\\cc588755\\OneDrive - GSK\\GSK\\FFN\\Repo-PharmaDA-R-Fieldforce-Navigator-Deployment\\.venv310\\lib\\site-packages\\databricks\\sql\\__init__.py\", line 48, in connect\n    from .client import Connection\n  File \"C:\\Users\\cc588755\\OneDrive - GSK\\GSK\\FFN\\Repo-PharmaDA-R-Fieldforce-Navigator-Deployment\\.venv310\\lib\\site-packages\\databricks\\sql\\client.py\", line 12, in <module>\n    from databricks.sql.thrift_backend import ThriftBackend\n  File \"C:\\Users\\cc588755\\OneDrive - GSK\\GSK\\FFN\\Repo-PharmaDA-R-Fieldforce-Navigator-Deployment\\.venv310\\lib\\site-packages\\databricks\\sql\\thrift_backend.py\", line 12, in <module>\n    import thrift.transport.THttpClient\nModuleNotFoundError: No module named 'thrift.transport.THttpClient'\n"}
+
+
+
+
+
+
+
+
+
+
 """
 Module to define all available routes
 """
