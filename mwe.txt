@@ -1,0 +1,122 @@
+# ===== Route : LLM Medical Words Examples =====
+# Table: hive_metastore.fieldforce_navigator_deployment.llm_medical_words_examples
+# Columns: BRAND, INCORRECT_TERM, CORRECTED_TERM, ADDED_BY, ENTRY_TIME
+ 
+import os
+from typing import Any, Dict, Tuple
+from flask import Flask, request, jsonify
+from databricks import sql
+
+app = Flask(__name__)
+TABLE = "hive_metastore.fieldforce_navigator_deployment.llm_medical_words_examples"
+
+
+def _clean(x: Any) -> str:
+    if x is None:
+        return ""
+    return " ".join(str(x).strip().split())
+
+def _need(body: Dict[str, Any], fields: Tuple[str, ...]) -> Tuple[bool, str]:
+    for f in fields:
+        if f not in body or _clean(body.get(f)) == "":
+            return False, f"Missing or empty field: {f}"
+    return True, ""
+
+def _get_conn_from_env_or_headers():
+    # env 
+    host = os.environ.get("server_hostname", "").strip()
+    path = os.environ.get("adb_sqlwarehouse_path", "").strip()
+    token = os.environ.get("db_token", "").strip()
+
+    # request headers
+    if not host:
+        host = _clean(request.headers.get("server_hostname"))
+    if not path:
+        path = _clean(request.headers.get("adb_sqlwarehouse_path"))
+    if not token:
+        token = _clean(request.headers.get("db_token"))
+
+    if not host or not path or not token:
+        missing = []
+        if not host: missing.append("server_hostname")
+        if not path: missing.append("adb_sqlwarehouse_path")
+        if not token: missing.append("db_token")
+        raise RuntimeError("Missing auth settings: " + ", ".join(missing))
+
+    return sql.connect(server_hostname=host, http_path=path, access_token=token)
+
+# --- routes ---
+@app.get("/flask_up")
+def flask_up():
+    return jsonify({"status": "ok"}), 200
+
+@app.get("/diag")
+def diag():
+    # db ping: env first, then headers
+    try:
+        with _get_conn_from_env_or_headers() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1 AS ok")
+                row = cur.fetchone()
+        return jsonify({"db_connection": "ok", "select1": row}), 200
+    except Exception as e:
+        return jsonify({"db_connection": "error", "message": str(e)}), 500
+
+@app.post("/llm_mwe_table")
+def llm_mwe_table():
+   
+    body = request.get_json(silent=True) or {}
+    body = { (k.upper() if isinstance(k, str) else k): v for k, v in body.items() }
+
+    # allow ADDED_BY from header if not in body
+    if "ADDED_BY" not in body or _clean(body.get("ADDED_BY")) == "":
+        u = _clean(request.headers.get("Username"))
+        if u:
+            body["ADDED_BY"] = u
+
+    ok, msg = _need(body, ("BRAND", "INCORRECT_TERM", "CORRECTED_TERM", "ADDED_BY"))
+    if not ok:
+        return jsonify({"status": "error", "message": msg, "received_keys": list(body.keys())}), 400
+
+    brand = _clean(body["BRAND"])
+    incorrect = _clean(body["INCORRECT_TERM"])
+    corrected = _clean(body["CORRECTED_TERM"])
+    added_by = _clean(body["ADDED_BY"])
+
+    exists_sql = f"""
+        SELECT 1
+        FROM {TABLE}
+        WHERE UPPER(TRIM(BRAND)) = UPPER(TRIM(?))
+          AND UPPER(TRIM(INCORRECT_TERM)) = UPPER(TRIM(?))
+          AND UPPER(TRIM(CORRECTED_TERM)) = UPPER(TRIM(?))
+        LIMIT 1
+    """
+    insert_sql = f"""
+        INSERT INTO {TABLE} (BRAND, INCORRECT_TERM, CORRECTED_TERM, ADDED_BY, ENTRY_TIME)
+        VALUES (?, ?, ?, ?, current_timestamp())
+    """
+
+    try:
+        with _get_conn_from_env_or_headers() as conn:
+            with conn.cursor() as cur:
+                cur.execute(exists_sql, (brand, incorrect, corrected))
+                if cur.fetchone() is not None:
+                    return jsonify({
+                        "status": "error",
+                        "message": "Record already existing (case-insensitive).",
+                        "conflict_on": {"BRAND": brand, "INCORRECT_TERM": incorrect, "CORRECTED_TERM": corrected}
+                    }), 409
+                cur.execute(insert_sql, (brand, incorrect, corrected, added_by))
+
+        return jsonify({
+            "status": "success",
+            "message": "Record inserted.",
+            "data": {"BRAND": brand, "INCORRECT_TERM": incorrect, "CORRECTED_TERM": corrected, "ADDED_BY": added_by}
+        }), 201
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+if __name__ == "__main__":
+    # default Flask 127.0.0.1:5000
+    debug = os.environ.get("APP_DEBUG", "false").lower() == "true"
+    app.run(debug=debug)
