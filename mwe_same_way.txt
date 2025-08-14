@@ -1,0 +1,137 @@
+
+# ===== Route : LLM Medical Words Examples =====
+# Table: hive_metastore.fieldforce_navigator_deployment.llm_medical_words_examples
+# Columns: BRAND, INCORRECT_TERM, CORRECTED_TERM, ADDED_BY, ENTRY_TIME
+
+
+# ===== Helpers for LLM Medical Words Examples (same style as colleague) =====
+def _mwe_clean(s):
+    # small sanitizer: trim + collapse whitespace
+    return " ".join(str(s).strip().split())
+
+def _mwe_sq(s):
+    # escape single quotes for SQL literals
+    return str(s).replace("'", "''")
+
+def _mwe_validate_required(body):
+    required = ["BRAND", "INCORRECT_TERM", "CORRECTED_TERM"]
+    return [k for k in required if k not in body or str(body.get(k, "")).strip() == ""]
+
+def _mwe_exists(brand, incorrect, corrected):
+    # case-insensitive duplicate check on the triplet
+    sql = f"""
+        SELECT 1
+        FROM hive_metastore.fieldforce_navigator_deployment.llm_medical_words_examples
+        WHERE UPPER(TRIM(BRAND)) = UPPER(TRIM('{_mwe_sq(brand)}'))
+          AND UPPER(TRIM(INCORRECT_TERM)) = UPPER(TRIM('{_mwe_sq(incorrect)}'))
+          AND UPPER(TRIM(CORRECTED_TERM)) = UPPER(TRIM('{_mwe_sq(corrected)}'))
+        LIMIT 1
+    """
+    df = dc.execute_query(sql)
+    return df is not None and not df.empty
+
+def _mwe_insert(brand, incorrect, corrected, added_by):
+    sql = f"""
+        INSERT INTO hive_metastore.fieldforce_navigator_deployment.llm_medical_words_examples
+            (BRAND, INCORRECT_TERM, CORRECTED_TERM, ADDED_BY, ENTRY_TIME)
+        VALUES
+            ('{_mwe_sq(brand)}', '{_mwe_sq(incorrect)}', '{_mwe_sq(corrected)}',
+             '{_mwe_sq(added_by)}', CURRENT_TIMESTAMP())
+    """
+    dc.execute_non_query(sql)
+
+
+# ===== GET: LLM Medical Words Examples =====
+# Endpoint: /llm_mwe_table  (GET)
+# Optional filters: brand, incorrect_term, corrected_term; & limit (default 100)
+@app.route('/llm_mwe_table', methods=['GET'])
+def get_llm_medical_word_examples():
+    try:
+        brand = _mwe_clean(request.args.get('brand', ''))
+        incorrect = _mwe_clean(request.args.get('incorrect_term', ''))
+        corrected = _mwe_clean(request.args.get('corrected_term', ''))
+        try:
+            limit = int(request.args.get('limit', '100'))
+        except ValueError:
+            limit = 100
+        limit = max(1, min(limit, 1000))  # guardrail
+
+        where = []
+        if brand:
+            where.append(f"UPPER(TRIM(BRAND)) = UPPER(TRIM('{_mwe_sq(brand)}'))")
+        if incorrect:
+            where.append(f"UPPER(TRIM(INCORRECT_TERM)) = UPPER(TRIM('{_mwe_sq(incorrect)}'))")
+        if corrected:
+            where.append(f"UPPER(TRIM(CORRECTED_TERM)) = UPPER(TRIM('{_mwe_sq(corrected)}'))")
+        where_sql = ('WHERE ' + ' AND '.join(where)) if where else ''
+
+        query = f"""
+            SELECT BRAND, INCORRECT_TERM, CORRECTED_TERM, ADDED_BY, ENTRY_TIME
+            FROM hive_metastore.fieldforce_navigator_deployment.llm_medical_words_examples
+            {where_sql}
+            ORDER BY ENTRY_TIME DESC
+            LIMIT {limit}
+        """
+        df = dc.execute_query(query)
+        rows = [] if df is None else df.to_dict(orient='records')
+        return jsonify({"status": "success", "count": len(rows), "data": rows}), status.HTTP_200_OK
+
+    except Exception as e:
+        logging.error(traceback.format_exc())
+        return jsonify({"error": f"Internal server error: {str(e)}"}), status.HTTP_500_INTERNAL_SERVER_ERROR
+
+
+# ===== POST: LLM Medical Words Examples (same flow as colleague) =====
+# Endpoint: /llm_mwe_table  (POST)
+@app.route('/llm_mwe_table', methods=['POST'])
+def add_llm_medical_word_example():
+    try:
+        body = request.get_json(force=True, silent=True) or {}
+        username = request.headers.get("Username")  # same header convention
+        if not username and not str(body.get("ADDED_BY", "")).strip():
+            return jsonify({"error": "Missing 'Username' header or 'ADDED_BY' in body."}), status.HTTP_400_BAD_REQUEST
+
+        # Prefer ADDED_BY in body; fallback to header
+        added_by = _mwe_clean(body.get("ADDED_BY", "")) or _mwe_clean(username or "")
+
+        # required fields
+        missing = _mwe_validate_required(body)
+        if missing:
+            return jsonify({"error": f"Missing required fields: {', '.join(missing)}"}), status.HTTP_400_BAD_REQUEST
+
+        # normalize inputs
+        brand     = _mwe_clean(body["BRAND"])
+        incorrect = _mwe_clean(body["INCORRECT_TERM"])
+        corrected = _mwe_clean(body["CORRECTED_TERM"])
+
+        # duplicate check
+        if _mwe_exists(brand, incorrect, corrected):
+            return jsonify({
+                "status": "error",
+                "message": "Record already exists (case-insensitive).",
+                "conflict_on": {
+                    "BRAND": brand,
+                    "INCORRECT_TERM": incorrect,
+                    "CORRECTED_TERM": corrected
+                }
+            }), status.HTTP_409_CONFLICT
+
+        # insert
+        _mwe_insert(brand, incorrect, corrected, added_by)
+
+        return jsonify({
+            "status": "success",
+            "message": "Record inserted.",
+            "data": {
+                "BRAND": brand,
+                "INCORRECT_TERM": incorrect,
+                "CORRECTED_TERM": corrected,
+                "ADDED_BY": added_by
+            }
+        }), status.HTTP_201_CREATED
+
+    except Exception as e:
+        logging.error(traceback.format_exc())
+        return jsonify({"error": f"Internal server error: {str(e)}"}), status.HTTP_500_INTERNAL_SERVER_ERROR
+
+
