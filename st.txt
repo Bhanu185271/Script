@@ -1,3 +1,28 @@
+
+MODEL_NAME
+DEPLOYMENT_NAME
+TOKEN_LIMIT
+BRAND
+MARKET
+REGION
+INPUT_TOKEN_LIMIT
+OUTPUT_TOKEN_LIMIT
+TOKEN_RATE_LIMIT
+PROJECT_INPUT_LIMIT
+ADDED_BY
+ENTRY_TIME
+
+
+
+
+
+
+
+
+
+
+
+
 @app.route('/llm_mwe_table', methods=['POST'])
 def add_llm_medical_word_example():
     try:
