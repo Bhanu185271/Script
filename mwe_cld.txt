@@ -1,0 +1,121 @@
+# Medical Words Management Endpoints
+# Add these functions and routes to your existing mwe_route.txt file
+
+def validate_medical_words_required_fields(data):
+    """
+    Validate required fields for medical words entry
+    """
+    required_fields = ["BRAND", "INCORRECT_TERM", "CORRECTED_TERM"]
+    missing_fields = [f for f in required_fields if f not in data or not str(data.get(f, "")).strip()]
+    return missing_fields
+
+def validate_medical_words_uniqueness(brand, incorrect_term, corrected_term):
+    """
+    Check if the medical words entry already exists (case-insensitive)
+    Returns True if unique (safe to insert), False if already exists
+    """
+    try:
+        query = f"""
+            SELECT *
+            FROM hive_metastore.fieldforce_navigator_deployment.llm_medical_words_examples
+            WHERE UPPER(TRIM(BRAND)) = UPPER(TRIM('{brand}'))
+              AND UPPER(TRIM(INCORRECT_TERM)) = UPPER(TRIM('{incorrect_term}'))
+              AND UPPER(TRIM(CORRECTED_TERM)) = UPPER(TRIM('{corrected_term}'))
+        """
+        df = dc.execute_query(query)
+        return len(df) == 0
+    except Exception as e:
+        print(f"Error validating medical words uniqueness: {e}")
+        raise
+
+def insert_medical_words_entry(brand, incorrect_term, corrected_term, username):
+    """
+    Insert a new medical words entry into the table
+    """
+    try:
+        entry_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        insert_query = f"""
+            INSERT INTO hive_metastore.fieldforce_navigator_deployment.llm_medical_words_examples (
+                BRAND, INCORRECT_TERM, CORRECTED_TERM, ADDED_BY, ENTRY_TIME
+            )
+            VALUES (
+                '{brand.replace("'", "''")}',
+                '{incorrect_term.replace("'", "''")}',
+                '{corrected_term.replace("'", "''")}',
+                '{username.replace("'", "''")}',
+                timestamp('{entry_time}')
+            )
+        """
+        dc.execute_non_query(insert_query)
+        print(f"Medical words entry inserted successfully")
+    except Exception as e:
+        print(f"Error inserting medical words entry: {e}")
+        raise
+
+# POST endpoint to add medical words
+@app.route('/add_medical_words', methods=['POST'])
+def add_medical_words():
+    try:
+        data = request.get_json(force=True, silent=True) or {}
+        username = request.headers.get("Username")
+
+        if not username:
+            return jsonify({"error": "Missing 'Username' in headers."}), status.HTTP_400_BAD_REQUEST
+
+        # Validate required fields
+        missing_fields = validate_medical_words_required_fields(data)
+        if missing_fields:
+            return jsonify({"error": f"Missing required fields: {', '.join(missing_fields)}"}), status.HTTP_400_BAD_REQUEST
+
+        # Extract and clean fields
+        brand = str(data["BRAND"]).strip()
+        incorrect_term = str(data["INCORRECT_TERM"]).strip()
+        corrected_term = str(data["CORRECTED_TERM"]).strip()
+
+        # Validate data is not empty after stripping
+        if not brand or not incorrect_term or not corrected_term:
+            return jsonify({"error": "BRAND, INCORRECT_TERM, and CORRECTED_TERM cannot be empty"}), status.HTTP_400_BAD_REQUEST
+
+        # Check if entry already exists (case-insensitive)
+        if not validate_medical_words_uniqueness(brand, incorrect_term, corrected_term):
+            return jsonify({"error": "Data already existing"}), status.HTTP_400_BAD_REQUEST
+
+        # Insert new entry
+        insert_medical_words_entry(brand, incorrect_term, corrected_term, username)
+
+        return jsonify({"message": f"Medical words entry added successfully for brand: {brand}"}), status.HTTP_201_CREATED
+
+    except Exception as e:
+        print(f"ERROR in add_medical_words: {e}")
+        traceback.print_exc()
+        return jsonify({"error": "Internal server error."}), status.HTTP_500_INTERNAL_SERVER_ERROR
+
+# GET endpoint to retrieve all medical words
+@app.route('/get_medical_words', methods=['GET'])
+def get_medical_words():
+    try:
+        query = """
+            SELECT * 
+            FROM hive_metastore.fieldforce_navigator_deployment.llm_medical_words_examples
+            ORDER BY ENTRY_TIME DESC
+        """
+        
+        df = dc.execute_query(query)
+        
+        if df.empty:
+            return jsonify({"message": "No medical words entries found", "data": []}), status.HTTP_200_OK
+        
+        # Convert DataFrame to list of dictionaries for JSON response
+        result = df.to_dict(orient="records")
+        
+        return jsonify({
+            "message": "Medical words entries retrieved successfully", 
+            "count": len(result),
+            "data": result
+        }), status.HTTP_200_OK
+
+    except Exception as e:
+        print(f"ERROR in get_medical_words: {e}")
+        traceback.print_exc()
+        return jsonify({"error": "Internal server error."}), status.HTTP_500_INTERNAL_SERVER_ERROR
