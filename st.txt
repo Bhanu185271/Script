@@ -1,0 +1,63 @@
+@app.route('/llm_mwe_table', methods=['POST'])
+def add_llm_medical_word_example():
+    try:
+        data = request.get_json(force=True, silent=True) or {}
+
+        added_by = str(data.get("ADDED_BY", "")).strip() or str(request.headers.get("Username", "")).strip()
+        if not added_by:
+            return jsonify({"error": "Missing 'ADDED_BY' in body or 'Username' in headers."}), status.HTTP_400_BAD_REQUEST
+        # Required fields
+        required = ["BRAND", "INCORRECT_TERM", "CORRECTED_TERM"]
+        missing = [k for k in required if k not in data or str(data.get(k, "")).strip() == ""]
+        if missing:
+            return jsonify({"error": f"Missing required fields: {', '.join(missing)}"}), status.HTTP_400_BAD_REQUEST
+        # Clean inputs (trim + whitespace)
+        def _clean(x):
+            return " ".join(str(x).strip().split())
+        brand = _clean(data["BRAND"])
+        incorrect = _clean(data["INCORRECT_TERM"])
+        corrected = _clean(data["CORRECTED_TERM"])
+        # duplicate check(BRAND, INCORRECT_TERM, CORRECTED_TERM)
+        exists_sql = f"""
+            SELECT 1
+            FROM hive_metastore.fieldforce_navigator_deployment.llm_medical_words_examples
+            WHERE UPPER(TRIM(BRAND)) = UPPER(TRIM('{brand.replace("'", "''")}'))
+              AND UPPER(TRIM(INCORRECT_TERM)) = UPPER(TRIM('{incorrect.replace("'", "''")}'))
+              AND UPPER(TRIM(CORRECTED_TERM)) = UPPER(TRIM('{corrected.replace("'", "''")}'))
+            LIMIT 1
+        """
+        df = dc.execute_query(exists_sql)  
+        if df is not None and not df.empty:
+            return jsonify({
+                "status": "error",
+                "message": "Record already existing",
+                "conflict_on": {
+                    "BRAND": brand,
+                    "INCORRECT_TERM": incorrect,
+                    "CORRECTED_TERM": corrected
+                }
+            }), status.HTTP_409_CONFLICT
+        # Insert new row (ENTRY_TIME generated using current_timestamp())
+        insert_sql = f"""
+            INSERT INTO hive_metastore.fieldforce_navigator_deployment.llm_medical_words_examples
+                (BRAND, INCORRECT_TERM, CORRECTED_TERM, ADDED_BY, ENTRY_TIME)
+            VALUES
+                ('{brand.replace("'", "''")}',
+                 '{incorrect.replace("'", "''")}',
+                 '{corrected.replace("'", "''")}',
+                 '{added_by.replace("'", "''")}',
+                 CURRENT_TIMESTAMP())
+        """
+        dc.execute_non_query(insert_sql)
+        return jsonify({
+            "status": "success",
+            "message": "Record inserted.",
+            "data": {
+                "BRAND": brand,
+                "INCORRECT_TERM": incorrect,
+                "CORRECTED_TERM": corrected,
+                "ADDED_BY": added_by
+            }
+        }), status.HTTP_201_CREATED
+    except Exception as e:
+        return jsonify({"error": f"Internal server error: {str(e)}"}), status.HTTP_500_INTERNAL_SERVER_ERROR
