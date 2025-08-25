@@ -1,0 +1,546 @@
+# ===================== llm_mdl_config wrapper (GET + POST) with defaults =====================
+
+# ===== FQNs =====
+MWE_TABLE      = "hive_metastore.fieldforce_navigator_deployment.llm_medical_words_examples"
+MDL_LKP_TABLE  = "hive_metastore.fieldforce_navigator_deployment.llm_model_lookup"
+CMPT_TABLE     = "hive_metastore.fieldforce_navigator_deployment.d_ffn_competitor_config"
+INS_TABLE      = "hive_metastore.fieldforce_navigator_deployment.d_ffn_insight_config"
+
+INS_SEQ_DEF_T  = "hive_metastore.fieldforce_navigator_deployment.llm_insight_seq_default"
+INPUT_DEF_T    = "hive_metastore.fieldforce_navigator_deployment.llm_prompt_input_data_config_default"
+
+# ----- tiny helpers -----
+def _clean(s):
+    return " ".join(str(s).strip().split()) if s is not None else ""
+
+def _sq(s):
+    return str(s).replace("'", "''")
+
+def _missing(body, fields):
+    return [k for k in fields if k not in body or str(body.get(k, "")).strip() == ""]
+
+def _int(name, val):
+    try:
+        return int(str(val).strip())
+    except Exception:
+        raise ValueError(f"'{name}' must be an integer")
+
+def _bool(name, val):
+    v = str(val).strip().lower()
+    if v in ("true","1","yes","y","t"):
+        return True
+    if v in ("false","0","no","n","f"):
+        return False
+    raise ValueError(f"'{name}' must be boolean (true/false)")
+
+# ----- duplicate checks (case-insensitive) -----
+def _exists_mwe(brand, incorrect, corrected):
+    sql = f"""
+        SELECT 1 FROM {MWE_TABLE}
+        WHERE UPPER(TRIM(BRAND))=UPPER(TRIM('{_sq(brand)}'))
+          AND UPPER(TRIM(INCORRECT_TERM))=UPPER(TRIM('{_sq(incorrect)}'))
+          AND UPPER(TRIM(CORRECTED_TERM))=UPPER(TRIM('{_sq(corrected)}'))
+        LIMIT 1
+    """
+    df = dc.execute_query(sql)
+    return df is not None and not df.empty
+
+def _exists_mdl(model, deploy, brand, market, region):
+    sql = f"""
+        SELECT 1 FROM {MDL_LKP_TABLE}
+        WHERE UPPER(TRIM(MODEL_NAME))=UPPER(TRIM('{_sq(model)}'))
+          AND UPPER(TRIM(DEPLOYMENT_NAME))=UPPER(TRIM('{_sq(deploy)}'))
+          AND UPPER(TRIM(BRAND))=UPPER(TRIM('{_sq(brand)}'))
+          AND UPPER(TRIM(MARKET))=UPPER(TRIM('{_sq(market)}'))
+          AND UPPER(TRIM(REGION))=UPPER(TRIM('{_sq(region)}'))
+        LIMIT 1
+    """
+    df = dc.execute_query(sql)
+    return df is not None and not df.empty
+
+def _exists_cmpt(market, brand, comp_brand, comp_type):
+    sql = f"""
+        SELECT 1 FROM {CMPT_TABLE}
+        WHERE UPPER(TRIM(MARKET))=UPPER(TRIM('{_sq(market)}'))
+          AND UPPER(TRIM(BRAND))=UPPER(TRIM('{_sq(brand)}'))
+          AND UPPER(TRIM(COMPETITOR_BRANDS))=UPPER(TRIM('{_sq(comp_brand)}'))
+          AND UPPER(TRIM(COMPETITION_TYPE))=UPPER(TRIM('{_sq(comp_type)}'))
+        LIMIT 1
+    """
+    df = dc.execute_query(sql)
+    return df is not None and not df.empty
+
+def _exists_insight(brand, market, insight, typ):
+    sql = f"""
+        SELECT 1 FROM {INS_TABLE}
+        WHERE UPPER(TRIM(BRAND))=UPPER(TRIM('{_sq(brand)}'))
+          AND UPPER(TRIM(MARKET))=UPPER(TRIM('{_sq(market)}'))
+          AND UPPER(TRIM(INSIGHT))=UPPER(TRIM('{_sq(insight)}'))
+          AND UPPER(TRIM(TYPE))=UPPER(TRIM('{_sq(typ)}'))
+        LIMIT 1
+    """
+    df = dc.execute_query(sql)
+    return df is not None and not df.empty
+
+def _exists_ins_seq_def(insight_type, seq, activity_type, prompt_id):
+    sql = f"""
+        SELECT 1 FROM {INS_SEQ_DEF_T}
+        WHERE UPPER(TRIM(INSIGHT_TYPE))=UPPER(TRIM('{_sq(insight_type)}'))
+          AND CAST(SEQ AS INT) = {int(seq)}
+          AND UPPER(TRIM(ACTIVITY_TYPE))=UPPER(TRIM('{_sq(activity_type)}'))
+          AND UPPER(TRIM(PROMPT_ID))=UPPER(TRIM('{_sq(prompt_id)}'))
+        LIMIT 1
+    """
+    df = dc.execute_query(sql)
+    return df is not None and not df.empty
+
+def _exists_input_def(prompt_id, variable):
+    sql = f"""
+        SELECT 1 FROM {INPUT_DEF_T}
+        WHERE UPPER(TRIM(PROMPT_ID))=UPPER(TRIM('{_sq(prompt_id)}'))
+          AND UPPER(TRIM(VARIABLE))=UPPER(TRIM('{_sq(variable)}'))
+        LIMIT 1
+    """
+    df = dc.execute_query(sql)
+    return df is not None and not df.empty
+
+# ----- inserts -----
+def _insert_mwe(brand, incorrect, corrected, added_by):
+    sql = f"""
+        INSERT INTO {MWE_TABLE}
+            (BRAND, INCORRECT_TERM, CORRECTED_TERM, ADDED_BY, ENTRY_TIME)
+        VALUES
+            ('{_sq(brand)}','{_sq(incorrect)}','{_sq(corrected)}','{_sq(added_by)}',CURRENT_TIMESTAMP())
+    """
+    dc.execute_non_query(sql)
+
+def _insert_mdl(model_name, deployment_name, token_limit,
+                brand, market, region,
+                input_token_limit, output_token_limit,
+                token_rate_limit, project_input_limit, added_by):
+    sql = f"""
+        INSERT INTO {MDL_LKP_TABLE}
+            (MODEL_NAME, DEPLOYMENT_NAME, TOKEN_LIMIT,
+             BRAND, MARKET, REGION,
+             INPUT_TOKEN_LIMIT, OUTPUT_TOKEN_LIMIT, TOKEN_RATE_LIMIT, PROJECT_INPUT_LIMIT,
+             ADDED_BY, ENTRY_TIME)
+        VALUES
+            ('{_sq(model_name)}','{_sq(deployment_name)}',{token_limit},
+             '{_sq(brand)}','{_sq(market)}','{_sq(region)}',
+             {input_token_limit},{output_token_limit},{token_rate_limit},{project_input_limit},
+             '{_sq(added_by)}',CURRENT_TIMESTAMP())
+    """
+    dc.execute_non_query(sql)
+
+def _insert_cmpt(market, brand, disease_state, drug_class, comp_brands, comp_type,
+                 molecule, other_names, combination, added_by):
+    other_sql = "NULL" if str(other_names).lower() == "null" else f"'{_sq(other_names)}'"
+    comb_sql  = "NULL" if str(combination).lower() == "null" else f"'{_sq(combination)}'"
+    sql = f"""
+        INSERT INTO {CMPT_TABLE}
+            (MARKET, BRAND, DISEASE_STATE, DRUG_CLASS, COMPETITOR_BRANDS, COMPETITION_TYPE,
+             ADDED_BY, ENTRY_TIME, MOLECULE, OTHER_NAMES, COMBINATION)
+        VALUES
+            ('{_sq(market)}','{_sq(brand)}','{_sq(disease_state)}','{_sq(drug_class)}','{_sq(comp_brands)}','{_sq(comp_type)}',
+             '{_sq(added_by)}',CURRENT_TIMESTAMP(),'{_sq(molecule)}',{other_sql},{comb_sql})
+    """
+    dc.execute_non_query(sql)
+
+def _insert_insight(brand, market, insight, typ, v1, v2, v3, v4, added_by):
+    sql = f"""
+        INSERT INTO {INS_TABLE}
+            (BRAND, MARKET, INSIGHT, TYPE, VALUE_1, VALUE_2, VALUE_3, VALUE_4, ADDED_BY, ENTRY_TIME)
+        VALUES
+            ('{_sq(brand)}','{_sq(market)}','{_sq(insight)}','{_sq(typ)}',
+             '{_sq(v1)}','{_sq(v2)}','{_sq(v3)}','{_sq(v4)}','{_sq(added_by)}',CURRENT_TIMESTAMP())
+    """
+    dc.execute_non_query(sql)
+
+def _insert_ins_seq_def(insight_type, seq, is_active, prompt_id, post_process,
+                        activity_type, process_by_chunk, publish_name, added_by):
+    sql = f"""
+        INSERT INTO {INS_SEQ_DEF_T}
+            (INSIGHT_TYPE, SEQ, IS_ACTIVE, PROMPT_ID, POST_PROCESS,
+             ACTIVITY_TYPE, PROCESS_BY_CHUNK, PUBLISH_INSIGHT_NAME, ENTRY_TIME, ADDED_BY)
+        VALUES
+            ('{_sq(insight_type)}',{int(seq)},{str(is_active).upper()},'{_sq(prompt_id)}',{str(post_process).upper()},
+             '{_sq(activity_type)}',{str(process_by_chunk).upper()},'{_sq(publish_name)}',CURRENT_TIMESTAMP(),'{_sq(added_by)}')
+    """
+    dc.execute_non_query(sql)
+
+def _insert_input_def(prompt_id, variable, input_table_name, input_col_name,
+                      input_filters, to_be_chunked, input_processing, is_active, added_by):
+    # input_filters may be dict or str; store as JSON string
+    if isinstance(input_filters, dict):
+        filters_json = json.dumps(input_filters)
+    else:
+        filters_json = str(input_filters)
+    sql = f"""
+        INSERT INTO {INPUT_DEF_T}
+            (PROMPT_ID, VARIABLE, INPUT_TABLE_NAME, INPUT_COL_NAME, INPUT_FILTERS, TO_BE_CHUNKED,
+             INPUT_PROCESSING, IS_ACTIVE, ENTRY_TIME, ADDED_BY)
+        VALUES
+            ('{_sq(prompt_id)}','{_sq(variable)}','{_sq(input_table_name)}','{_sq(input_col_name)}',
+             '{_sq(filters_json)}',{str(to_be_chunked).upper()},
+             '{_sq(input_processing)}',{str(is_active).upper()},CURRENT_TIMESTAMP(),'{_sq(added_by)}')
+    """
+    dc.execute_non_query(sql)
+
+# ===== GET: sample payloads + 2 post templates (ordered) =====
+@app.route("/llm_mdl_config", methods=["GET"])
+def llm_admin_get():
+    try:
+        samples = {
+            "medical words examples": {
+                "payload": {
+                    "BRAND": "SHINGRIX",
+                    "INCORRECT_TERM": "Chingrix",
+                    "CORRECTED_TERM": "Shingrix",
+                    "ADDED_BY": "abc.x.abc@gsk.com"
+                },
+                "desc": "Medical words mapping: incorrect → corrected."
+            },
+            "llm model lookup": {
+                "payload": {
+                    "MODEL_NAME": "gpt-4o",
+                    "DEPLOYMENT_NAME": "RxEUAIModelUATFFNGPT-4o",
+                    "TOKEN_LIMIT": 2800,
+                    "BRAND": "SHINGRIX",
+                    "MARKET": "VNM",
+                    "REGION": "APNA",
+                    "INPUT_TOKEN_LIMIT": 120000,
+                    "OUTPUT_TOKEN_LIMIT": 4000,
+                    "TOKEN_RATE_LIMIT": 100000,
+                    "PROJECT_INPUT_LIMIT": 15000,
+                    "ADDED_BY": "abc.x.abc@gsk.com"
+                },
+                "desc": "Model/deployment limits and guardrails."
+            },
+            "competitor config": {
+                "payload": {
+                    "MARKET": "THA",
+                    "BRAND": "AREXVY",
+                    "DISEASE_STATE": "RSV vaccine",
+                    "DRUG_CLASS": "Non-adjuvanted",
+                    "COMPETITOR_BRANDS": "Abrysvo",
+                    "COMPETITION_TYPE": "COMPETITOR",
+                    "MOLECULE": "RSVPreF",
+                    "OTHER_NAMES": "null",
+                    "COMBINATION": "null",
+                    "ADDED_BY": "abc.x.abc@gsk.com"
+                },
+                "desc": "Competitor mapping for a market-brand."
+            },
+            "insight config": {
+                "payload": {
+                    "BRAND": "AREXVY",
+                    "MARKET": "THA",
+                    "INSIGHT": "default",
+                    "TYPE": "Type1",
+                    "VALUE_1": "V1",
+                    "VALUE_2": "V2",
+                    "VALUE_3": "V3",
+                    "VALUE_4": "V4",
+                    "ADDED_BY": "abc.x.abc@gsk.com"
+                },
+                "desc": "Insight tuning values per brand-market."
+            },
+            "insight seq default": {
+                "payload": {
+                    "INSIGHT_TYPE": "overall-area-of-interest-insight",
+                    "SEQ": 6,
+                    "IS_ACTIVE": False,
+                    "PROMPT_ID": "170",
+                    "POST_PROCESS": True,
+                    "ACTIVITY_TYPE": "Self",
+                    "PROCESS_BY_CHUNK": False,
+                    "PUBLISH_INSIGHT_NAME": "OVERALL_AREA_OF_INTEREST_INSIGHT",
+                    "ADDED_BY": "abc.x.abc@gsk.com"
+                },
+                "desc": "Default sequence row per insight/prompt/activity."
+            },
+            "input data config default": {
+                "payload": {
+                    "PROMPT_ID": "197",
+                    "VARIABLE": "transcript",
+                    "INPUT_TABLE_NAME": "llm_audio_processed_outputs",
+                    "INPUT_COL_NAME": "output",
+                    "INPUT_FILTERS": {"INSIGHT_TYPE": "speaker-assignment"},
+                    "TO_BE_CHUNKED": True,
+                    "INPUT_PROCESSING": "input_default",
+                    "IS_ACTIVE": True,
+                    "ADDED_BY": "abc.x.abc@gsk.com"
+                },
+                "desc": "Default variable → source table/column/filter mapping."
+            }
+        }
+
+        # unified post templates
+        post_templates = {
+            "template_all_6_tables_LLMDPF_true": {
+                "LLM_DEFAULT_PROMPT_FLAG": True,
+                "ADDED_BY": "abc.x.abc@gsk.com",
+                "BRAND": "SHINGRIX",
+                "MARKET": "VNM",
+                "REGION": "APNA",
+
+                # MWE
+                "INCORRECT_TERM": "Chingrix",
+                "CORRECTED_TERM": "Shingrix",
+
+                # MDL_LKP
+                "MODEL_NAME": "gpt-4o",
+                "DEPLOYMENT_NAME": "RxEUAIModelUATFFNGPT-4o",
+                "TOKEN_LIMIT": 2800,
+                "INPUT_TOKEN_LIMIT": 120000,
+                "OUTPUT_TOKEN_LIMIT": 4000,
+                "TOKEN_RATE_LIMIT": 100000,
+                "PROJECT_INPUT_LIMIT": 15000,
+
+                # CMPT
+                "DISEASE_STATE": "RSV vaccine",
+                "DRUG_CLASS": "Non-adjuvanted",
+                "COMPETITOR_BRANDS": "Abrysvo",
+                "COMPETITION_TYPE": "COMPETITOR",
+                "MOLECULE": "RSVPreF",
+                "OTHER_NAMES": "null",
+                "COMBINATION": "null",
+
+                # INSIGHT
+                "INSIGHT": "default",
+                "TYPE": "Type1",
+                "VALUE_1": "V1",
+                "VALUE_2": "V2",
+                "VALUE_3": "V3",
+                "VALUE_4": "V4",
+
+                # INSIGHT_SEQ_DEFAULT
+                "INSIGHT_TYPE": "overall-area-of-interest-insight",
+                "SEQ": 6,
+                "IS_ACTIVE": False,
+                "PROMPT_ID": "170",
+                "POST_PROCESS": True,
+                "ACTIVITY_TYPE": "Self",
+                "PROCESS_BY_CHUNK": False,
+                "PUBLISH_INSIGHT_NAME": "OVERALL_AREA_OF_INTEREST_INSIGHT",
+
+                # INPUT_DATA_CONFIG_DEFAULT
+                "IDCD_PROMPT_ID": "197",
+                "VARIABLE": "transcript",
+                "INPUT_TABLE_NAME": "llm_audio_processed_outputs",
+                "INPUT_COL_NAME": "output",
+                "INPUT_FILTERS": {"INSIGHT_TYPE": "speaker-assignment"},
+                "TO_BE_CHUNKED": True,
+                "INPUT_PROCESSING": "input_default",
+                "IDCD_IS_ACTIVE": True
+            },
+            "template_only_4_tables_LLMDPF_false": {
+                "LLM_DEFAULT_PROMPT_FLAG": False,
+                "ADDED_BY": "abc.x.abc@gsk.com",
+                "BRAND": "AREXVY",
+                "MARKET": "THA",
+                "REGION": "APNA",
+
+                # MWE
+                "INCORRECT_TERM": "Arexyv",
+                "CORRECTED_TERM": "AREXVY",
+
+                # MDL_LKP
+                "MODEL_NAME": "gpt-4o",
+                "DEPLOYMENT_NAME": "RxEUAIModelUATFFNGPT-4o",
+                "TOKEN_LIMIT": 2800,
+                "INPUT_TOKEN_LIMIT": 120000,
+                "OUTPUT_TOKEN_LIMIT": 4000,
+                "TOKEN_RATE_LIMIT": 100000,
+                "PROJECT_INPUT_LIMIT": 15000,
+
+                # CMPT
+                "DISEASE_STATE": "RSV vaccine",
+                "DRUG_CLASS": "Non-adjuvanted",
+                "COMPETITOR_BRANDS": "Abrysvo",
+                "COMPETITION_TYPE": "COMPETITOR",
+                "MOLECULE": "RSVPreF",
+                "OTHER_NAMES": "null",
+                "COMBINATION": "null",
+
+                # INSIGHT
+                "INSIGHT": "default",
+                "TYPE": "Type1",
+                "VALUE_1": "V1",
+                "VALUE_2": "V2",
+                "VALUE_3": "V3",
+                "VALUE_4": "V4"
+            }
+        }
+
+        return jsonify({"sample_templates": samples, "post_templates": post_templates}), status.HTTP_200_OK
+    except Exception as e:
+        return jsonify({"error": f"Internal server error: {str(e)}"}), status.HTTP_500_INTERNAL_SERVER_ERROR
+
+# ===== POST: one payload → writes to 4 or 6 tables depending on LLM_DEFAULT_PROMPT_FLAG =====
+@app.route("/llm_mdl_config", methods=["POST"])
+def llm_admin_post():
+    try:
+        body = request.get_json(force=True, silent=True) or {}
+        http_user = _clean(request.headers.get("Username", "") or "")
+        added_by = _clean(body.get("ADDED_BY", "")) or http_user
+        if not added_by:
+            return jsonify({"error": "Missing 'ADDED_BY' in body or 'Username' in headers."}), status.HTTP_400_BAD_REQUEST
+
+        # flag required
+        if "LLM_DEFAULT_PROMPT_FLAG" not in body:
+            return jsonify({"error": "Missing required field: LLM_DEFAULT_PROMPT_FLAG"}), status.HTTP_400_BAD_REQUEST
+        default_flag = _bool("LLM_DEFAULT_PROMPT_FLAG", body["LLM_DEFAULT_PROMPT_FLAG"])
+
+        results = []
+
+        # ========= 1) MWE =========
+        if all(k in body for k in ("BRAND","INCORRECT_TERM","CORRECTED_TERM")):
+            brand     = _clean(body["BRAND"])
+            incorrect = _clean(body["INCORRECT_TERM"])
+            corrected = _clean(body["CORRECTED_TERM"])
+
+            if _exists_mwe(brand, incorrect, corrected):
+                return jsonify({"status":"error","message":"Record already exists.",
+                                "conflict_on":{"BRAND":brand,"INCORRECT_TERM":incorrect,"CORRECTED_TERM":corrected}}), status.HTTP_409_CONFLICT
+            _insert_mwe(brand, incorrect, corrected, added_by)
+            results.append({"entity":"MWE","status":"inserted"})
+
+        # ========= 2) MDL_LKP =========
+        if any(k in body for k in ("MODEL_NAME","DEPLOYMENT_NAME","TOKEN_LIMIT","INPUT_TOKEN_LIMIT","OUTPUT_TOKEN_LIMIT","TOKEN_RATE_LIMIT","PROJECT_INPUT_LIMIT")):
+            miss = _missing(body, [
+                "MODEL_NAME","DEPLOYMENT_NAME","TOKEN_LIMIT","BRAND","MARKET","REGION",
+                "INPUT_TOKEN_LIMIT","OUTPUT_TOKEN_LIMIT","TOKEN_RATE_LIMIT","PROJECT_INPUT_LIMIT"
+            ])
+            if miss:
+                return jsonify({"error": f"Missing required fields: {', '.join(miss)}"}), status.HTTP_400_BAD_REQUEST
+
+            model_name      = _clean(body["MODEL_NAME"])
+            deployment_name = _clean(body["DEPLOYMENT_NAME"])
+            brand           = _clean(body["BRAND"])
+            market          = _clean(body["MARKET"])
+            region          = _clean(body["REGION"])
+
+            token_limit         = _int("TOKEN_LIMIT", body["TOKEN_LIMIT"])
+            input_token_limit   = _int("INPUT_TOKEN_LIMIT", body["INPUT_TOKEN_LIMIT"])
+            output_token_limit  = _int("OUTPUT_TOKEN_LIMIT", body["OUTPUT_TOKEN_LIMIT"])
+            token_rate_limit    = _int("TOKEN_RATE_LIMIT", body["TOKEN_RATE_LIMIT"])
+            project_input_limit = _int("PROJECT_INPUT_LIMIT", body["PROJECT_INPUT_LIMIT"])
+
+            if _exists_mdl(model_name, deployment_name, brand, market, region):
+                return jsonify({"status":"error","message":"Record already exists.",
+                                "conflict_on":{"MODEL_NAME":model_name,"DEPLOYMENT_NAME":deployment_name,
+                                               "BRAND":brand,"MARKET":market,"REGION":region}}), status.HTTP_409_CONFLICT
+
+            _insert_mdl(model_name, deployment_name, token_limit,
+                        brand, market, region,
+                        input_token_limit, output_token_limit,
+                        token_rate_limit, project_input_limit, added_by)
+            results.append({"entity":"MDL_LKP","status":"inserted"})
+
+        # ========= 3) CMPT =========
+        if any(k in body for k in ("COMPETITOR_BRANDS","COMPETITION_TYPE","DISEASE_STATE","DRUG_CLASS","MOLECULE","OTHER_NAMES","COMBINATION","COMPINATION")):
+            miss = _missing(body, ["MARKET","BRAND","COMPETITOR_BRANDS","COMPETITION_TYPE"])
+            if miss:
+                return jsonify({"error": f"Missing required fields: {', '.join(miss)}"}), status.HTTP_400_BAD_REQUEST
+
+            market      = _clean(body["MARKET"])
+            brand       = _clean(body["BRAND"])
+            disease     = _clean(body.get("DISEASE_STATE",""))
+            drug_class  = _clean(body.get("DRUG_CLASS",""))
+            comp_brand  = _clean(body["COMPETITOR_BRANDS"])
+            comp_type   = _clean(body["COMPETITION_TYPE"])
+            molecule    = _clean(body.get("MOLECULE",""))
+            other_names = _clean(body.get("OTHER_NAMES","null"))
+            combination = _clean(body.get("COMBINATION", body.get("COMPINATION","null")))
+
+            if _exists_cmpt(market, brand, comp_brand, comp_type):
+                return jsonify({"status":"error","message":"Record already exists.",
+                                "conflict_on":{"MARKET":market,"BRAND":brand,"COMPETITOR_BRANDS":comp_brand,"COMPETITION_TYPE":comp_type}}), status.HTTP_409_CONFLICT
+
+            _insert_cmpt(market, brand, disease, drug_class, comp_brand, comp_type,
+                         molecule, other_names, combination, added_by)
+            results.append({"entity":"CMPT_CFG","status":"inserted"})
+
+        # ========= 4) INSIGHT =========
+        if any(k in body for k in ("INSIGHT","TYPE","VALUE_1","VALUE_2","VALUE_3","VALUE_4")):
+            miss = _missing(body, ["BRAND","MARKET","INSIGHT","TYPE"])
+            if miss:
+                return jsonify({"error": f"Missing required fields: {', '.join(miss)}"}), status.HTTP_400_BAD_REQUEST
+
+            brand   = _clean(body["BRAND"])
+            market  = _clean(body["MARKET"])
+            insight = _clean(body["INSIGHT"])
+            typ     = _clean(body["TYPE"])
+            v1 = _clean(body.get("VALUE_1",""))
+            v2 = _clean(body.get("VALUE_2",""))
+            v3 = _clean(body.get("VALUE_3",""))
+            v4 = _clean(body.get("VALUE_4",""))
+
+            if _exists_insight(brand, market, insight, typ):
+                return jsonify({"status":"error","message":"Record already exists.",
+                                "conflict_on":{"BRAND":brand,"MARKET":market,"INSIGHT":insight,"TYPE":typ}}), status.HTTP_409_CONFLICT
+
+            _insert_insight(brand, market, insight, typ, v1, v2, v3, v4, added_by)
+            results.append({"entity":"INSIGHT_CFG","status":"inserted"})
+
+        # ========= Defaults (only if flag true) =========
+        if default_flag:
+            # 5) INSIGHT_SEQ_DEFAULT
+            if any(k in body for k in ("INSIGHT_TYPE","SEQ","PROMPT_ID","ACTIVITY_TYPE")):
+                miss = _missing(body, ["INSIGHT_TYPE","SEQ","PROMPT_ID","ACTIVITY_TYPE","IS_ACTIVE","POST_PROCESS","PROCESS_BY_CHUNK","PUBLISH_INSIGHT_NAME"])
+                if miss:
+                    return jsonify({"error": f"Missing required fields for INSIGHT_SEQ_DEFAULT: {', '.join(miss)}"}), status.HTTP_400_BAD_REQUEST
+
+                insight_type   = _clean(body["INSIGHT_TYPE"])
+                seq            = _int("SEQ", body["SEQ"])
+                prompt_id      = _clean(body["PROMPT_ID"])
+                activity_type  = _clean(body["ACTIVITY_TYPE"])
+                is_active      = _bool("IS_ACTIVE", body["IS_ACTIVE"])
+                post_process   = _bool("POST_PROCESS", body["POST_PROCESS"])
+                process_chunk  = _bool("PROCESS_BY_CHUNK", body["PROCESS_BY_CHUNK"])
+                publish_name   = _clean(body["PUBLISH_INSIGHT_NAME"])
+
+                if _exists_ins_seq_def(insight_type, seq, activity_type, prompt_id):
+                    return jsonify({"status":"error","message":"Record already exists (default seq).",
+                                    "conflict_on":{"INSIGHT_TYPE":insight_type,"SEQ":seq,"PROMPT_ID":prompt_id,"ACTIVITY_TYPE":activity_type}}), status.HTTP_409_CONFLICT
+
+                _insert_ins_seq_def(insight_type, seq, is_active, prompt_id, post_process,
+                                    activity_type, process_chunk, publish_name, added_by)
+                results.append({"entity":"INSIGHT_SEQ_DEFAULT","status":"inserted"})
+
+            # 6) INPUT_DATA_CONFIG_DEFAULT
+            if any(k in body for k in ("IDCD_PROMPT_ID","VARIABLE","INPUT_TABLE_NAME","INPUT_COL_NAME","INPUT_FILTERS","TO_BE_CHUNKED","INPUT_PROCESSING","IDCD_IS_ACTIVE")):
+                miss = _missing(body, ["IDCD_PROMPT_ID","VARIABLE","INPUT_TABLE_NAME","INPUT_COL_NAME","INPUT_FILTERS","TO_BE_CHUNKED","INPUT_PROCESSING","IDCD_IS_ACTIVE"])
+                if miss:
+                    return jsonify({"error": f"Missing required fields for INPUT_DATA_CONFIG_DEFAULT: {', '.join(miss)}"}), status.HTTP_400_BAD_REQUEST
+
+                idcd_prompt_id = _clean(body["IDCD_PROMPT_ID"])
+                variable       = _clean(body["VARIABLE"])
+                input_tbl      = _clean(body["INPUT_TABLE_NAME"])
+                input_col      = _clean(body["INPUT_COL_NAME"])
+                filters        = body["INPUT_FILTERS"]
+                to_chunk       = _bool("TO_BE_CHUNKED", body["TO_BE_CHUNKED"])
+                in_processing  = _clean(body["INPUT_PROCESSING"])
+                idcd_active    = _bool("IDCD_IS_ACTIVE", body["IDCD_IS_ACTIVE"])
+
+                if _exists_input_def(idcd_prompt_id, variable):
+                    return jsonify({"status":"error","message":"Record already exists (default input config).",
+                                    "conflict_on":{"PROMPT_ID":idcd_prompt_id,"VARIABLE":variable}}), status.HTTP_409_CONFLICT
+
+                _insert_input_def(idcd_prompt_id, variable, input_tbl, input_col,
+                                  filters, to_chunk, in_processing, idcd_active, added_by)
+                results.append({"entity":"INPUT_DATA_CONFIG_DEFAULT","status":"inserted"})
+
+        if not results:
+            return jsonify({"error":"No recognizable fields to insert. Use GET /llm_mdl_config → post_templates and fill values."}), status.HTTP_400_BAD_REQUEST
+
+        return jsonify({"status":"success","results":results}), status.HTTP_201_CREATED
+
+    except ValueError as ve:
+        return jsonify({"error": str(ve)}), status.HTTP_400_BAD_REQUEST
+    except Exception as e:
+        logging.error(traceback.format_exc())
+        return jsonify({"error": f"Internal server error: {str(e)}"}), status.HTTP_500_INTERNAL_SERVER_ERROR
+
+# =================== end llm_mdl_config wrapper ===================
