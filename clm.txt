@@ -57,3 +57,36 @@ ADDED_BY
 ENTRY_TIME
 
 
+hive_metastore.fieldforce_navigator_deployment.llm_insight_seq_default
+
+INSIGHT_TYPE : overall-area-of-interest-insight
+SEQ  : 6
+IS_ACTIVE : FALSE
+PROMPT_ID : 170
+POST_PROCESS : TRUE
+ACTIVITY_TYPE : Self
+PROCESS_BY_CHUNK : FALSE
+PUBLISH_INSIGHT_NAME : OVERALL_AREA_OF_INTEREST_INSIGHT
+ENTRY_TIME : current_timestamp()	
+ADDED_BY	: abc.x.abc@gsk.com
+
+
+
+
+
+hive_metastore.fieldforce_navigator_deployment.llm_prompt_input_data_config_default
+
+PROMPT_ID : 197
+VARIABLE : transcript
+INPUT_TABLE_NAME : llm_audio_processed_outputs
+INPUT_COL_NAME : output
+INPUT_FILTERS : {"INSIGHT_TYPE": "speaker-assignment"}
+TO_BE_CHUNKED : TRUE
+INPUT_PROCESSING : input_default
+IS_ACTIVE : TRUE
+ENTRY_TIME : current_timestamp()	
+ADDED_BY	: abc.x.abc@gsk.com
+
+
+
+
