@@ -26,7 +26,7 @@ ADDED_BY	: abc.x.abc@gsk.com
 ENTRY_TIME : current_timestamp()
 
 
-
+hive_metastore.fieldforce_navigator_deployment.d_ffn_competitor_config
 
 MARKET : THA	
 BRAND	: AREXVY
@@ -39,5 +39,21 @@ ENTRY_TIME : current_timestamp()
 MOLECULE	: RSVPreF
 OTHER_NAMES	: null
 COMBINATION : null
+
+
+
+
+hive_metastore.fieldforce_navigator_deployment.d_ffn_insight_config
+
+BRAND
+MARKET
+INSIGHT
+TYPE
+VALUE_1
+VALUE_2
+VALUE_3
+VALUE_4
+ADDED_BY
+ENTRY_TIME
 
 
