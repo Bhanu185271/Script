@@ -1,3 +1,118 @@
+from datetime import datetime
+import logging.handlers
+import re
+import logging
+from flask import request
+from Api import app
+from Api import Routes
+from Api import ErrorHandler
+import threading
+import asyncio
+import os
+import pandas as pd
+
+async def abar(a):
+    print(a)
+
+print(f"In flask global level: {threading.current_thread().name}")
+loop = asyncio.get_event_loop()
+
+# setting configuration for logging
+logging.basicConfig(filename='event.log', level=logging.DEBUG)
+LOGGER = logging.getLogger(__name__)
+LOGGER.setLevel(logging.DEBUG)
+
+# #to be absent from final code
+# os.environ['server_hostname'] = "adb-8407487660673223.3.azuredatabricks.net"
+# os.environ['http_path'] = "/sql/1.0/endpoints/6edd9c9dd2dc3543"
+
+def filter_import_messages(record):
+    """
+    This function checks whether the log message starts with
+    '\nusage_log' or not.
+    """
+    if record.msg.startswith('\nusage_log'):
+        return False
+    return True
+
+
+for handler in logging.root.handlers:
+    handler.addFilter(filter_import_messages)
+
+logger_usage = logging.getLogger('usage')
+file_handler1 = logging.FileHandler('usage.log')
+logger_usage.addHandler(file_handler1)
+
+
+# run before every request
+@app.before_request
+def log():
+    """
+    generate a custom log message and
+    logs it on the current logger at INFO level
+    """
+
+    path = str(request.path)
+    project = re.findall(r"\w+", path)
+
+    try:
+        project = project[0]
+    except Exception:
+        project = 'Home Route'
+
+    log_text = '\nusage_log\n------------------------\n'
+    log_text = log_text + 'project: '+project
+    log_text = log_text + '\nclient_Ip: ' + str(request.remote_addr)
+    log_text = log_text + '\nrequest_time: ' + str(datetime.now())
+    log_text = log_text + '\narguments: ' + str(dict(request.args))
+    log_text = log_text + '\nendpoint: ' + str(request.base_url)
+    log_text = log_text + '\nuseragent: ' + str(request.headers.get('User-Agent') + '\n')
+    log_text = log_text + '\nrequest_headers:' + str(request.headers)
+    logger_usage.info(log_text)
+
+
+if __name__=="__main__":
+    port = int(os.environ.get('PORT', 5000))
+    app.run(debug=True, host='0.0.0.0', port=port)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 # ===== FQNs =====
 MWE_TABLE     = "hive_metastore.fieldforce_navigator_deployment.llm_medical_words_examples"
 MDL_LKP_TABLE = "hive_metastore.fieldforce_navigator_deployment.llm_model_lookup"
