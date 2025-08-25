@@ -1,3 +1,162 @@
+@app.route("/llm_mdl_config", methods=["POST"])
+def llm_admin_post():
+    try:
+        body = request.get_json(force=True, silent=True) or {}
+        results = []
+        http_user = _clean(request.headers.get("Username", "") or "")
+
+        # --- MWE block ---
+        if isinstance(body.get("MWE"), dict):
+            b = body["MWE"]
+            added_by = _clean(b.get("ADDED_BY", "")) or http_user
+            if not added_by:
+                return jsonify({"error": "Missing 'ADDED_BY' in MWE or 'Username' header."}), status.HTTP_400_BAD_REQUEST
+
+            req = ["BRAND","INCORRECT_TERM","CORRECTED_TERM"]
+            miss = _missing(b, req)
+            if miss:
+                return jsonify({"error": f"MWE: Missing fields: {', '.join(miss)}"}), status.HTTP_400_BAD_REQUEST
+
+            brand = _clean(b["BRAND"])
+            incorrect = _clean(b["INCORRECT_TERM"])
+            corrected = _clean(b["CORRECTED_TERM"])
+
+            if _exists_mwe(brand, incorrect, corrected):
+                return jsonify({"status":"error","entity":"MWE","message":"Record already exists.",
+                                "conflict_on":{"BRAND":brand,"INCORRECT_TERM":incorrect,"CORRECTED_TERM":corrected}}), status.HTTP_409_CONFLICT
+
+            _insert_mwe(brand, incorrect, corrected, added_by)
+            results.append({"entity":"MWE","status":"inserted","data":{"BRAND":brand,"INCORRECT_TERM":incorrect,
+                                                                       "CORRECTED_TERM":corrected,"ADDED_BY":added_by}})
+
+        # --- MDL_LKP block ---
+        if isinstance(body.get("MDL_LKP"), dict):
+            b = body["MDL_LKP"]
+            added_by = _clean(b.get("ADDED_BY", "")) or http_user
+            if not added_by:
+                return jsonify({"error": "Missing 'ADDED_BY' in MDL_LKP or 'Username' header."}), status.HTTP_400_BAD_REQUEST
+
+            req = ["MODEL_NAME","DEPLOYMENT_NAME","TOKEN_LIMIT","BRAND","MARKET","REGION",
+                   "INPUT_TOKEN_LIMIT","OUTPUT_TOKEN_LIMIT","TOKEN_RATE_LIMIT","PROJECT_INPUT_LIMIT"]
+            miss = _missing(b, req)
+            if miss:
+                return jsonify({"error": f"MDL_LKP: Missing fields: {', '.join(miss)}"}), status.HTTP_400_BAD_REQUEST
+
+            model_name      = _clean(b["MODEL_NAME"])
+            deployment_name = _clean(b["DEPLOYMENT_NAME"])
+            brand           = _clean(b["BRAND"])
+            market          = _clean(b["MARKET"])
+            region          = _clean(b["REGION"])
+
+            token_limit         = _int("TOKEN_LIMIT", b["TOKEN_LIMIT"])
+            input_token_limit   = _int("INPUT_TOKEN_LIMIT", b["INPUT_TOKEN_LIMIT"])
+            output_token_limit  = _int("OUTPUT_TOKEN_LIMIT", b["OUTPUT_TOKEN_LIMIT"])
+            token_rate_limit    = _int("TOKEN_RATE_LIMIT", b["TOKEN_RATE_LIMIT"])
+            project_input_limit = _int("PROJECT_INPUT_LIMIT", b["PROJECT_INPUT_LIMIT"])
+
+            if _exists_mdl(model_name, deployment_name, brand, market, region):
+                return jsonify({"status":"error","entity":"MDL_LKP","message":"Record already exists.",
+                                "conflict_on":{"MODEL_NAME":model_name,"DEPLOYMENT_NAME":deployment_name,
+                                               "BRAND":brand,"MARKET":market,"REGION":region}}), status.HTTP_409_CONFLICT
+
+            _insert_mdl(model_name, deployment_name, token_limit, brand, market, region,
+                        input_token_limit, output_token_limit, token_rate_limit, project_input_limit, added_by)
+
+            results.append({"entity":"MDL_LKP","status":"inserted","data":b})
+
+        # --- CMPT block ---
+        if isinstance(body.get("CMPT"), dict):
+            b = body["CMPT"]
+            added_by = _clean(b.get("ADDED_BY", "")) or http_user
+            if not added_by:
+                return jsonify({"error": "Missing 'ADDED_BY' in CMPT or 'Username' header."}), status.HTTP_400_BAD_REQUEST
+
+            req = ["MARKET","BRAND","COMPETITOR_BRANDS","COMPETITION_TYPE"]
+            miss = _missing(b, req)
+            if miss:
+                return jsonify({"error": f"CMPT: Missing fields: {', '.join(miss)}"}), status.HTTP_400_BAD_REQUEST
+
+            market      = _clean(b["MARKET"])
+            brand       = _clean(b["BRAND"])
+            disease     = _clean(b.get("DISEASE_STATE",""))
+            drug_class  = _clean(b.get("DRUG_CLASS",""))
+            comp_brand  = _clean(b["COMPETITOR_BRANDS"])
+            comp_type   = _clean(b["COMPETITION_TYPE"])
+            molecule    = _clean(b.get("MOLECULE",""))
+            other_names = _clean(b.get("OTHER_NAMES","null"))
+            combination = _clean(b.get("COMBINATION", b.get("COMPINATION","null")))
+
+            if _exists_cmpt(market, brand, comp_brand, comp_type):
+                return jsonify({"status":"error","entity":"CMPT","message":"Record already exists.",
+                                "conflict_on":{"MARKET":market,"BRAND":brand,"COMPETITOR_BRANDS":comp_brand,"COMPETITION_TYPE":comp_type}}), status.HTTP_409_CONFLICT
+
+            _insert_cmpt(market, brand, disease, drug_class, comp_brand, comp_type,
+                         molecule, other_names, combination, added_by)
+
+            results.append({"entity":"CMPT","status":"inserted","data":b})
+
+        # --- INSIGHT block ---
+        if isinstance(body.get("INSIGHT"), dict):
+            b = body["INSIGHT"]
+            added_by = _clean(b.get("ADDED_BY", "")) or http_user
+            if not added_by:
+                return jsonify({"error": "Missing 'ADDED_BY' in INSIGHT or 'Username' header."}), status.HTTP_400_BAD_REQUEST
+
+            req = ["BRAND","MARKET","INSIGHT","TYPE"]
+            miss = _missing(b, req)
+            if miss:
+                return jsonify({"error": f"INSIGHT: Missing fields: {', '.join(miss)}"}), status.HTTP_400_BAD_REQUEST
+
+            brand   = _clean(b["BRAND"])
+            market  = _clean(b["MARKET"])
+            insight = _clean(b["INSIGHT"])
+            typ     = _clean(b["TYPE"])
+            v1 = _clean(b.get("VALUE_1",""))
+            v2 = _clean(b.get("VALUE_2",""))
+            v3 = _clean(b.get("VALUE_3",""))
+            v4 = _clean(b.get("VALUE_4",""))
+
+            if _exists_insight(brand, market, insight, typ):
+                return jsonify({"status":"error","entity":"INSIGHT","message":"Record already exists.",
+                                "conflict_on":{"BRAND":brand,"MARKET":market,"INSIGHT":insight,"TYPE":typ}}), status.HTTP_409_CONFLICT
+
+            _insert_insight(brand, market, insight, typ, v1, v2, v3, v4, added_by)
+
+            results.append({"entity":"INSIGHT","status":"inserted","data":b})
+
+        if not results:
+            return jsonify({"error":"No recognizable section found. Include one of: 'MWE', 'MDL_LKP', 'CMPT', 'INSIGHT'."}), status.HTTP_400_BAD_REQUEST
+
+        return jsonify({"status":"success","results":results}), status.HTTP_201_CREATED
+
+    except ValueError as ve:
+        return jsonify({"error": str(ve)}), status.HTTP_400_BAD_REQUEST
+    except Exception as e:
+        logging.error(traceback.format_exc())
+        return jsonify({"error": f"Internal server error: {str(e)}"}), status.HTTP_500_INTERNAL_SERVER_ERROR
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 # ===== FQNs =====
 MWE_TABLE     = "hive_metastore.fieldforce_navigator_deployment.llm_medical_words_examples"
