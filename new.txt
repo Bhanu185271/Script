@@ -1,3 +1,217 @@
+# Competitor Config: GET  + POST 
+
+COMPETITOR_TBL = "hive_metastore.fieldforce_navigator_deployment.d_ffn_competitor_config"
+
+def _exists_competitor(market, brand, comp_brand, comp_type):
+    sql = f"""
+        SELECT * FROM {COMPETITOR_TBL}
+        WHERE UPPER(TRIM(MARKET)) = UPPER(TRIM('{_sq(market)}'))
+          AND UPPER(TRIM(BRAND))  = UPPER(TRIM('{_sq(brand)}'))
+          AND UPPER(TRIM(COMPETITOR_BRANDS)) = UPPER(TRIM('{_sq(comp_brand)}'))
+          AND UPPER(TRIM(COMPETITION_TYPE))  = UPPER(TRIM('{_sq(comp_type)}'))
+        LIMIT 1
+    """
+    df = dc.execute_query(sql)
+    return df is not None and not df.empty
+
+def _insert_competitor(market, brand, disease_state, drug_class, comp_brands,
+                       comp_type, molecule, other_names, combination, added_by):
+    
+    other_sql = "NULL" if str(other_names).lower() == "null" else f"'{_sq(other_names)}'"
+    comb_sql  = "NULL" if str(combination).lower() == "null" else f"'{_sq(combination)}'"
+    sql = f"""
+        INSERT INTO {COMPETITOR_TBL}
+            (MARKET, BRAND, DISEASE_STATE, DRUG_CLASS, COMPETITOR_BRANDS, COMPETITION_TYPE,
+             ADDED_BY, ENTRY_TIME, MOLECULE, OTHER_NAMES, COMBINATION)
+        VALUES
+            ('{_sq(market)}','{_sq(brand)}','{_sq(disease_state)}','{_sq(drug_class)}','{_sq(comp_brands)}','{_sq(comp_type)}',
+             '{_sq(added_by)}', CURRENT_TIMESTAMP(), '{_sq(molecule)}', {other_sql}, {comb_sql})
+    """
+    dc.execute_non_query(sql)
+
+@app.route("/competitor_config", methods=["GET"])
+def competitor_config_get():
+    """
+    Returns: sample json 
+    """
+    try:
+        sample_json = {
+            "MARKET": {
+                "Example Values": ["GBR", "THA", "ITA", "PRT"],
+                "Description": "v",
+                "Parameter_type": "Mandatory"
+            },
+            "BRAND": {
+                "Example Values": ["SHINGRIX","AREXVY","BLENREP"],
+                "Description": "Brand name.",
+                "Parameter_type": "Mandatory"
+            },
+            "DISEASE_STATE": {
+                "Example Values": ["RSV vaccine", "Shingles"],
+                "Description": "Disease area",
+                "Parameter_type": "Mandatory"
+            },
+            "DRUG_CLASS": {
+                "Example Values": ["Non-adjuvanted", "Adjuvanted"],
+                "Description": "High-level category",
+                "Parameter_type": "Mandatory"
+            },
+            "COMPETITOR_BRANDS": {
+                "Example Values": ["Abrysvo", "Generic-X"],
+                "Description": "Competitor Brand",
+                "Parameter_type": "Mandatory"
+            },
+            "COMPETITION_TYPE": {
+                "Example Values": ["COMPETITOR"],
+                "Description": "Type of relation COMPETITOR",
+                "Parameter_type": "Mandatory"
+            },
+            "MOLECULE": {
+                "Example Values": ["RSVPreF"],
+                "Description": "molecule (if known).",
+                "Parameter_type": "Optional"
+            },
+            "OTHER_NAMES": {
+                "Example Values": ["null", "RSVPreF3", "Brand alias"],
+                "Description": "v1",
+                "Parameter_type": "Optional"
+            },
+            "COMBINATION": {
+                "Example Values": ["null", "Compound-A + Compound-B"],
+                "Description": "v1",
+                "Parameter_type": "Optional"
+            },
+            "ADDED_BY": {
+                "Example Values": ["abc.x.abc@gsk.com"],
+                "Description": "Your email; can also be passed via 'Username' header.",
+                "Parameter_type": "Mandatory"
+            }
+        }
+
+        post_request_template = {
+            "MARKET": "THA",
+            "BRAND": "AREXVY",
+            "DISEASE_STATE": "RSV vaccine",
+            "DRUG_CLASS": "Non-adjuvanted",
+            "COMPETITOR_BRANDS": "Abrysvo",
+            "COMPETITION_TYPE": "COMPETITOR",
+            "MOLECULE": "RSVPreF",       
+            "OTHER_NAMES": "null",        
+            "COMBINATION": "null",       
+            "ADDED_BY": "abc.x.abc@gsk.com"
+        }
+
+        payload = {
+            "sample_json": sample_json,
+            "post_request_template": post_request_template,
+            "desc": "Copy the template, change values as needed, and POST to /competitor_config."
+        }
+
+        return Response(json.dumps(payload, indent=2), mimetype="application/json"), 200
+    except Exception as e:
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+@app.route("/competitor_config", methods=["POST"])
+def competitor_config_post():
+    """
+    Inserts one competitor mapping row after a duplicate check on:
+    (MARKET, BRAND, COMPETITOR_BRANDS, COMPETITION_TYPE).
+    """
+    try:
+        body = request.get_json(force=True, silent=True) or {}
+
+        # ADDED_BY Username
+        added_by = _clean(body.get("ADDED_BY", "")) or _clean(request.headers.get("Username", "") or "")
+        if not added_by:
+            return jsonify({"error": "Missing 'ADDED_BY' in body or 'Username' in headers."}), 400
+
+        # required minimal fields
+        required = ["MARKET", "BRAND", "DISEASE_STATE", "DRUG_CLASS",
+                    "COMPETITOR_BRANDS", "COMPETITION_TYPE"]
+        missing = [k for k in required if k not in body or str(body.get(k, "")).strip() == ""]
+        if missing:
+            return jsonify({"error": f"Missing required fields: {', '.join(missing)}"}), 400
+
+        # clean inputs
+        market     = _clean(body["MARKET"])
+        brand      = _clean(body["BRAND"])
+        disease    = _clean(body["DISEASE_STATE"])
+        drug_class = _clean(body["DRUG_CLASS"])
+        comp_brand = _clean(body["COMPETITOR_BRANDS"])
+        comp_type  = _clean(body["COMPETITION_TYPE"])
+        molecule   = _clean(body.get("MOLECULE", ""))
+        other_nm   = _clean(body.get("OTHER_NAMES", "null"))
+        combo      = _clean(body.get("COMBINATION", "null"))
+
+        # duplicate guard
+        if _exists_competitor(market, brand, comp_brand, comp_type):
+            return jsonify({
+                "status": "error",
+                "message": "Record already exists.",
+                "conflict_on": {
+                    "MARKET": market,
+                    "BRAND": brand,
+                    "COMPETITOR_BRANDS": comp_brand,
+                    "COMPETITION_TYPE": comp_type
+                }
+            }), 409
+
+        # insert
+        _insert_competitor(market, brand, disease, drug_class, comp_brand,
+                           comp_type, molecule, other_nm, combo, added_by)
+
+        # Response
+        response = {
+            "status": "success",
+            "message": "Inserted",
+            "data": {
+                "MARKET": market,
+                "BRAND": brand,
+                "DISEASE_STATE": disease,
+                "DRUG_CLASS": drug_class,
+                "COMPETITOR_BRANDS": comp_brand,
+                "COMPETITION_TYPE": comp_type,
+                "MOLECULE": molecule,
+                "OTHER_NAMES": other_nm,
+                "COMBINATION": combo,
+                "ADDED_BY": added_by
+            }
+        }
+        return Response(json.dumps(response, indent=2), mimetype="application/json"), 201
+
+    except Exception as e:
+        logging.error(traceback.format_exc())
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+------------------------------------------------------
+
+
+
+
+
+
+
+
+
+
+
+
+
 TABLE_FQN = "hive_metastore.fieldforce_navigator_deployment.llm_model_lookup"
  
 def _mdl_clean(s):
