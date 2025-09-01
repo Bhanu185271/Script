@@ -1,3 +1,38 @@
+
+
+        SELECT *
+        FROM hive_metastore.fieldforce_navigator_deployment.llm_medical_words_examples
+        WHERE UPPER(TRIM(BRAND)) = UPPER(TRIM('SHINGRIX'))
+          AND UPPER(TRIM(INCORRECT_TERM)) = UPPER(TRIM('Chingrix-test1sep'))
+          AND UPPER(TRIM(CORRECTED_TERM)) = UPPER(TRIM('Shingrix-test1sep'))
+        LIMIT 1
+
+
+Executing query:
+
+        WITH incoming(brand, incorrect_term, corrected_term) AS (
+            SELECT * FROM VALUES ('SHINGRIX','Chingrix','Shingrix')
+        )
+        SELECT i.brand, i.incorrect_term, i.corrected_term
+        FROM incoming i
+        INNER JOIN hive_metastore.fieldforce_navigator_deployment.llm_medical_words_examples t
+          ON UPPER(TRIM(t.BRAND))          = UPPER(TRIM(i.brand))
+         AND UPPER(TRIM(t.INCORRECT_TERM)) = UPPER(TRIM(i.incorrect_term))
+         AND UPPER(TRIM(t.CORRECTED_TERM)) = UPPER(TRIM(i.corrected_term))
+
+SQL execution error: No module named 'thrift.transport.THttpClient'
+
+
+
+
+
+
+
+
+
+
+
+
 BRAND	INCORRECT_TERM	CORRECTED_TERM
 AREXVY	cospitalization	hospitalization
 AREXVY	neutriosis	neurotoxicity
