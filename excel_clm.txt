@@ -44,3 +44,104 @@ GBR	OMJJARA	Myelofibrosis	JAK inhibitor	Ruxolotinib (JAKAVI)	COMPETITOR
 
 
 AREXVY	RHV	RSV
+
+
+
+{
+    "sample_json": {
+        "MARKET": {
+            "Example Values": [
+                "GBR",
+                "THA",
+                "ITA",
+                "PRT"
+            ],
+            "Description": "v",
+            "Parameter_type": "Mandatory"
+        },
+        "BRAND": {
+            "Example Values": [
+                "SHINGRIX",
+                "AREXVY",
+                "BLENREP"
+            ],
+            "Description": "Brand name.",
+            "Parameter_type": "Mandatory"
+        },
+        "DISEASE_STATE": {
+            "Example Values": [
+                "RSV vaccine",
+                "Shingles"
+            ],
+            "Description": "Disease area",
+            "Parameter_type": "Mandatory"
+        },
+        "DRUG_CLASS": {
+            "Example Values": [
+                "Non-adjuvanted",
+                "Adjuvanted"
+            ],
+            "Description": "High-level category",
+            "Parameter_type": "Mandatory"
+        },
+        "COMPETITOR_BRANDS": {
+            "Example Values": [
+                "Abrysvo",
+                "Generic-X"
+            ],
+            "Description": "Competitor Brand",
+            "Parameter_type": "Mandatory"
+        },
+        "COMPETITION_TYPE": {
+            "Example Values": [
+                "COMPETITOR"
+            ],
+            "Description": "Type of relation COMPETITOR",
+            "Parameter_type": "Mandatory"
+        },
+        "MOLECULE": {
+            "Example Values": [
+                "RSVPreF"
+            ],
+            "Description": "molecule (if known).",
+            "Parameter_type": "Optional"
+        },
+        "OTHER_NAMES": {
+            "Example Values": [
+                "null",
+                "RSVPreF3",
+                "Brand alias"
+            ],
+            "Description": "v1",
+            "Parameter_type": "Optional"
+        },
+        "COMBINATION": {
+            "Example Values": [
+                "null",
+                "Compound-A + Compound-B"
+            ],
+            "Description": "v1",
+            "Parameter_type": "Optional"
+        },
+        "ADDED_BY": {
+            "Example Values": [
+                "abc.x.abc@gsk.com"
+            ],
+            "Description": "Your email; can also be passed via 'Username' header.",
+            "Parameter_type": "Mandatory"
+        }
+    },
+    "post_request_template": {
+        "MARKET": "THA",
+        "BRAND": "AREXVY",
+        "DISEASE_STATE": "RSV vaccine",
+        "DRUG_CLASS": "Non-adjuvanted",
+        "COMPETITOR_BRANDS": "Abrysvo",
+        "COMPETITION_TYPE": "COMPETITOR",
+        "MOLECULE": "RSVPreF",
+        "OTHER_NAMES": "null",
+        "COMBINATION": "null",
+        "ADDED_BY": "abc.x.abc@gsk.com"
+    },
+    "desc": "Copy the template, change values as needed, and POST to /competitor_config."
+}
