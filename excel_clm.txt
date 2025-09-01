@@ -1,0 +1,46 @@
+BRAND	INCORRECT_TERM	CORRECTED_TERM
+AREXVY	cospitalization	hospitalization
+AREXVY	neutriosis	neurotoxicity
+AREXVY	motiality	mortality
+AREXVY	 in Monia	Pneumonia
+AREXVY	 deficazy	efficacy
+AREXVY	Numonia	Pneumonia
+AREXVY	Aleksermo	Arexvy
+AREXVY	Momoya	Moyamoya
+AREXVY	 Alexvi.	Arexvy
+AREXVY	Alexis 	Arexvy
+AREXVY	Alexvi 	Arexvy
+AREXVY	Alexis	Arexvy
+AREXVY	Alexis	Arexvy
+AREXVY	Alec	Arexvy
+AREXVY	 full,	Flu
+AREXVY	RHB	RSV
+AREXVY	GFK	GSK
+AREXVY	Alex V vaccine	Arexvy
+AREXVY	 innospital	hospital
+AREXVY	naspact	nasopharynx
+AREXVY	Ijuvan	adjuvanted
+AREXVY	adjoant 	adjuvant
+AREXVY	nimonia	Pneumonia
+AREXVY	Biolent	Bivalent
+AREXVY	Angi ISV	Arexvy
+AREXVY	Allevi 	Arexvy
+AREXVY	Alex V 	Arexvy
+AREXVY	Alexei	Arexvy
+AREXVY	 Nolek	Arexvy
+AREXVY	Asman	Asthma
+AREXVY	AlexV	Arexvy
+AREXVY	Cobic	Covid
+AREXVY	Esmar 	RSV
+AREXVY	R s V	RSV
+AREXVY	ISP	RSV
+AREXVY	RB 	RSV
+AREXVY	RSB	RSV
+
+
+MARKET	BRAND	DISEASE_STATE	DRUG_CLASS	COMPETITOR_BRANDS	COMPETITION_TYPE
+GBR	OMJJARA	Myelofibrosis	JAK inhibitor	Fedratinib (INREBIC)	COMPETITOR
+GBR	OMJJARA	Myelofibrosis	JAK inhibitor	Ruxolotinib (JAKAVI)	COMPETITOR
+
+
+AREXVY	RHV	RSV
