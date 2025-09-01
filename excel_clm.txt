@@ -392,3 +392,435 @@ def mwe_post():
         return jsonify({"error": f"Internal server error: {str(e)}"}), status.HTTP_500_INTERNAL_SERVER_ERROR
 
 }
+
+
+
+
+
+# ====== MWE: Medical Words Examples (individual endpoint, batched checks/inserts) ======
+
+MWE_TABLE = "hive_metastore.fieldforce_navigator_deployment.llm_medical_words_examples"
+
+# --- helpers ---
+def _clean(s):
+    return " ".join(str(s).strip().split()) if s is not None else ""
+
+def _sq(s):
+    return str(s).replace("'", "''")
+
+def _values_block(rows3):
+    """
+    Build a VALUES block like:
+      VALUES ('A','B','C'),('D','E','F')
+    where rows3 = [(brand, incorrect, corrected), ...]
+    """
+    if not rows3:
+        return "VALUES"  # not used if empty
+    parts = []
+    for b, i, c in rows3:
+        parts.append(f"('{_sq(b)}','{_sq(i)}','{_sq(c)}')")
+    return "VALUES " + ",".join(parts)
+
+def _find_conflicts_mwe(rows3):
+    """
+    Single batched check: returns list of (brand, incorrect, corrected) already present in DB.
+    Case-insensitive & trim on both sides.
+    """
+    vals = _values_block(rows3)
+    sql = f"""
+        WITH incoming(brand, incorrect_term, corrected_term) AS (
+            SELECT * FROM {vals}
+        )
+        SELECT i.brand, i.incorrect_term, i.corrected_term
+        FROM incoming i
+        INNER JOIN {MWE_TABLE} t
+          ON UPPER(TRIM(t.BRAND))          = UPPER(TRIM(i.brand))
+         AND UPPER(TRIM(t.INCORRECT_TERM)) = UPPER(TRIM(i.incorrect_term))
+         AND UPPER(TRIM(t.CORRECTED_TERM)) = UPPER(TRIM(i.corrected_term))
+    """
+    df = dc.execute_query(sql)
+    if df is None or df.empty:
+        return []
+    # normalize to tuples of strings
+    out = []
+    for _, r in df.iterrows():
+        out.append((str(r[0]), str(r[1]), str(r[2])))
+    return out
+
+def _insert_batch_mwe(rows3, added_by):
+    """
+    Single batched INSERT using SELECT FROM VALUES → no per-row inserts.
+    """
+    vals = _values_block(rows3)
+    sql = f"""
+        INSERT INTO {MWE_TABLE}
+            (BRAND, INCORRECT_TERM, CORRECTED_TERM, ADDED_BY, ENTRY_TIME)
+        SELECT brand, incorrect_term, corrected_term, '{_sq(added_by)}', CURRENT_TIMESTAMP()
+        FROM {vals} AS v(brand, incorrect_term, corrected_term)
+    """
+    dc.execute_non_query(sql)
+
+# ---------- GET: definitions + post template ----------
+@app.route("/llm_mwe_table", methods=["GET"])
+def mwe_get():
+    try:
+        definitions = {
+            "payload": {
+                "BRAND": {
+                    "Example Values": ["SHINGRIX", "AREXVY"],
+                    "Description": "Brand name.",
+                    "Parameter_type": "Mandatory"
+                },
+                "INCORRECT_TERM": {
+                    "Example Values": ["Chingrix", "Arexyv"],
+                    "Description": "Misspelt or wrong medical term.",
+                    "Parameter_type": "Mandatory"
+                },
+                "CORRECTED_TERM": {
+                    "Example Values": ["Shingrix", "AREXVY"],
+                    "Description": "Correct replacement term.",
+                    "Parameter_type": "Mandatory"
+                },
+                "ADDED_BY": {
+                    "Example Values": ["abc.x.abc@gsk.com"],
+                    "Description": "Auto-picked from 'Username' header in POST. Ignore in body.",
+                    "Parameter_type": "Mandatory (via header)"
+                },
+                "ENTRY_TIME": {
+                    "Example Values": ["current_timestamp()"],
+                    "Description": "Set by system at insert time.",
+                    "Parameter_type": "Auto-generated"
+                }
+            },
+            "post_request_template_json": {
+                "BRAND": "SHINGRIX",
+                "INCORRECT_TERM": "Chingrix",
+                "CORRECTED_TERM": "Shingrix"
+            },
+            "excel_upload_instructions": {
+                "expected_extension": ".xlsx",
+                "form_field_name": "file",
+                "required_columns": ["BRAND", "INCORRECT_TERM", "CORRECTED_TERM"],
+                "notes": [
+                    "First row must be headers.",
+                    "ADDED_BY is taken from 'Username' header.",
+                    "ENTRY_TIME is auto.",
+                    "All duplicate checks are case-insensitive.",
+                    "If any row fails validation, nothing is inserted."
+                ]
+            }
+        }
+        return jsonify(definitions), status.HTTP_200_OK
+    except Exception as e:
+        return jsonify({"error": f"Internal server error: {str(e)}"}), status.HTTP_500_INTERNAL_SERVER_ERROR
+
+# ---------- POST: single JSON OR bulk Excel upload (batched DB round-trips) ----------
+@app.route("/llm_mwe_table", methods=["POST"])
+def mwe_post():
+    try:
+        added_by = _clean(request.headers.get("Username", "") or "")
+        if not added_by:
+            return jsonify({"error": "Missing 'Username' in headers."}), status.HTTP_400_BAD_REQUEST
+
+        rows = []  # to collect (brand, incorrect, corrected)
+
+        # A) Excel path (multipart/form-data)
+        if "file" in request.files:
+            f = request.files["file"]
+            filename = (f.filename or "").lower().strip()
+            if not filename.endswith(".xlsx"):
+                return jsonify({"error": "Only .xlsx files are supported for bulk upload."}), status.HTTP_400_BAD_REQUEST
+
+            df = pd.read_excel(f, engine="openpyxl")
+            df.columns = [str(c).strip().upper() for c in df.columns]
+
+            req_cols = ["BRAND", "INCORRECT_TERM", "CORRECTED_TERM"]
+            miss_cols = [c for c in req_cols if c not in df.columns]
+            if miss_cols:
+                return jsonify({"error": f"Missing required columns in Excel: {', '.join(miss_cols)}"}), status.HTTP_400_BAD_REQUEST
+
+            df = df.replace({pd.NA: "", None: ""}).fillna("")
+
+            # Clean + collect
+            for idx, r in df.iterrows():
+                brand     = _clean(r.get("BRAND", ""))
+                incorrect = _clean(r.get("INCORRECT_TERM", ""))
+                corrected = _clean(r.get("CORRECTED_TERM", ""))
+                if not brand or not incorrect or not corrected:
+                    return jsonify({
+                        "status": "error",
+                        "message": f"Row {int(idx)+2}: Missing one of BRAND/INCORRECT_TERM/CORRECTED_TERM."
+                    }), status.HTTP_400_BAD_REQUEST
+                rows.append((brand, incorrect, corrected))
+
+        else:
+            # B) JSON path (object or list of objects)
+            body = request.get_json(force=True, silent=True) or {}
+            items = body if isinstance(body, list) else [body]
+            for i, rec in enumerate(items, start=1):
+                brand     = _clean(rec.get("BRAND", ""))
+                incorrect = _clean(rec.get("INCORRECT_TERM", ""))
+                corrected = _clean(rec.get("CORRECTED_TERM", ""))
+                if not brand or not incorrect or not corrected:
+                    return jsonify({
+                        "status": "error",
+                        "message": f"Item {i}: Missing one of BRAND/INCORRECT_TERM/CORRECTED_TERM."
+                    }), status.HTTP_400_BAD_REQUEST
+                rows.append((brand, incorrect, corrected))
+
+        if not rows:
+            return jsonify({"error": "No valid rows to insert."}), status.HTTP_400_BAD_REQUEST
+
+        # In-payload/file dedup (case-insensitive)
+        seen = set()
+        deduped = []
+        for b, i, c in rows:
+            k = (b.upper(), i.upper(), c.upper())
+            if k not in seen:
+                seen.add(k)
+                deduped.append((b, i, c))
+
+        # Single batched duplicate check against DB
+        conflicts = _find_conflicts_mwe(deduped)
+        if conflicts:
+            # return all conflicts, no inserts
+            conflict_list = [
+                {"BRAND": b, "INCORRECT_TERM": i, "CORRECTED_TERM": c}
+                for (b, i, c) in conflicts
+            ]
+            return jsonify({
+                "status": "error",
+                "message": "Duplicate(s) exist in database. Nothing inserted.",
+                "conflicts": conflict_list
+            }), status.HTTP_409_CONFLICT
+
+        # Single batched INSERT
+        _insert_batch_mwe(deduped, added_by)
+
+        return jsonify({
+            "status": "success",
+            "mode": "excel" if "file" in request.files else "json",
+            "inserted_count": len(deduped)
+        }), status.HTTP_201_CREATED
+
+    except Exception as e:
+        return jsonify({"error": f"Internal server error: {str(e)}"}), status.HTTP_500_INTERNAL_SERVER_ERROR
+
+
+
+
+
+
+--------------------------------------------------------------
+
+
+
+# ====== MWE: Medical Words Examples (individual endpoint, batched checks/inserts) ======
+
+MWE_TABLE = "hive_metastore.fieldforce_navigator_deployment.llm_medical_words_examples"
+
+# --- helpers ---
+def _clean(s):
+    return " ".join(str(s).strip().split()) if s is not None else ""
+
+def _sq(s):
+    return str(s).replace("'", "''")
+
+def _values_block(rows3):
+    """
+    Build a VALUES block like:
+      VALUES ('A','B','C'),('D','E','F')
+    where rows3 = [(brand, incorrect, corrected), ...]
+    """
+    if not rows3:
+        return "VALUES"  # not used if empty
+    parts = []
+    for b, i, c in rows3:
+        parts.append(f"('{_sq(b)}','{_sq(i)}','{_sq(c)}')")
+    return "VALUES " + ",".join(parts)
+
+def _find_conflicts_mwe(rows3):
+    """
+    Single batched check: returns list of (brand, incorrect, corrected) already present in DB.
+    Case-insensitive & trim on both sides.
+    """
+    vals = _values_block(rows3)
+    sql = f"""
+        WITH incoming(brand, incorrect_term, corrected_term) AS (
+            SELECT * FROM {vals}
+        )
+        SELECT i.brand, i.incorrect_term, i.corrected_term
+        FROM incoming i
+        INNER JOIN {MWE_TABLE} t
+          ON UPPER(TRIM(t.BRAND))          = UPPER(TRIM(i.brand))
+         AND UPPER(TRIM(t.INCORRECT_TERM)) = UPPER(TRIM(i.incorrect_term))
+         AND UPPER(TRIM(t.CORRECTED_TERM)) = UPPER(TRIM(i.corrected_term))
+    """
+    df = dc.execute_query(sql)
+    if df is None or df.empty:
+        return []
+    # normalize to tuples of strings
+    out = []
+    for _, r in df.iterrows():
+        out.append((str(r[0]), str(r[1]), str(r[2])))
+    return out
+
+def _insert_batch_mwe(rows3, added_by):
+    """
+    Single batched INSERT using SELECT FROM VALUES → no per-row inserts.
+    """
+    vals = _values_block(rows3)
+    sql = f"""
+        INSERT INTO {MWE_TABLE}
+            (BRAND, INCORRECT_TERM, CORRECTED_TERM, ADDED_BY, ENTRY_TIME)
+        SELECT brand, incorrect_term, corrected_term, '{_sq(added_by)}', CURRENT_TIMESTAMP()
+        FROM {vals} AS v(brand, incorrect_term, corrected_term)
+    """
+    dc.execute_non_query(sql)
+
+# ---------- GET: definitions + post template ----------
+@app.route("/llm_mwe_table", methods=["GET"])
+def mwe_get():
+    try:
+        definitions = {
+            "payload": {
+                "BRAND": {
+                    "Example Values": ["SHINGRIX", "AREXVY"],
+                    "Description": "Brand name.",
+                    "Parameter_type": "Mandatory"
+                },
+                "INCORRECT_TERM": {
+                    "Example Values": ["Chingrix", "Arexyv"],
+                    "Description": "Misspelt or wrong medical term.",
+                    "Parameter_type": "Mandatory"
+                },
+                "CORRECTED_TERM": {
+                    "Example Values": ["Shingrix", "AREXVY"],
+                    "Description": "Correct replacement term.",
+                    "Parameter_type": "Mandatory"
+                },
+                "ADDED_BY": {
+                    "Example Values": ["abc.x.abc@gsk.com"],
+                    "Description": "Auto-picked from 'Username' header in POST. Ignore in body.",
+                    "Parameter_type": "Mandatory (via header)"
+                },
+                "ENTRY_TIME": {
+                    "Example Values": ["current_timestamp()"],
+                    "Description": "Set by system at insert time.",
+                    "Parameter_type": "Auto-generated"
+                }
+            },
+            "post_request_template_json": {
+                "BRAND": "SHINGRIX",
+                "INCORRECT_TERM": "Chingrix",
+                "CORRECTED_TERM": "Shingrix"
+            },
+            "excel_upload_instructions": {
+                "expected_extension": ".xlsx",
+                "form_field_name": "file",
+                "required_columns": ["BRAND", "INCORRECT_TERM", "CORRECTED_TERM"],
+                "notes": [
+                    "First row must be headers.",
+                    "ADDED_BY is taken from 'Username' header.",
+                    "ENTRY_TIME is auto.",
+                    "All duplicate checks are case-insensitive.",
+                    "If any row fails validation, nothing is inserted."
+                ]
+            }
+        }
+        return jsonify(definitions), status.HTTP_200_OK
+    except Exception as e:
+        return jsonify({"error": f"Internal server error: {str(e)}"}), status.HTTP_500_INTERNAL_SERVER_ERROR
+
+# ---------- POST: single JSON OR bulk Excel upload (batched DB round-trips) ----------
+@app.route("/llm_mwe_table", methods=["POST"])
+def mwe_post():
+    try:
+        added_by = _clean(request.headers.get("Username", "") or "")
+        if not added_by:
+            return jsonify({"error": "Missing 'Username' in headers."}), status.HTTP_400_BAD_REQUEST
+
+        rows = []  # to collect (brand, incorrect, corrected)
+
+        # A) Excel path (multipart/form-data)
+        if "file" in request.files:
+            f = request.files["file"]
+            filename = (f.filename or "").lower().strip()
+            if not filename.endswith(".xlsx"):
+                return jsonify({"error": "Only .xlsx files are supported for bulk upload."}), status.HTTP_400_BAD_REQUEST
+
+            df = pd.read_excel(f, engine="openpyxl")
+            df.columns = [str(c).strip().upper() for c in df.columns]
+
+            req_cols = ["BRAND", "INCORRECT_TERM", "CORRECTED_TERM"]
+            miss_cols = [c for c in req_cols if c not in df.columns]
+            if miss_cols:
+                return jsonify({"error": f"Missing required columns in Excel: {', '.join(miss_cols)}"}), status.HTTP_400_BAD_REQUEST
+
+            df = df.replace({pd.NA: "", None: ""}).fillna("")
+
+            # Clean + collect
+            for idx, r in df.iterrows():
+                brand     = _clean(r.get("BRAND", ""))
+                incorrect = _clean(r.get("INCORRECT_TERM", ""))
+                corrected = _clean(r.get("CORRECTED_TERM", ""))
+                if not brand or not incorrect or not corrected:
+                    return jsonify({
+                        "status": "error",
+                        "message": f"Row {int(idx)+2}: Missing one of BRAND/INCORRECT_TERM/CORRECTED_TERM."
+                    }), status.HTTP_400_BAD_REQUEST
+                rows.append((brand, incorrect, corrected))
+
+        else:
+            # B) JSON path (object or list of objects)
+            body = request.get_json(force=True, silent=True) or {}
+            items = body if isinstance(body, list) else [body]
+            for i, rec in enumerate(items, start=1):
+                brand     = _clean(rec.get("BRAND", ""))
+                incorrect = _clean(rec.get("INCORRECT_TERM", ""))
+                corrected = _clean(rec.get("CORRECTED_TERM", ""))
+                if not brand or not incorrect or not corrected:
+                    return jsonify({
+                        "status": "error",
+                        "message": f"Item {i}: Missing one of BRAND/INCORRECT_TERM/CORRECTED_TERM."
+                    }), status.HTTP_400_BAD_REQUEST
+                rows.append((brand, incorrect, corrected))
+
+        if not rows:
+            return jsonify({"error": "No valid rows to insert."}), status.HTTP_400_BAD_REQUEST
+
+        # In-payload/file dedup (case-insensitive)
+        seen = set()
+        deduped = []
+        for b, i, c in rows:
+            k = (b.upper(), i.upper(), c.upper())
+            if k not in seen:
+                seen.add(k)
+                deduped.append((b, i, c))
+
+        # Single batched duplicate check against DB
+        conflicts = _find_conflicts_mwe(deduped)
+        if conflicts:
+            # return all conflicts, no inserts
+            conflict_list = [
+                {"BRAND": b, "INCORRECT_TERM": i, "CORRECTED_TERM": c}
+                for (b, i, c) in conflicts
+            ]
+            return jsonify({
+                "status": "error",
+                "message": "Duplicate(s) exist in database. Nothing inserted.",
+                "conflicts": conflict_list
+            }), status.HTTP_409_CONFLICT
+
+        # Single batched INSERT
+        _insert_batch_mwe(deduped, added_by)
+
+        return jsonify({
+            "status": "success",
+            "mode": "excel" if "file" in request.files else "json",
+            "inserted_count": len(deduped)
+        }), status.HTTP_201_CREATED
+
+    except Exception as e:
+        return jsonify({"error": f"Internal server error: {str(e)}"}), status.HTTP_500_INTERNAL_SERVER_ERROR
+
