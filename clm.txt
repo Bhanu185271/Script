@@ -1,3 +1,13 @@
+#Current version
+final_base.write.mode('overwrite').option('OverwriteSchema', True).format('delta').save('/mnt/oiadlsrootfnd/Pharma/Local/BZL/Commercial/Sales/Order-Intelligence/DS/DE_Input/DeltaTables/Raw/coin_bzl_base_v4')
+
+
+
+
+
+
+
+
 MODEL_NAME
 DEPLOYMENT_NAME
 TOKEN_LIMIT
