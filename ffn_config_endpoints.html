@@ -1,0 +1,562 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Data Management System - Business Flow</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+        }
+        
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 20px;
+            padding: 30px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+        }
+        
+        .header {
+            text-align: center;
+            margin-bottom: 40px;
+            padding: 20px;
+            background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
+            border-radius: 15px;
+            color: white;
+        }
+        
+        .header h1 {
+            margin: 0;
+            font-size: 2.5em;
+            font-weight: 300;
+        }
+        
+        .subtitle {
+            margin-top: 10px;
+            font-size: 1.2em;
+            opacity: 0.9;
+        }
+        
+        .flow-section {
+            margin-bottom: 50px;
+        }
+        
+        .section-title {
+            font-size: 1.8em;
+            color: #2c3e50;
+            margin-bottom: 25px;
+            text-align: center;
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 10px;
+            border-left: 5px solid #3498db;
+        }
+        
+        .flow-container {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 20px;
+            flex-wrap: wrap;
+            margin: 30px 0;
+        }
+        
+        .flow-box {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 20px;
+            border-radius: 15px;
+            text-align: center;
+            min-width: 200px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+            transition: transform 0.3s ease, box-shadow 0.3s ease;
+        }
+        
+        .flow-box:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 15px 40px rgba(0,0,0,0.3);
+        }
+        
+        .flow-box h3 {
+            margin: 0 0 10px 0;
+            font-size: 1.3em;
+        }
+        
+        .flow-box p {
+            margin: 0;
+            font-size: 0.9em;
+            opacity: 0.9;
+        }
+        
+        .arrow {
+            font-size: 2em;
+            color: #3498db;
+            font-weight: bold;
+        }
+        
+        .data-types {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 25px;
+            margin: 30px 0;
+        }
+        
+        .data-type-card {
+            background: #f8f9fa;
+            border: 2px solid #e9ecef;
+            border-radius: 15px;
+            padding: 25px;
+            transition: all 0.3s ease;
+        }
+        
+        .data-type-card:hover {
+            border-color: #3498db;
+            box-shadow: 0 5px 20px rgba(52, 152, 219, 0.1);
+        }
+        
+        .data-type-card h4 {
+            color: #2c3e50;
+            margin: 0 0 15px 0;
+            font-size: 1.4em;
+            text-align: center;
+        }
+        
+        .data-type-card ul {
+            list-style: none;
+            padding: 0;
+            margin: 0;
+        }
+        
+        .data-type-card li {
+            padding: 8px 0;
+            border-bottom: 1px solid #e9ecef;
+            color: #555;
+        }
+        
+        .data-type-card li:last-child {
+            border-bottom: none;
+        }
+        
+        .validation-flow {
+            background: #fff3cd;
+            border: 2px solid #ffeaa7;
+            border-radius: 15px;
+            padding: 25px;
+            margin: 30px 0;
+        }
+        
+        .validation-title {
+            color: #856404;
+            font-size: 1.4em;
+            margin-bottom: 20px;
+            text-align: center;
+        }
+        
+        .validation-steps {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 15px;
+        }
+        
+        .validation-step {
+            background: white;
+            padding: 15px 20px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            min-width: 150px;
+            text-align: center;
+            color: #856404;
+            font-weight: 500;
+        }
+        
+        .results-section {
+            background: #d4edda;
+            border: 2px solid #c3e6cb;
+            border-radius: 15px;
+            padding: 25px;
+            margin: 30px 0;
+        }
+        
+        .results-title {
+            color: #155724;
+            font-size: 1.4em;
+            margin-bottom: 20px;
+            text-align: center;
+        }
+        
+        .results-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+        }
+        
+        .result-item {
+            background: white;
+            padding: 15px;
+            border-radius: 10px;
+            text-align: center;
+            color: #155724;
+            font-weight: 500;
+        }
+        
+        .highlight-box {
+            background: linear-gradient(135deg, #ff9a9e 0%, #fecfef 100%);
+            color: #721c24;
+            padding: 20px;
+            border-radius: 15px;
+            margin: 20px 0;
+            text-align: center;
+            font-weight: 500;
+        }
+        
+        .flowchart-container {
+            background: #f8f9fa;
+            border: 2px solid #e9ecef;
+            border-radius: 15px;
+            padding: 30px;
+            margin: 30px 0;
+            overflow-x: auto;
+        }
+        
+        .flowchart-legend {
+            background: #fff;
+            border: 1px solid #dee2e6;
+            border-radius: 10px;
+            padding: 20px;
+            margin: 20px 0;
+        }
+        
+        .legend-title {
+            font-size: 1.2em;
+            font-weight: 600;
+            color: #2c3e50;
+            margin-bottom: 15px;
+        }
+        
+        .legend-items {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 20px;
+        }
+        
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 0.9em;
+            color: #555;
+        }
+        
+        .legend-color {
+            width: 20px;
+            height: 20px;
+            border-radius: 4px;
+            border: 1px solid #ddd;
+        }
+        
+        @media (max-width: 768px) {
+            .flow-container {
+                flex-direction: column;
+            }
+            
+            .arrow {
+                transform: rotate(90deg);
+            }
+            
+            .validation-steps {
+                flex-direction: column;
+            }
+            
+            .flowchart-container {
+                padding: 15px;
+            }
+            
+            .flowchart-container svg {
+                width: 100%;
+                height: auto;
+            }
+            
+            .legend-items {
+                flex-direction: column;
+                gap: 10px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>📊 FFN Config Endpoints</h1>
+            <div class="subtitle">Field Force Navigator Configuration Management</div>
+        </div>
+        
+        <div class="flow-section">
+            <div class="section-title">🔄 Technical Flowchart</div>
+            
+            <div class="flowchart-container">
+                <svg width="100%" height="900" viewBox="0 0 1300 900">
+                    <!-- Start -->
+                    <rect x="550" y="10" width="200" height="60" rx="30" fill="#4facfe" stroke="#2980b9" stroke-width="2"/>
+                    <text x="650" y="35" text-anchor="middle" fill="white" font-size="14" font-weight="bold">User Makes Request</text>
+                    <text x="650" y="50" text-anchor="middle" fill="white" font-size="12">to API Endpoint</text>
+                    
+                    <!-- Arrow down -->
+                    <line x1="650" y1="70" x2="650" y2="100" stroke="#2c3e50" stroke-width="2" marker-end="url(#arrowhead)"/>
+                    
+                    <!-- Decision: GET or POST -->
+                    <polygon points="650,100 750,130 650,160 550,130" fill="#9b59b6" stroke="#8e44ad" stroke-width="2"/>
+                    <text x="650" y="125" text-anchor="middle" fill="white" font-size="12" font-weight="bold">Request Type?</text>
+                    <text x="650" y="140" text-anchor="middle" fill="white" font-size="11">GET or POST</text>
+                    
+                    <!-- GET Path -->
+                    <line x1="550" y1="130" x2="400" y2="130" stroke="#3498db" stroke-width="2" marker-end="url(#arrowhead)"/>
+                    <text x="475" y="120" text-anchor="middle" fill="#3498db" font-size="12">GET</text>
+                    
+                    <rect x="200" y="100" width="200" height="80" rx="10" fill="#3498db" stroke="#2980b9" stroke-width="2"/>
+                    <text x="300" y="125" text-anchor="middle" fill="white" font-size="12" font-weight="bold">Return Table Info</text>
+                    <text x="300" y="140" text-anchor="middle" fill="white" font-size="11">• Column Descriptions</text>
+                    <text x="300" y="155" text-anchor="middle" fill="white" font-size="11">• Sample JSON Template</text>
+                    <text x="300" y="170" text-anchor="middle" fill="white" font-size="11">• Excel Instructions</text>
+                    
+                    <!-- GET End -->
+                    <line x1="300" y1="180" x2="300" y2="220" stroke="#2c3e50" stroke-width="2" marker-end="url(#arrowhead)"/>
+                    <rect x="200" y="220" width="200" height="40" rx="20" fill="#27ae60" stroke="#229954" stroke-width="2"/>
+                    <text x="300" y="245" text-anchor="middle" fill="white" font-size="12" font-weight="bold">User Gets Info & Templates</text>
+                    
+                    <!-- POST Path Starts -->
+                    <line x1="750" y1="130" x2="850" y2="130" stroke="#e74c3c" stroke-width="2" marker-end="url(#arrowhead)"/>
+                    <text x="800" y="120" text-anchor="middle" fill="#e74c3c" font-size="12">POST</text>
+                    
+                    <rect x="750" y="100" width="200" height="60" rx="10" fill="#f39c12" stroke="#d68910" stroke-width="2"/>
+                    <text x="850" y="125" text-anchor="middle" fill="white" font-size="14" font-weight="bold">Check Username Header</text>
+                    <text x="850" y="140" text-anchor="middle" fill="white" font-size="12">Required for ADDED_BY</text>
+                    
+                    <!-- Arrow down -->
+                    <line x1="850" y1="160" x2="850" y2="190" stroke="#2c3e50" stroke-width="2" marker-end="url(#arrowhead)"/>
+                    
+                    <!-- Decision: Username Present -->
+                    <polygon points="850,190 930,220 850,250 770,220" fill="#e74c3c" stroke="#c0392b" stroke-width="2"/>
+                    <text x="850" y="225" text-anchor="middle" fill="white" font-size="12" font-weight="bold">Username Present?</text>
+                    
+                    <!-- No Username - Error -->
+                    <line x1="930" y1="220" x2="1050" y2="220" stroke="#e74c3c" stroke-width="2" marker-end="url(#arrowhead)"/>
+                    <text x="990" y="210" text-anchor="middle" fill="#e74c3c" font-size="12">NO</text>
+                    <rect x="1050" y="190" width="150" height="60" rx="10" fill="#e74c3c" stroke="#c0392b" stroke-width="2"/>
+                    <text x="1125" y="215" text-anchor="middle" fill="white" font-size="12" font-weight="bold">Return HTTP 400</text>
+                    <text x="1125" y="230" text-anchor="middle" fill="white" font-size="11">Missing Username</text>
+                    
+                    <!-- Yes Username - Continue -->
+                    <line x1="850" y1="250" x2="850" y2="280" stroke="#27ae60" stroke-width="2" marker-end="url(#arrowhead)"/>
+                    <text x="870" y="265" text-anchor="start" fill="#27ae60" font-size="12">YES</text>
+                    
+                    <!-- Mode Detection -->
+                    <polygon points="850,280 970,320 850,360 730,320" fill="#9b59b6" stroke="#8e44ad" stroke-width="2"/>
+                    <text x="850" y="315" text-anchor="middle" fill="white" font-size="12" font-weight="bold">File in Request?</text>
+                    <text x="850" y="330" text-anchor="middle" fill="white" font-size="11">Check for Excel Upload</text>
+                    
+                    <!-- Excel Mode -->
+                    <line x1="730" y1="320" x2="600" y2="320" stroke="#3498db" stroke-width="2" marker-end="url(#arrowhead)"/>
+                    <text x="665" y="310" text-anchor="middle" fill="#3498db" font-size="12">Excel Mode</text>
+                    
+                    <rect x="450" y="290" width="200" height="60" rx="10" fill="#3498db" stroke="#2980b9" stroke-width="2"/>
+                    <text x="550" y="315" text-anchor="middle" fill="white" font-size="12" font-weight="bold">Validate Excel File</text>
+                    <text x="550" y="330" text-anchor="middle" fill="white" font-size="11">Check .xlsx extension</text>
+                    
+                    <!-- JSON Mode -->
+                    <line x1="970" y1="320" x2="1100" y2="320" stroke="#3498db" stroke-width="2" marker-end="url(#arrowhead)"/>
+                    <text x="1035" y="310" text-anchor="middle" fill="#3498db" font-size="12">JSON Mode</text>
+                    
+                    <rect x="1050" y="290" width="200" height="60" rx="10" fill="#3498db" stroke="#2980b9" stroke-width="2"/>
+                    <text x="1150" y="315" text-anchor="middle" fill="white" font-size="12" font-weight="bold">Parse JSON Body</text>
+                    <text x="1150" y="330" text-anchor="middle" fill="white" font-size="11">Single object or list</text>
+                    
+                    <!-- Both paths converge -->
+                    <line x1="550" y1="350" x2="550" y2="420" stroke="#2c3e50" stroke-width="2" marker-end="url(#arrowhead)"/>
+                    <line x1="1150" y1="350" x2="1150" y2="400" stroke="#2c3e50" stroke-width="2"/>
+                    <line x1="1150" y1="400" x2="650" y2="400" stroke="#2c3e50" stroke-width="2"/>
+                    <line x1="650" y1="400" x2="650" y2="420" stroke="#2c3e50" stroke-width="2" marker-end="url(#arrowhead)"/>
+                    
+                    <!-- Header Validation -->
+                    <rect x="550" y="420" width="200" height="60" rx="10" fill="#f39c12" stroke="#d68910" stroke-width="2"/>
+                    <text x="650" y="445" text-anchor="middle" fill="white" font-size="12" font-weight="bold">Validate Required Headers</text>
+                    <text x="650" y="460" text-anchor="middle" fill="white" font-size="11">Check mandatory columns</text>
+                    
+                    <!-- Row Processing Loop -->
+                    <line x1="650" y1="480" x2="650" y2="510" stroke="#2c3e50" stroke-width="2" marker-end="url(#arrowhead)"/>
+                    
+                    <rect x="550" y="510" width="200" height="80" rx="10" fill="#16a085" stroke="#138d75" stroke-width="2"/>
+                    <text x="650" y="535" text-anchor="middle" fill="white" font-size="12" font-weight="bold">Process Each Row</text>
+                    <text x="650" y="550" text-anchor="middle" fill="white" font-size="11">1. Clean & Validate Fields</text>
+                    <text x="650" y="565" text-anchor="middle" fill="white" font-size="11">2. Check for Duplicates</text>
+                    <text x="650" y="580" text-anchor="middle" fill="white" font-size="11">3. Insert or Skip</text>
+                    
+                    <!-- Decision: More Rows -->
+                    <line x1="650" y1="590" x2="650" y2="620" stroke="#2c3e50" stroke-width="2" marker-end="url(#arrowhead)"/>
+                    
+                    <polygon points="650,620 710,640 650,660 590,640" fill="#e67e22" stroke="#d35400" stroke-width="2"/>
+                    <text x="650" y="645" text-anchor="middle" fill="white" font-size="11">More Rows?</text>
+                    
+                    <!-- Loop back -->
+                    <line x1="590" y1="640" x2="450" y2="640" stroke="#e67e22" stroke-width="2"/>
+                    <line x1="450" y1="640" x2="450" y2="550" stroke="#e67e22" stroke-width="2"/>
+                    <line x1="450" y1="550" x2="550" y2="550" stroke="#e67e22" stroke-width="2" marker-end="url(#arrowhead)"/>
+                    <text x="450" y="630" text-anchor="middle" fill="#e67e22" font-size="11">YES</text>
+                    
+                    <!-- Generate Response -->
+                    <line x1="650" y1="660" x2="650" y2="690" stroke="#27ae60" stroke-width="2" marker-end="url(#arrowhead)"/>
+                    <text x="670" y="675" text-anchor="start" fill="#27ae60" font-size="11">NO</text>
+                    
+                    <rect x="550" y="690" width="200" height="100" rx="10" fill="#27ae60" stroke="#229954" stroke-width="2"/>
+                    <text x="650" y="715" text-anchor="middle" fill="white" font-size="12" font-weight="bold">Generate Response</text>
+                    <text x="650" y="730" text-anchor="middle" fill="white" font-size="11">• Inserted Count</text>
+                    <text x="650" y="745" text-anchor="middle" fill="white" font-size="11">• Skipped Duplicates</text>
+                    <text x="650" y="760" text-anchor="middle" fill="white" font-size="11">• Error Details</text>
+                    <text x="650" y="775" text-anchor="middle" fill="white" font-size="11">• Success Status</text>
+                    
+                    <!-- Arrow marker definition -->
+                    <defs>
+                        <marker id="arrowhead" markerWidth="10" markerHeight="7" 
+                         refX="0" refY="3.5" orient="auto">
+                            <polygon points="0 0, 10 3.5, 0 7" fill="#2c3e50" />
+                        </marker>
+                    </defs>
+                </svg>
+            </div>
+            
+            <div class="flowchart-legend">
+                <div class="legend-title">Process Flow Legend:</div>
+                <div class="legend-items">
+                    <div class="legend-item">
+                        <div class="legend-color" style="background: #4facfe;"></div>
+                        <span>Start/End Points</span>
+                    </div>
+                    <div class="legend-item">
+                        <div class="legend-color" style="background: #f39c12;"></div>
+                        <span>Validation Steps</span>
+                    </div>
+                    <div class="legend-item">
+                        <div class="legend-color" style="background: #e74c3c;"></div>
+                        <span>Decision Points</span>
+                    </div>
+                    <div class="legend-item">
+                        <div class="legend-color" style="background: #16a085;"></div>
+                        <span>Data Processing</span>
+                    </div>
+                    <div class="legend-item">
+                        <div class="legend-color" style="background: #27ae60;"></div>
+                        <span>Success Response</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="flow-section">
+            <div class="section-title">🚀 Simplified Workflow Overview</div>
+            
+            <div class="flow-container">
+                <div class="flow-box">
+                    <h3>📤 User Uploads Data</h3>
+                    <p>Business users can upload data via Excel files or individual JSON records</p>
+                </div>
+                
+                <div class="arrow">→</div>
+                
+                <div class="flow-box">
+                    <h3>✅ System Validates</h3>
+                    <p>Checks for required fields, duplicates, and data format</p>
+                </div>
+                
+                <div class="arrow">→</div>
+                
+                <div class="flow-box">
+                    <h3>💾 Data Gets Stored</h3>
+                    <p>Valid records are saved to Databricks Delta tables</p>
+                </div>
+                
+                <div class="arrow">→</div>
+                
+                <div class="flow-box">
+                    <h3>📋 Report Generated</h3>
+                    <p>System provides summary of successful uploads and any errors</p>
+                </div>
+            </div>
+        </div>
+        
+        <div class="flow-section">
+            <div class="section-title">📂 Config Table Description</div>
+            
+            <div class="data-types">
+                <div class="data-type-card">
+                    <h4>🏥 Medical Words Examples</h4>
+                    <ul>
+                        <li><strong>Purpose:</strong> Fix medical term spelling mistakes</li>
+                        <li><strong>Example:</strong> "Chingrix" → "Shingrix"</li>
+                        <li><strong>Used by:</strong> Content correction systems</li>
+                        <li><strong>Business Value:</strong> Ensures accurate medical information</li>
+                    </ul>
+                </div>
+                
+                <div class="data-type-card">
+                    <h4>🏢 Competitor Configuration</h4>
+                    <ul>
+                        <li><strong>Purpose:</strong> Track competitor products by market</li>
+                        <li><strong>Example:</strong> AREXVY vs Abrysvo in Thailand</li>
+                        <li><strong>Used by:</strong> Market analysis and strategy</li>
+                        <li><strong>Business Value:</strong> Competitive intelligence</li>
+                    </ul>
+                </div>
+                
+                <div class="data-type-card">
+                    <h4>💡 Business Insights</h4>
+                    <ul>
+                        <li><strong>Purpose:</strong> Store market-specific insights</li>
+                        <li><strong>Example:</strong> Key performance metrics by region</li>
+                        <li><strong>Used by:</strong> Decision-making and reporting</li>
+                        <li><strong>Business Value:</strong> Data-driven decisions</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+        
+        <div class="validation-flow">
+            <div class="validation-title">🔍 Data Validation Process</div>
+            <div class="validation-steps">
+                <div class="validation-step">Check Username</div>
+                <div class="arrow">→</div>
+                <div class="validation-step">Validate File Format</div>
+                <div class="arrow">→</div>
+                <div class="validation-step">Check Required Fields</div>
+                <div class="arrow">→</div>
+                <div class="validation-step">Find Duplicates</div>
+                <div class="arrow">→</div>
+                <div class="validation-step">Insert Valid Records</div>
+            </div>
+        </div>
+        
+        <div class="results-section">
+            <div class="results-title">📈 What You Get Back - System Response</div>
+            <div class="results-grid">
+                <div class="result-item">✅ Records Successfully Added</div>
+                <div class="result-item">⚠️ Duplicate Records Skipped</div>
+                <div class="result-item">❌ Error Details (if any)</div>
+                <div class="result-item">📊 Upload Summary Report</div>
+            </div>
+        </div>
+        
+        <div class="highlight-box">
+            <strong>🎯 Key Benefits:</strong><br>
+            • Bulk data upload<br>
+            • Automatic duplicate prevention<br>
+            • Real-time validation and feedback
+        </div>
+    </div>
+</body>
+</html>
