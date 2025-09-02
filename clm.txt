@@ -2,6 +2,14 @@
 final_base.write.mode('overwrite').option('OverwriteSchema', True).format('delta').save('/mnt/oiadlsrootfnd/Pharma/Local/BZL/Commercial/Sales/Order-Intelligence/DS/DE_Input/DeltaTables/Raw/coin_bzl_base_v4')
 
 
+# Read Delta table from mounted ADLS path
+df = spark.read.format("delta").load("/mnt/oiadlsrootfnd/Pharma/Local/BZL/Commercial/Sales/Order-Intelligence/DS/DE_Input/DeltaTables/Raw/coin_bzl_base_v4")
+
+# Show sample rows
+df.show(10, truncate=False)
+
+# Optional: Check schema
+df.printSchema()
 
 
 
