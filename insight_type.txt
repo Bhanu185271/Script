@@ -1,0 +1,553 @@
+# ===================== INSIGHT CONFIG – Individual Endpoint =====================
+
+INSIGHT_TABLE = "hive_metastore.fieldforce_navigator_deployment.d_ffn_insight_config"
+
+# ---- tiny helpers (scoped for this endpoint) ----
+def _ins_clean(s):  # trim & collapse spaces
+    return " ".join(str(s).strip().split()) if s is not None else ""
+
+def _ins_sq(s):     # escape single quotes
+    return str(s).replace("'", "''")
+
+def _ins_exists_row(brand, market, insight, typ):
+    # Case-insensitive duplicate check on the natural key (BRAND, MARKET, INSIGHT, TYPE)
+    sql = f"""
+        SELECT 1
+        FROM {INSIGHT_TABLE}
+        WHERE UPPER(TRIM(BRAND))  = UPPER(TRIM('{_ins_sq(brand)}'))
+          AND UPPER(TRIM(MARKET)) = UPPER(TRIM('{_ins_sq(market)}'))
+          AND UPPER(TRIM(INSIGHT))= UPPER(TRIM('{_ins_sq(insight)}'))
+          AND UPPER(TRIM(TYPE))   = UPPER(TRIM('{_ins_sq(typ)}'))
+        LIMIT 1
+    """
+    df = dc.execute_query(sql)
+    return df is not None and not df.empty
+
+def _ins_nullish_to_sql(val):
+    """
+    For optional fields: treat None / "" / "null" (any case) as SQL NULL, else quote-escape.
+    Returns a fragment ready to embed in VALUES (...).
+    """
+    if val is None:
+        return "NULL"
+    v = str(val).strip()
+    if v == "" or v.lower() == "null":
+        return "NULL"
+    return f"'{_ins_sq(v)}'"
+
+def _ins_insert_row(brand, market, insight, typ, v1, v2, v3, v4, added_by):
+    # For optional columns (v2..v4) we pass through _ins_nullish_to_sql
+    v2_sql = _ins_nullish_to_sql(v2)
+    v3_sql = _ins_nullish_to_sql(v3)
+    v4_sql = _ins_nullish_to_sql(v4)
+
+    sql = f"""
+        INSERT INTO {INSIGHT_TABLE}
+            (BRAND, MARKET, INSIGHT, TYPE, VALUE_1, VALUE_2, VALUE_3, VALUE_4, ADDED_BY, ENTRY_TIME)
+        VALUES
+            ('{_ins_sq(brand)}','{_ins_sq(market)}','{_ins_sq(insight)}','{_ins_sq(typ)}',
+             '{_ins_sq(v1)}',{v2_sql},{v3_sql},{v4_sql},
+             '{_ins_sq(added_by)}',CURRENT_TIMESTAMP())
+    """
+    dc.execute_non_query(sql)
+
+# ---------- Downloadable Excel template (built on the fly; no file to maintain) ----------
+@app.route("/download/insight_config_template", methods=["GET"])
+def download_insight_config_template():
+    try:
+        # Build an empty DataFrame with the desired headers (order matters)
+        cols = ["BRAND","MARKET","INSIGHT","TYPE","VALUE_1","VALUE_2","VALUE_3","VALUE_4"]
+        df = pd.DataFrame(columns=cols)
+
+        bio = BytesIO()
+        with pd.ExcelWriter(bio, engine="openpyxl") as writer:
+            df.to_excel(writer, index=False, sheet_name="template")
+        bio.seek(0)
+
+        return send_file(
+            bio,
+            as_attachment=True,
+            download_name="insight_config_template.xlsx",
+            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+    except Exception as e:
+        return jsonify({"error": f"Unable to generate template: {str(e)}"}), status.HTTP_500_INTERNAL_SERVER_ERROR
+
+# ---------- GET: column definitions + simple post template + template link ----------
+@app.route("/d_ffn_insight_config", methods=["GET"])
+def insight_get():
+    try:
+        definitions = {
+            "payload": {
+                # Order is preserved (Py3.7+)
+                "BRAND": {
+                    "Example Values": ["AREXVY", "SHINGRIX"],
+                    "Description": "Brand name.",
+                    "Parameter_type": "Mandatory"
+                },
+                "MARKET": {
+                    "Example Values": ["THA", "GBR", "VNM", "ITA", "PRT"],
+                    "Description": "Market / country code.",
+                    "Parameter_type": "Mandatory"
+                },
+                "INSIGHT": {
+                    "Example Values": ["default", "overall-area-of-interest-insight"],
+                    "Description": "Insight category or key.",
+                    "Parameter_type": "Mandatory"
+                },
+                "TYPE": {
+                    "Example Values": ["Type1", "Type2"],
+                    "Description": "Subtype/variant of the insight.",
+                    "Parameter_type": "Mandatory"
+                },
+                "VALUE_1": {
+                    "Example Values": ["V1"],
+                    "Description": "Primary value used by the insight.",
+                    "Parameter_type": "Mandatory"
+                },
+                "VALUE_2": {
+                    "Example Values": ["V2", "null"],
+                    "Description": "Optional value.",
+                    "Parameter_type": "Optional"
+                },
+                "VALUE_3": {
+                    "Example Values": ["V3", "null"],
+                    "Description": "Optional value.",
+                    "Parameter_type": "Optional"
+                },
+                "VALUE_4": {
+                    "Example Values": ["V4", "null"],
+                    "Description": "Optional value.",
+                    "Parameter_type": "Optional"
+                },
+                "ADDED_BY": {
+                    "Example Values": ["abc.x.abc@gsk.com"],
+                    "Description": "Auto-picked from 'Username' header in POST.",
+                    "Parameter_type": "Mandatory (via header)"
+                },
+                "ENTRY_TIME": {
+                    "Example Values": ["current_timestamp()"],
+                    "Description": "Set by system at insert time.",
+                    "Parameter_type": "Auto-generated"
+                }
+            },
+            "post_request_template_json": {
+                "BRAND": "AREXVY",
+                "MARKET": "THA",
+                "INSIGHT": "default",
+                "TYPE": "Type1",
+                "VALUE_1": "V1",
+                "VALUE_2": "null",
+                "VALUE_3": "null",
+                "VALUE_4": "null"
+            },
+            "excel_upload_instructions": {
+                "expected_extension": ".xlsx",
+                "form_field_name": "file",
+                "required_columns": ["BRAND", "MARKET", "INSIGHT", "TYPE", "VALUE_1"],
+                "optional_columns": ["VALUE_2", "VALUE_3", "VALUE_4"],
+                "notes": [
+                    "Header row must be the first row.",
+                    "Optional columns may be omitted or left blank; they will be saved as SQL NULL.",
+                    "ADDED_BY is taken from the 'Username' header; ENTRY_TIME is set automatically.",
+                    "Duplicates are checked case-insensitively on (BRAND, MARKET, INSIGHT, TYPE).",
+                    "Rows are processed in order: check → insert or skip."
+                ]
+            },
+            "excel_template_link": request.host_url.rstrip("/") + "/download/insight_config_template"
+        }
+        return jsonify(definitions), status.HTTP_200_OK
+    except Exception as e:
+        return jsonify({"error": f"Internal server error: {str(e)}"}), status.HTTP_500_INTERNAL_SERVER_ERROR
+
+# ---------- POST: JSON (single/list) OR Excel (.xlsx) ----------
+@app.route("/d_ffn_insight_config", methods=["POST"])
+def insight_post():
+    try:
+        # who is inserting (from header)
+        added_by = _ins_clean(request.headers.get("Username", "") or "")
+        if not added_by:
+            return jsonify({"error": "Missing 'Username' in headers."}), status.HTTP_400_BAD_REQUEST
+
+        rows = []  # list of dicts with normalized keys
+
+        if "file" in request.files:
+            # Excel upload
+            f = request.files["file"]
+            fname = (f.filename or "").lower().strip()
+            if not fname.endswith(".xlsx"):
+                return jsonify({"error": "Only .xlsx files are supported for bulk upload."}), status.HTTP_400_BAD_REQUEST
+
+            df = pd.read_excel(f, engine="openpyxl")
+            # Normalize column names to UPPER for matching
+            df.columns = [str(c).strip().upper() for c in df.columns]
+
+            required = ["BRAND", "MARKET", "INSIGHT", "TYPE", "VALUE_1"]
+            missing = [c for c in required if c not in df.columns]
+            if missing:
+                return jsonify({"error": f"Missing required columns in Excel: {', '.join(missing)}"}), status.HTTP_400_BAD_REQUEST
+
+            # Make sure optional exist (if not present, we'll treat as NULL later)
+            # Replace NA-ish with ""
+            df = df.replace({pd.NA: "", None: ""}).fillna("")
+
+            for idx, r in df.iterrows():
+                rec = {
+                    "BRAND":   _ins_clean(r.get("BRAND", "")),
+                    "MARKET":  _ins_clean(r.get("MARKET", "")),
+                    "INSIGHT": _ins_clean(r.get("INSIGHT", "")),
+                    "TYPE":    _ins_clean(r.get("TYPE", "")),
+                    "VALUE_1": _ins_clean(r.get("VALUE_1", "")),
+                    # optional: if header missing, .get() returns default "", which we later translate to SQL NULL
+                    "VALUE_2": _ins_clean(r.get("VALUE_2", "")) if "VALUE_2" in df.columns else "",
+                    "VALUE_3": _ins_clean(r.get("VALUE_3", "")) if "VALUE_3" in df.columns else "",
+                    "VALUE_4": _ins_clean(r.get("VALUE_4", "")) if "VALUE_4" in df.columns else ""
+                }
+                # Validate required per row
+                if not (rec["BRAND"] and rec["MARKET"] and rec["INSIGHT"] and rec["TYPE"] and rec["VALUE_1"]):
+                    return jsonify({
+                        "status": "error",
+                        "message": f"Row {int(idx)+2}: Missing BRAND/MARKET/INSIGHT/TYPE/VALUE_1."
+                    }), status.HTTP_400_BAD_REQUEST
+                rows.append(rec)
+        else:
+            # JSON (single object or list)
+            body = request.get_json(force=True, silent=True) or {}
+            items = body if isinstance(body, list) else [body]
+
+            for i, rec in enumerate(items, start=1):
+                brand   = _ins_clean(rec.get("BRAND", ""))
+                market  = _ins_clean(rec.get("MARKET", ""))
+                insight = _ins_clean(rec.get("INSIGHT", ""))
+                typ     = _ins_clean(rec.get("TYPE", ""))
+                v1      = _ins_clean(rec.get("VALUE_1", ""))
+                v2      = _ins_clean(rec.get("VALUE_2", "null"))
+                v3      = _ins_clean(rec.get("VALUE_3", "null"))
+                v4      = _ins_clean(rec.get("VALUE_4", "null"))
+
+                if not (brand and market and insight and typ and v1):
+                    return jsonify({
+                        "status": "error",
+                        "message": f"Item {i}: Missing BRAND/MARKET/INSIGHT/TYPE/VALUE_1."
+                    }), status.HTTP_400_BAD_REQUEST
+
+                rows.append({
+                    "BRAND": brand, "MARKET": market, "INSIGHT": insight, "TYPE": typ,
+                    "VALUE_1": v1, "VALUE_2": v2, "VALUE_3": v3, "VALUE_4": v4
+                })
+
+        if not rows:
+            return jsonify({"error": "No valid rows to process."}), status.HTTP_400_BAD_REQUEST
+
+        # Process in order: SELECT 1 → INSERT (skip duplicates), collect results
+        inserted = 0
+        duplicates = []
+        errors = []
+
+        for idx, rec in enumerate(rows, start=1):
+            try:
+                brand   = rec["BRAND"]
+                market  = rec["MARKET"]
+                insight = rec["INSIGHT"]
+                typ     = rec["TYPE"]
+                v1      = rec["VALUE_1"]
+                v2      = rec.get("VALUE_2", "")
+                v3      = rec.get("VALUE_3", "")
+                v4      = rec.get("VALUE_4", "")
+
+                if _ins_exists_row(brand, market, insight, typ):
+                    duplicates.append({
+                        "row": idx,
+                        "BRAND": brand, "MARKET": market, "INSIGHT": insight, "TYPE": typ,
+                        "reason": "duplicate"
+                    })
+                    continue
+
+                _ins_insert_row(brand, market, insight, typ, v1, v2, v3, v4, added_by)
+                inserted += 1
+
+            except Exception as row_err:
+                errors.append({
+                    "row": idx,
+                    "BRAND": rec.get("BRAND"),
+                    "MARKET": rec.get("MARKET"),
+                    "INSIGHT": rec.get("INSIGHT"),
+                    "TYPE": rec.get("TYPE"),
+                    "error": str(row_err)
+                })
+
+        return jsonify({
+            "status": "success" if inserted and not errors else ("partial" if inserted else "no-change"),
+            "mode": "excel" if "file" in request.files else "json",
+            "inserted_count": inserted,
+            "skipped_duplicates": duplicates,
+            "row_errors": errors
+        }), (status.HTTP_201_CREATED if inserted else status.HTTP_200_OK)
+
+    except Exception as e:
+        return jsonify({"error": f"Internal server error: {str(e)}"}), status.HTTP_500_INTERNAL_SERVER_ERROR
+
+# ===================== end INSIGHT CONFIG endpoint =====================
+
+
+
+
+# ===================== d_ffn_insight_config – Individual Endpoint =====================
+
+INS_TABLE = "hive_metastore.fieldforce_navigator_deployment.llm_insight_config"
+
+# ---- tiny helpers (same style as other endpoints) ----
+def _clean(s):  # trim & collapse spaces
+    return " ".join(str(s).strip().split()) if s is not None else ""
+
+def _sq(s):     # escape single quotes
+    return str(s).replace("'", "''")
+
+def _exists_ins_row(brand, market, insight, typ):
+    # case-insensitive duplicate check
+    sql = f"""
+        SELECT 1
+        FROM {INS_TABLE}
+        WHERE UPPER(TRIM(BRAND))  = UPPER(TRIM('{_sq(brand)}'))
+          AND UPPER(TRIM(MARKET)) = UPPER(TRIM('{_sq(market)}'))
+          AND UPPER(TRIM(INSIGHT))= UPPER(TRIM('{_sq(insight)}'))
+          AND UPPER(TRIM(TYPE))   = UPPER(TRIM('{_sq(typ)}'))
+        LIMIT 1
+    """
+    df = dc.execute_query(sql)
+    return df is not None and not df.empty
+
+def _insert_ins_row(brand, market, insight, typ, v1, v2, v3, v4, added_by):
+    # Build SQL-friendly NULLs for optional values
+    v2_sql = "NULL" if v2 is None or str(v2).lower() == "null" or str(v2).strip() == "" else f"'{_sq(v2)}'"
+    v3_sql = "NULL" if v3 is None or str(v3).lower() == "null" or str(v3).strip() == "" else f"'{_sq(v3)}'"
+    v4_sql = "NULL" if v4 is None or str(v4).lower() == "null" or str(v4).strip() == "" else f"'{_sq(v4)}'"
+
+    sql = f"""
+        INSERT INTO {INS_TABLE}
+            (BRAND, MARKET, INSIGHT, TYPE, VALUE_1, VALUE_2, VALUE_3, VALUE_4, ADDED_BY, ENTRY_TIME)
+        VALUES
+            ('{_sq(brand)}','{_sq(market)}','{_sq(insight)}','{_sq(typ)}',
+             '{_sq(v1)}',{v2_sql},{v3_sql},{v4_sql},'{_sq(added_by)}',CURRENT_TIMESTAMP())
+    """
+    dc.execute_non_query(sql)
+
+# ---------- GET: column definitions + simple post template ----------
+@app.route("/d_ffn_insight", methods=["GET"])
+def insight_get():
+    try:
+        definitions = {
+            "payload": {
+                # Keep order (Py3.7+ preserves insertion order)
+                "BRAND": {
+                    "Example Values": ["AREXVY", "SHINGRIX"],
+                    "Description": "Brand name.",
+                    "Parameter_type": "Mandatory"
+                },
+                "MARKET": {
+                    "Example Values": ["THA", "GBR", "VNM", "ITA", "PRT"],
+                    "Description": "Market code (ISO-like short code).",
+                    "Parameter_type": "Mandatory"
+                },
+                "INSIGHT": {
+                    "Example Values": ["default", "overall-area-of-interest-insight"],
+                    "Description": "Insight key/name.",
+                    "Parameter_type": "Mandatory"
+                },
+                "TYPE": {
+                    "Example Values": ["Type1", "Type2"],
+                    "Description": "Subtype/category for the insight.",
+                    "Parameter_type": "Mandatory"
+                },
+                "VALUE_1": {
+                    "Example Values": ["V1"],
+                    "Description": "Primary value for the insight.",
+                    "Parameter_type": "Mandatory"
+                },
+                "VALUE_2": {
+                    "Example Values": ["V2", "null"],
+                    "Description": "Optional value. If omitted/blank, stored as NULL.",
+                    "Parameter_type": "Optional"
+                },
+                "VALUE_3": {
+                    "Example Values": ["V3", "null"],
+                    "Description": "Optional value. If omitted/blank, stored as NULL.",
+                    "Parameter_type": "Optional"
+                },
+                "VALUE_4": {
+                    "Example Values": ["V4", "null"],
+                    "Description": "Optional value. If omitted/blank, stored as NULL.",
+                    "Parameter_type": "Optional"
+                },
+                "ADDED_BY": {
+                    "Example Values": ["abc.x.abc@gsk.com"],
+                    "Description": "Auto-picked from 'Username' header on POST.",
+                    "Parameter_type": "Mandatory (via header)"
+                },
+                "ENTRY_TIME": {
+                    "Example Values": ["current_timestamp()"],
+                    "Description": "Set by system at insert time.",
+                    "Parameter_type": "Auto-generated"
+                }
+            },
+            "post_request_template_json": {
+                "BRAND": "AREXVY",
+                "MARKET": "THA",
+                "INSIGHT": "default",
+                "TYPE": "Type1",
+                "VALUE_1": "V1",
+                "VALUE_2": "null",
+                "VALUE_3": "null",
+                "VALUE_4": "null"
+            },
+            "excel_upload_instructions": {
+                "expected_extension": ".xlsx",
+                "form_field_name": "file",
+                "required_columns": ["BRAND", "MARKET", "INSIGHT", "TYPE", "VALUE_1"],
+                "optional_columns": ["VALUE_2", "VALUE_3", "VALUE_4"],
+                "notes": [
+                    "First row must be headers.",
+                    "ADDED_BY is taken from 'Username' header.",
+                    "ENTRY_TIME is auto.",
+                    "Duplicate check is case-insensitive on (BRAND, MARKET, INSIGHT, TYPE).",
+                    "Rows are processed in order: check → insert or skip.",
+                    "Optional columns: if header missing or value blank, system stores NULL."
+                ]
+            }
+        }
+        return jsonify(definitions), status.HTTP_200_OK
+    except Exception as e:
+        return jsonify({"error": f"Internal server error: {str(e)}"}), status.HTTP_500_INTERNAL_SERVER_ERROR
+
+# ---------- POST: JSON (single/list) OR Excel (.xlsx) ----------
+@app.route("/d_ffn_insight", methods=["POST"])
+def insight_post():
+    try:
+        # who is inserting
+        added_by = _clean(request.headers.get("Username", "") or "")
+        if not added_by:
+            return jsonify({"error": "Missing 'Username' in headers."}), status.HTTP_400_BAD_REQUEST
+
+        rows = []  # list of tuples in original order
+
+        if "file" in request.files:
+            # Excel (multipart/form-data)
+            f = request.files["file"]
+            fname = (f.filename or "").lower().strip()
+            if not fname.endswith(".xlsx"):
+                return jsonify({"error": "Only .xlsx files are supported for bulk upload."}), status.HTTP_400_BAD_REQUEST
+
+            df = pd.read_excel(f, engine="openpyxl")
+            df.columns = [str(c).strip().upper() for c in df.columns]
+
+            req = ["BRAND", "MARKET", "INSIGHT", "TYPE", "VALUE_1"]
+            missing = [c for c in req if c not in df.columns]
+            if missing:
+                return jsonify({"error": f"Missing required columns in Excel: {', '.join(missing)}"}), status.HTTP_400_BAD_REQUEST
+
+            # normalize optional headers (they may not exist)
+            has_v2 = "VALUE_2" in df.columns
+            has_v3 = "VALUE_3" in df.columns
+            has_v4 = "VALUE_4" in df.columns
+
+            df = df.replace({pd.NA: "", None: ""}).fillna("")
+
+            for idx, r in df.iterrows():
+                brand   = _clean(r.get("BRAND", ""))
+                market  = _clean(r.get("MARKET", ""))
+                insight = _clean(r.get("INSIGHT", ""))
+                typ     = _clean(r.get("TYPE", ""))
+                v1      = _clean(r.get("VALUE_1", ""))
+
+                if not (brand and market and insight and typ and v1):
+                    return jsonify({
+                        "status": "error",
+                        "message": f"Row {int(idx)+2}: Missing BRAND/MARKET/INSIGHT/TYPE/VALUE_1."
+                    }), status.HTTP_400_BAD_REQUEST
+
+                # Optional: if header missing or value blank → None → becomes SQL NULL
+                v2 = _clean(r.get("VALUE_2", "")) if has_v2 else None
+                v3 = _clean(r.get("VALUE_3", "")) if has_v3 else None
+                v4 = _clean(r.get("VALUE_4", "")) if has_v4 else None
+
+                v2 = None if (v2 is None or v2 == "") else v2
+                v3 = None if (v3 is None or v3 == "") else v3
+                v4 = None if (v4 is None or v4 == "") else v4
+
+                rows.append((brand, market, insight, typ, v1, v2, v3, v4))
+
+        else:
+            # JSON (single object or list)
+            body = request.get_json(force=True, silent=True) or {}
+            items = body if isinstance(body, list) else [body]
+
+            for i, rec in enumerate(items, start=1):
+                brand   = _clean(rec.get("BRAND", ""))
+                market  = _clean(rec.get("MARKET", ""))
+                insight = _clean(rec.get("INSIGHT", ""))
+                typ     = _clean(rec.get("TYPE", ""))
+                v1      = _clean(rec.get("VALUE_1", ""))
+
+                if not (brand and market and insight and typ and v1):
+                    return jsonify({
+                        "status": "error",
+                        "message": f"Item {i}: Missing BRAND/MARKET/INSIGHT/TYPE/VALUE_1."
+                    }), status.HTTP_400_BAD_REQUEST
+
+                # Optional fields: default to None if "null" or empty → SQL NULL
+                def _opt(v):
+                    if v is None:
+                        return None
+                    v = _clean(v)
+                    return None if (v == "" or v.lower() == "null") else v
+
+                v2 = _opt(rec.get("VALUE_2", None))
+                v3 = _opt(rec.get("VALUE_3", None))
+                v4 = _opt(rec.get("VALUE_4", None))
+
+                rows.append((brand, market, insight, typ, v1, v2, v3, v4))
+
+        if not rows:
+            return jsonify({"error": "No valid rows to process."}), status.HTTP_400_BAD_REQUEST
+
+        # process in order: SELECT 1 → INSERT (skip duplicates)
+        inserted = 0
+        duplicates = []
+        errors = []
+
+        for idx, (brand, market, insight, typ, v1, v2, v3, v4) in enumerate(rows, start=1):
+            try:
+                if _exists_ins_row(brand, market, insight, typ):
+                    duplicates.append({
+                        "row": idx,
+                        "BRAND": brand,
+                        "MARKET": market,
+                        "INSIGHT": insight,
+                        "TYPE": typ,
+                        "reason": "duplicate"
+                    })
+                    continue
+
+                _insert_ins_row(brand, market, insight, typ, v1, v2, v3, v4, added_by)
+                inserted += 1
+
+            except Exception as row_err:
+                errors.append({
+                    "row": idx,
+                    "BRAND": brand,
+                    "MARKET": market,
+                    "INSIGHT": insight,
+                    "TYPE": typ,
+                    "error": str(row_err)
+                })
+
+        return jsonify({
+            "status": "success" if inserted and not errors else ("partial" if inserted else "no-change"),
+            "mode": "excel" if "file" in request.files else "json",
+            "inserted_count": inserted,
+            "skipped_duplicates": duplicates,
+            "row_errors": errors
+        }), (status.HTTP_201_CREATED if inserted else status.HTTP_200_OK)
+
+    except Exception as e:
+        return jsonify({"error": f"Internal server error: {str(e)}"}), status.HTTP_500_INTERNAL_SERVER_ERROR
