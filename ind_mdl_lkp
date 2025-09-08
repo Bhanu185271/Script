@@ -1,0 +1,263 @@
+# Model Lookup – Individual Endpoint 
+
+MDL_LKP_TABLE = "hive_metastore.fieldforce_navigator_deployment.llm_model_lookup"
+
+
+def _clean(s):
+    return " ".join(str(s).strip().split()) if s is not None else ""
+
+def _sq(s):
+    return str(s).replace("'", "''")
+
+def _int(name, val):
+    try:
+        return int(str(val).strip())
+    except Exception:
+        raise ValueError(f"'{name}' must be an integer")
+
+def _exists_mdl_row(model, deploy, brand, market, region):
+    sql = f"""
+        SELECT 1
+        FROM {MDL_LKP_TABLE}
+        WHERE UPPER(TRIM(MODEL_NAME))=UPPER(TRIM('{_sq(model)}'))
+          AND UPPER(TRIM(DEPLOYMENT_NAME))=UPPER(TRIM('{_sq(deploy)}'))
+          AND UPPER(TRIM(BRAND))=UPPER(TRIM('{_sq(brand)}'))
+          AND UPPER(TRIM(MARKET))=UPPER(TRIM('{_sq(market)}'))
+          AND UPPER(TRIM(REGION))=UPPER(TRIM('{_sq(region)}'))
+        LIMIT 1
+    """
+    df = dc.execute_query(sql)
+    return df is not None and not df.empty
+
+def _insert_mdl_row(model_name, deployment_name, token_limit,
+                    brand, market, region,
+                    input_token_limit, output_token_limit,
+                    token_rate_limit, project_input_limit,
+                    added_by):
+    sql = f"""
+        INSERT INTO {MDL_LKP_TABLE}
+            (MODEL_NAME, DEPLOYMENT_NAME, TOKEN_LIMIT,
+             BRAND, MARKET, REGION,
+             INPUT_TOKEN_LIMIT, OUTPUT_TOKEN_LIMIT,
+             TOKEN_RATE_LIMIT, PROJECT_INPUT_LIMIT,
+             ADDED_BY, ENTRY_TIME)
+        VALUES
+            ('{_sq(model_name)}','{_sq(deployment_name)}',{token_limit},
+             '{_sq(brand)}','{_sq(market)}','{_sq(region)}',
+             {input_token_limit},{output_token_limit},{token_rate_limit},{project_input_limit},
+             '{_sq(added_by)}',CURRENT_TIMESTAMP())
+    """
+    dc.execute_non_query(sql)
+
+# ---------- GET: column definitions + post template ----------
+@app.route("/llm_model_lookup", methods=["GET"])
+def mdl_get():
+    try:
+        definitions = {
+            "payload": {
+                "MODEL_NAME": {
+                    "Example Values": ["gpt-4o", "gpt-35-turbo"],
+                    "Description": "Name of the model.",
+                    "Parameter_type": "Mandatory"
+                },
+                "DEPLOYMENT_NAME": {
+                    "Example Values": ["RxEUAIModelUATFFNGPT-4o"],
+                    "Description": "Azure deployment name of the model.",
+                    "Parameter_type": "Mandatory"
+                },
+                "TOKEN_LIMIT": {
+                    "Example Values": [2800],
+                    "Description": "Max tokens allowed per request.",
+                    "Parameter_type": "Mandatory (Integer)"
+                },
+                "BRAND": {
+                    "Example Values": ["SHINGRIX", "AREXVY"],
+                    "Description": "Associated brand name.",
+                    "Parameter_type": "Mandatory"
+                },
+                "MARKET": {
+                    "Example Values": ["VNM", "THA"],
+                    "Description": "Market code.",
+                    "Parameter_type": "Mandatory"
+                },
+                "REGION": {
+                    "Example Values": ["APNA", "EMEA"],
+                    "Description": "Region name.",
+                    "Parameter_type": "Mandatory"
+                },
+                "INPUT_TOKEN_LIMIT": {
+                    "Example Values": [120000],
+                    "Description": "Input token guardrail.",
+                    "Parameter_type": "Mandatory (Integer)"
+                },
+                "OUTPUT_TOKEN_LIMIT": {
+                    "Example Values": [4000],
+                    "Description": "Output token guardrail.",
+                    "Parameter_type": "Mandatory (Integer)"
+                },
+                "TOKEN_RATE_LIMIT": {
+                    "Example Values": [100000],
+                    "Description": "Rate limit on tokens per minute.",
+                    "Parameter_type": "Mandatory (Integer)"
+                },
+                "PROJECT_INPUT_LIMIT": {
+                    "Example Values": [15000],
+                    "Description": "Limit on project-level input tokens.",
+                    "Parameter_type": "Mandatory (Integer)"
+                },
+                "ADDED_BY": {
+                    "Example Values": ["abc.x.abc@gsk.com"],
+                    "Description": "Auto-picked from 'Username' header in POST.",
+                    "Parameter_type": "Mandatory (via header)"
+                },
+                "ENTRY_TIME": {
+                    "Example Values": ["current_timestamp()"],
+                    "Description": "Auto-generated at insert.",
+                    "Parameter_type": "System Generated"
+                }
+            },
+            "post_request_template_json": {
+                "MODEL_NAME": "gpt-4o",
+                "DEPLOYMENT_NAME": "RxEUAIModelUATFFNGPT-4o",
+                "TOKEN_LIMIT": 2800,
+                "BRAND": "SHINGRIX",
+                "MARKET": "VNM",
+                "REGION": "APNA",
+                "INPUT_TOKEN_LIMIT": 120000,
+                "OUTPUT_TOKEN_LIMIT": 4000,
+                "TOKEN_RATE_LIMIT": 100000,
+                "PROJECT_INPUT_LIMIT": 15000
+            },
+            "excel_upload_instructions": {
+                "expected_extension": ".xlsx",
+                "form_field_name": "file",
+                "required_columns": [
+                    "MODEL_NAME", "DEPLOYMENT_NAME", "TOKEN_LIMIT",
+                    "BRAND", "MARKET", "REGION",
+                    "INPUT_TOKEN_LIMIT", "OUTPUT_TOKEN_LIMIT",
+                    "TOKEN_RATE_LIMIT", "PROJECT_INPUT_LIMIT"
+                ],
+                "notes": [
+                    "First row must be headers.",
+                    "ADDED_BY is auto-picked from 'Username' header.",
+                    "ENTRY_TIME is auto-generated.",
+                    "Duplicate check is case-insensitive on MODEL_NAME + DEPLOYMENT_NAME + BRAND + MARKET + REGION."
+                ]
+            }
+        }
+        return jsonify(definitions), status.HTTP_200_OK
+    except Exception as e:
+        return jsonify({"error": f"Internal server error: {str(e)}"}), status.HTTP_500_INTERNAL_SERVER_ERROR
+
+# ---------- POST: JSON (single/list) OR Excel (.xlsx) ----------
+@app.route("/llm_model_lookup", methods=["POST"])
+def mdl_post():
+    try:
+        added_by = _clean(request.headers.get("Username", "") or "")
+        if not added_by:
+            return jsonify({"error": "Missing 'Username' in headers."}), status.HTTP_400_BAD_REQUEST
+
+        rows = []
+
+        if "file" in request.files:
+            f = request.files["file"]
+            fname = (f.filename or "").lower().strip()
+            if not fname.endswith(".xlsx"):
+                return jsonify({"error": "Only .xlsx files are supported."}), status.HTTP_400_BAD_REQUEST
+
+            df = pd.read_excel(f, engine="openpyxl")
+            df.columns = [str(c).strip().upper() for c in df.columns]
+
+            req = [
+                "MODEL_NAME", "DEPLOYMENT_NAME", "TOKEN_LIMIT",
+                "BRAND", "MARKET", "REGION",
+                "INPUT_TOKEN_LIMIT", "OUTPUT_TOKEN_LIMIT",
+                "TOKEN_RATE_LIMIT", "PROJECT_INPUT_LIMIT"
+            ]
+            missing = [c for c in req if c not in df.columns]
+            if missing:
+                return jsonify({"error": f"Missing required columns in Excel: {', '.join(missing)}"}), status.HTTP_400_BAD_REQUEST
+
+            df = df.replace({pd.NA: "", None: ""}).fillna("")
+            for idx, r in df.iterrows():
+                try:
+                    rows.append((
+                        _clean(r["MODEL_NAME"]),
+                        _clean(r["DEPLOYMENT_NAME"]),
+                        _int("TOKEN_LIMIT", r["TOKEN_LIMIT"]),
+                        _clean(r["BRAND"]),
+                        _clean(r["MARKET"]),
+                        _clean(r["REGION"]),
+                        _int("INPUT_TOKEN_LIMIT", r["INPUT_TOKEN_LIMIT"]),
+                        _int("OUTPUT_TOKEN_LIMIT", r["OUTPUT_TOKEN_LIMIT"]),
+                        _int("TOKEN_RATE_LIMIT", r["TOKEN_RATE_LIMIT"]),
+                        _int("PROJECT_INPUT_LIMIT", r["PROJECT_INPUT_LIMIT"])
+                    ))
+                except Exception as conv_err:
+                    return jsonify({"error": f"Row {int(idx)+2}: {str(conv_err)}"}), status.HTTP_400_BAD_REQUEST
+
+        else:
+            body = request.get_json(force=True, silent=True) or {}
+            items = body if isinstance(body, list) else [body]
+            for i, rec in enumerate(items, start=1):
+                try:
+                    rows.append((
+                        _clean(rec.get("MODEL_NAME", "")),
+                        _clean(rec.get("DEPLOYMENT_NAME", "")),
+                        _int("TOKEN_LIMIT", rec.get("TOKEN_LIMIT", "")),
+                        _clean(rec.get("BRAND", "")),
+                        _clean(rec.get("MARKET", "")),
+                        _clean(rec.get("REGION", "")),
+                        _int("INPUT_TOKEN_LIMIT", rec.get("INPUT_TOKEN_LIMIT", "")),
+                        _int("OUTPUT_TOKEN_LIMIT", rec.get("OUTPUT_TOKEN_LIMIT", "")),
+                        _int("TOKEN_RATE_LIMIT", rec.get("TOKEN_RATE_LIMIT", "")),
+                        _int("PROJECT_INPUT_LIMIT", rec.get("PROJECT_INPUT_LIMIT", ""))
+                    ))
+                except Exception as conv_err:
+                    return jsonify({"error": f"Item {i}: {str(conv_err)}"}), status.HTTP_400_BAD_REQUEST
+
+        if not rows:
+            return jsonify({"error": "No valid rows to process."}), status.HTTP_400_BAD_REQUEST
+
+        inserted, duplicates, errors = 0, [], []
+        for idx, (model, deploy, token_limit, brand, market, region,
+                  in_limit, out_limit, rate_limit, proj_limit) in enumerate(rows, start=1):
+            try:
+                if _exists_mdl_row(model, deploy, brand, market, region):
+                    duplicates.append({
+                        "row": idx,
+                        "MODEL_NAME": model,
+                        "DEPLOYMENT_NAME": deploy,
+                        "BRAND": brand,
+                        "MARKET": market,
+                        "REGION": region,
+                        "reason": "duplicate"
+                    })
+                    continue
+
+                _insert_mdl_row(model, deploy, token_limit,
+                                brand, market, region,
+                                in_limit, out_limit, rate_limit, proj_limit,
+                                added_by)
+                inserted += 1
+
+            except Exception as row_err:
+                errors.append({
+                    "row": idx,
+                    "MODEL_NAME": model,
+                    "DEPLOYMENT_NAME": deploy,
+                    "error": str(row_err)
+                })
+
+        return jsonify({
+            "status": "success" if inserted and not errors else ("partial" if inserted else "no-change"),
+            "mode": "excel" if "file" in request.files else "json",
+            "inserted_count": inserted,
+            "skipped_duplicates": duplicates,
+            "row_errors": errors
+        }), (status.HTTP_201_CREATED if inserted else status.HTTP_200_OK)
+
+    except ValueError as ve:
+        return jsonify({"error": str(ve)}), status.HTTP_400_BAD_REQUEST
+    except Exception as e:
+        return jsonify({"error": f"Internal server error: {str(e)}"}), status.HTTP_500_INTERNAL_SERVER_ERROR
