@@ -1,0 +1,44 @@
+# Install openpyxl (needed for reading .xlsx files with pandas)
+%pip install openpyxl
+
+import pandas as pd
+
+# 1. Search for your uploaded file inside /FileStore
+#    (You can adjust "sample.xlsx" if your filename is different)
+file_name = "sample.xlsx"
+
+# List all files in FileStore
+files = dbutils.fs.ls("/FileStore/")
+
+# Check if file exists at root
+file_path = None
+for f in files:
+    if f.name == file_name:
+        file_path = "/dbfs/FileStore/" + f.name
+        break
+
+# If not found at root, check /FileStore/tables/
+if file_path is None:
+    files = dbutils.fs.ls("/FileStore/tables/")
+    for f in files:
+        if f.name == file_name:
+            file_path = "/dbfs/FileStore/tables/" + f.name
+            break
+
+if file_path is None:
+    raise FileNotFoundError(f"{file_name} not found in /FileStore/ or /FileStore/tables/")
+
+print("✅ File found at:", file_path)
+
+# 2. Load the Excel file
+excel_file = pd.ExcelFile(file_path)
+
+# 3. Print sheet info
+print("Number of sheets:", len(excel_file.sheet_names))
+print("Sheet names:", excel_file.sheet_names)
+
+# 4. Read the first sheet as DataFrame
+df = pd.read_excel(file_path, sheet_name=excel_file.sheet_names[0])
+
+# 5. Show some data
+display(df)
