@@ -1,3 +1,46 @@
+import pandas as pd
+from pyspark.sql import SparkSession
+
+# Define columns to select from each source
+excel_columns = ["AudioID", "column1", "column2"]  # Replace with your desired columns
+table1_columns = ["AudioID", "column3", "column4"]  # Replace with your desired columns  
+table2_columns = ["AudioID", "column5", "column6"]  # Replace with your desired columns
+
+# Read Excel file and select specific columns
+file_path = "/Workspace/Users/alex@grb.com/sample.xlsx"
+df_excel = pd.read_excel(file_path, sheet_name="Feedback Data", nrows=5000)
+df_excel_selected = df_excel[excel_columns]
+
+# Convert pandas DataFrame to Spark DataFrame
+spark_df_excel = spark.createDataFrame(df_excel_selected)
+
+# Read Databricks tables and select specific columns
+table1 = spark.table("hub_order.Table1").select(table1_columns)
+table2 = spark.table("hub_order.Table2").select(table2_columns)
+
+# Join Excel with Table1 on AudioID
+result1 = spark_df_excel.join(table1, on="AudioID", how="inner")
+
+# Join the result with Table2 on AudioID
+final_result = result1.join(table2, on="AudioID", how="inner")
+
+# Display results
+print(f"Excel rows: {spark_df_excel.count()}")
+print(f"Table1 rows: {table1.count()}")
+print(f"Table2 rows: {table2.count()}")
+print(f"Final joined rows: {final_result.count()}")
+
+final_result.show()
+
+
+
+
+
+
+
+
+
+
 # Install openpyxl (needed for reading .xlsx files with pandas)
 %pip install openpyxl
 
