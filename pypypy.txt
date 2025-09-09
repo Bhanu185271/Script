@@ -1,3 +1,45 @@
+import pandas as pd
+
+# Define columns to select
+excel_columns = ["AudioID", "QuestionID", "QuestionText"]
+llm_columns = ["AudioID", "LOCAL_LANGUAGE_AGREED_ACTIONS", "LOCAL_LANGUAGE_SUMMARY", "OVERALL_AREA_OF_INTEREST_INSIGHT", "OVERALL_OBJECTIONS"]
+pre_processed_columns = ["AudioID", "BRAND", "MARKET", "TRANSCRIPT_ID"]
+
+# Read Excel file
+file_path = "/Workspace/Users/chandrabhanu.x.chandrabhanu@gsk.com/Feedback_Report.xlsx"
+df_excel = pd.read_excel(file_path, sheet_name="Feedback Data", nrows=5000)
+
+# Select required columns from Excel
+excel_data = df_excel[excel_columns]
+
+# Read Databricks tables as pandas DataFrames
+llm_output = spark.table("fieldforce_navigator_uat.llm_audio_insights_output").toPandas()
+pre_processed = spark.table("fieldforce_navigator_uat.audio_pre_processed_output").toPandas()
+
+# Check available columns
+print("LLM Output columns:", list(llm_output.columns))
+print("Pre-processed columns:", list(pre_processed.columns))
+
+# Select required columns (only if they exist)
+available_llm_cols = [col for col in llm_columns if col in llm_output.columns]
+available_pre_cols = [col for col in pre_processed_columns if col in pre_processed.columns]
+
+print("Available LLM columns:", available_llm_cols)
+print("Available Pre-processed columns:", available_pre_cols)
+
+llm_data = llm_output[available_llm_cols]
+pre_data = pre_processed[available_pre_cols]
+
+# Join the dataframes
+result1 = excel_data.merge(llm_data, on="AUDIO_ID", how="inner")
+final_result = result1.merge(pre_data, on="AUDIO_ID", how="inner")
+
+print(f"Final result shape: {final_result.shape}")
+final_result.head()
+
+
+
+
 
 import pandas as pd
 
