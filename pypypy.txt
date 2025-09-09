@@ -1,3 +1,55 @@
+import pandas as pd
+from pyspark.sql import SparkSession
+
+# Define columns
+excel_columns = ["AudioID", "QuestionID", "QuestionText"] 
+table1_columns = ["AudioID", "LOCAL_LANGUAGE_AGREED_ACTIONS", "LOCAL_LANGUAGE_SUMMARY","OVERALL_AREA_OF_INTEREST_INSIGHT", "OVERALL_OBJECTIONS"] 
+table2_columns = ["AudioID", "BRAND", "MARKET","TRANSCRIPT_ID"]
+
+# File path
+file_path = "/Workspace/Users/chandrabhanu.x.chandrabhanu@gsk.com/Feedback_Report.xlsx"
+temp_csv_path = "/tmp/temp_excel_data.csv"
+
+# Read Excel with pandas and save as CSV for Spark
+df_temp = pd.read_excel(file_path, sheet_name="Feedback Data", nrows=5000)
+df_temp.to_csv(temp_csv_path, index=False)
+
+# Read CSV with Spark and select columns
+spark_df_excel = spark.read.csv(temp_csv_path, header=True, inferSchema=True) \
+    .select(excel_columns)
+
+# Read Databricks tables and select specific columns
+llm_output = spark.table("fieldforce_navigator_uat.llm_audio_insights_output").select(table1_columns)
+pre_processed = spark.table("fieldforce_navigator_uat.audio_pre_processed_output").select(table2_columns)
+
+# Join Excel with llm_output on AudioID
+result1 = spark_df_excel.join(llm_output, on="AudioID", how="inner")
+
+# Join the result with pre_processed on AudioID
+final_result = result1.join(pre_processed, on="AudioID", how="inner")
+
+# Display results
+print(f"Excel rows: {spark_df_excel.count()}")
+print(f"LLM output rows: {llm_output.count()}")
+print(f"Pre-processed rows: {pre_processed.count()}")
+print(f"Final joined rows: {final_result.count()}")
+
+final_result.show()
+
+# Clean up temp file
+import os
+os.remove(temp_csv_path)
+
+
+
+
+
+
+
+
+
+
+
 from pyspark.sql import SparkSession
 
 # Define columns
