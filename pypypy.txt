@@ -1,3 +1,116 @@
+import pandas as pd
+from pyspark.sql.types import StructType, StructField, StringType
+from pyspark.sql import functions as F
+
+# ----------------------------------
+# Step 1: Read Excel into Pandas
+# ----------------------------------
+file_path = "/Workspace/Users/chandrabhanu.x.chandrabhanu@gsk.com/Feedback_Report.xlsx"
+df_excel = pd.read_excel(file_path, sheet_name="Feedback Data", nrows=5000)
+
+excel_columns = ["AudioID", "QuestionID", "QuestionText", "ResponseText"]
+df_excel = df_excel[excel_columns]
+
+# Define schema
+schema = StructType([
+    StructField("AudioID", StringType(), True),
+    StructField("QuestionID", StringType(), True),
+    StructField("QuestionText", StringType(), True),
+    StructField("ResponseText", StringType(), True)
+])
+
+# Convert Pandas → Spark
+spark_excel = spark.createDataFrame(df_excel.astype(str), schema=schema)
+
+# ----------------------------------
+# Step 2: Load Tables
+# ----------------------------------
+llm_output = spark.table("fieldforce_navigator_uat.llm_audio_insights_output")
+pre_processed = spark.table("fieldforce_navigator_uat.audio_pre_processed_output")
+
+llm_columns = ["AUDIO_ID", "LOCAL_LANGUAGE_AGREED_ACTIONS", "LOCAL_LANGUAGE_SUMMARY",
+               "OVERALL_AREA_OF_INTEREST_INSIGHT", "OVERALL_OBJECTIONS"]
+pre_processed_columns = ["AUDIO_ID", "BRAND", "MARKET", "TRANSCRIPT_ID", "REGION"]
+
+llm_data = llm_output.select(llm_columns)
+pre_data = pre_processed.select(pre_processed_columns)
+
+# ----------------------------------
+# Step 3: Joins
+# ----------------------------------
+result1 = spark_excel.join(llm_data, spark_excel.AudioID == llm_data.AUDIO_ID, "inner") \
+                     .drop(llm_data.AUDIO_ID)
+
+stg_result = result1.join(pre_data, result1.AudioID == pre_data.AUDIO_ID, "inner") \
+                    .drop(pre_data.AUDIO_ID)
+
+final_result = stg_result
+
+# ----------------------------------
+# Step 4: Flexible Filters
+# ----------------------------------
+filter_audio_ids = []   # Example: ["81D3EDEF-45E4-45BF-888A-D1536366986D"]
+filter_brand = []       # Example: ["BrandA"]
+filter_market = []      # Example: ["India"]
+filter_region = []      # Example: ["APAC"]
+
+if filter_audio_ids:
+    final_result = final_result.filter(F.col("AudioID").isin(filter_audio_ids))
+
+if filter_brand:
+    final_result = final_result.filter(F.col("BRAND").isin(filter_brand))
+
+if filter_market:
+    final_result = final_result.filter(F.col("MARKET").isin(filter_market))
+
+if filter_region:
+    final_result = final_result.filter(F.col("REGION").isin(filter_region))
+
+# ----------------------------------
+# Step 5: Column Logic
+# ----------------------------------
+# Extract last word if '?' present
+last_word_col = F.regexp_extract("QuestionText", r"(\w+)\?", 1)
+
+# Build column name:
+# - Case 1: If "?" present → QuestionID_lastword
+# - Case 2: Else → QuestionID_Comments
+concat_col = F.when(F.col("QuestionText").rlike(r"\?"),
+                    F.concat_ws("_", F.col("QuestionID"), last_word_col)) \
+              .otherwise(F.concat_ws("_", F.col("QuestionID"), F.lit("Comments")))
+
+df_with_concat = final_result.withColumn("concat_col", concat_col)
+
+# ----------------------------------
+# Step 6: Pivot
+# ----------------------------------
+final_pivoted = (
+    df_with_concat
+    .groupBy("AudioID")
+    .pivot("concat_col")
+    .agg(F.first("ResponseText"))
+)
+
+# Final Output
+display(final_pivoted)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 import pandas as pd
 from pyspark.sql.types import StructType, StructField, StringType
