@@ -1,3 +1,56 @@
+from pyspark.sql import functions as F
+
+# -------------------------------
+# 1. Filter multiple AudioIDs
+# -------------------------------
+filter_audio_ids = [
+    "81D3EDEF-45E4-45BF-888A-D1536366986D",
+    "CCDEBCAF-70C2-41EF-8698-E4E29603359A"
+]
+
+final_result = stg_result.filter(F.col("AudioID").isin(filter_audio_ids))
+
+# -------------------------------
+# 2. Extract last word if QuestionText has "?"
+# -------------------------------
+# Remove "?" and get last word
+final_result = final_result.withColumn(
+    "LastWord",
+    F.when(
+        F.col("QuestionText").rlike(r"\?"),
+        F.regexp_extract(F.regexp_replace(F.col("QuestionText"), r"\?", ""), r"(\w+)$", 1)
+    )
+)
+
+# -------------------------------
+# 3. Concat QuestionID and LastWord
+# -------------------------------
+final_result = final_result.withColumn(
+    "ConcatCol",
+    F.when(F.col("LastWord").isNotNull(), F.concat_ws("_", F.col("QuestionID"), F.col("LastWord")))
+)
+
+# -------------------------------
+# 4. Pivot/Transpose the data
+# -------------------------------
+# Keep only required cols for pivot
+pivot_df = final_result.groupBy("AudioID").pivot("ConcatCol").agg(F.first("ResponseText"))
+
+# -------------------------------
+# 5. Merge with other non-changing cols (Brand, Market, etc.)
+# -------------------------------
+# Drop duplicates (since they repeat per AudioID) and join back
+meta_cols = ["AudioID", "BRAND", "MARKET", "TRANSCRIPT_ID"]
+meta_df = final_result.select(meta_cols).dropDuplicates()
+
+final_pivoted = meta_df.join(pivot_df, on="AudioID", how="inner")
+
+# Show final output
+display(final_pivoted)
+
+
+
+
 
 import pandas as pd
 from pyspark.sql.types import StructType, StructField, StringType
