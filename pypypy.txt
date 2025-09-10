@@ -29,6 +29,141 @@ pre_processed = spark.table("fieldforce_navigator_uat.audio_pre_processed_output
 
 llm_columns = ["AUDIO_ID", "LOCAL_LANGUAGE_AGREED_ACTIONS", "LOCAL_LANGUAGE_SUMMARY",
                "OVERALL_AREA_OF_INTEREST_INSIGHT", "OVERALL_OBJECTIONS"]
+pre_processed_columns = ["AUDIO_ID", "BRAND", "MARKET", "REGION", "TRANSCRIPT_ID"]
+
+llm_data = llm_output.select(llm_columns)
+pre_data = pre_processed.select(pre_processed_columns)
+
+# -------------------------------
+# 3. Join Excel with tables
+# -------------------------------
+result1 = spark_excel.join(llm_data, spark_excel.AudioID == llm_data.AUDIO_ID, "inner").drop(llm_data.AUDIO_ID)
+stg_result = result1.join(pre_data, result1.AudioID == pre_data.AUDIO_ID, "inner").drop(pre_data.AUDIO_ID)
+
+# -------------------------------
+# 4. Flexible Filters
+# -------------------------------
+filter_audio_ids = [
+    # "81D3EDEF-45E4-45BF-888A-D1536366986D",
+    # "CCDEBCAF-70C2-41EF-8698-E4E29603359A"
+]
+
+filter_brands = [
+    # "BrandA", "BrandB"
+]
+
+filter_markets = [
+    # "India", "China"
+]
+
+filter_regions = [
+    # "APAC", "EMEA"
+]
+
+# Apply filters only if lists are not empty
+filtered_df = stg_result
+if filter_audio_ids:
+    filtered_df = filtered_df.filter(F.col("AudioID").isin(filter_audio_ids))
+
+if filter_brands:
+    filtered_df = filtered_df.filter(F.col("BRAND").isin(filter_brands))
+
+if filter_markets:
+    filtered_df = filtered_df.filter(F.col("MARKET").isin(filter_markets))
+
+if filter_regions:
+    filtered_df = filtered_df.filter(F.col("REGION").isin(filter_regions))
+
+final_result = filtered_df
+
+# -------------------------------
+# 5. Extract last word if QuestionText has '?'
+# -------------------------------
+final_result = final_result.withColumn(
+    "LastWord",
+    F.when(
+        F.col("QuestionText").rlike(r"\?"),
+        F.regexp_extract(F.regexp_replace(F.col("QuestionText"), r"\?", ""), r"(\w+)$", 1)
+    )
+)
+
+# -------------------------------
+# 6. Concat QuestionID + LastWord
+# -------------------------------
+final_result = final_result.withColumn(
+    "ConcatCol",
+    F.when(F.col("LastWord").isNotNull(), F.concat_ws("_", F.col("QuestionID"), F.col("LastWord")))
+)
+
+# -------------------------------
+# 7. Pivot/Transpose → one row per AudioID
+# -------------------------------
+pivot_df = final_result.groupBy("AudioID").pivot("ConcatCol").agg(F.first("ResponseText"))
+
+# -------------------------------
+# 8. Bring back metadata
+# -------------------------------
+meta_cols = ["AudioID", "BRAND", "MARKET", "REGION", "TRANSCRIPT_ID"]
+meta_df = final_result.select(meta_cols).dropDuplicates()
+
+final_pivoted = meta_df.join(pivot_df, on="AudioID", how="inner")
+
+# -------------------------------
+# 9. Final Output
+# -------------------------------
+display(final_pivoted)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+import pandas as pd
+from pyspark.sql.types import StructType, StructField, StringType
+from pyspark.sql import functions as F
+
+# -------------------------------
+# 1. Read Excel into Spark
+# -------------------------------
+file_path = "/Workspace/Users/chandrabhanu.x.chandrabhanu@gsk.com/Feedback_Report.xlsx"
+df_excel = pd.read_excel(file_path, sheet_name="Feedback Data", nrows=5000)
+
+excel_columns = ["AudioID", "QuestionID", "QuestionText", "ResponseText"]
+df_excel = df_excel[excel_columns]
+
+schema = StructType([
+    StructField("AudioID", StringType(), True),
+    StructField("QuestionID", StringType(), True),
+    StructField("QuestionText", StringType(), True),
+    StructField("ResponseText", StringType(), True)
+])
+
+spark_excel = spark.createDataFrame(df_excel.astype(str), schema=schema)
+
+# -------------------------------
+# 2. Read Databricks tables
+# -------------------------------
+llm_output = spark.table("fieldforce_navigator_uat.llm_audio_insights_output")
+pre_processed = spark.table("fieldforce_navigator_uat.audio_pre_processed_output")
+
+llm_columns = ["AUDIO_ID", "LOCAL_LANGUAGE_AGREED_ACTIONS", "LOCAL_LANGUAGE_SUMMARY",
+               "OVERALL_AREA_OF_INTEREST_INSIGHT", "OVERALL_OBJECTIONS"]
 pre_processed_columns = ["AUDIO_ID", "BRAND", "MARKET", "TRANSCRIPT_ID"]
 
 llm_data = llm_output.select(llm_columns)
