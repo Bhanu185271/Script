@@ -190,13 +190,11 @@ class DatabricksData:
 
  
 
-'''DATABRICKS_ACCESS_TOKEN = os.environ['db_token']
+DATABRICKS_ACCESS_TOKEN = os.environ['db_token']
 DATABRICKS_HTTP_PATH = os.environ['adb_sqlwarehouse_path']
-DATABRICKS_SERVER_HOSTNAME = os.environ['server_hostname']'''
+DATABRICKS_SERVER_HOSTNAME = os.environ['server_hostname']
 
-DATABRICKS_SERVER_HOSTNAME = "adb-192341293048.8.azuredatabricks.net"
-DATABRICKS_HTTP_PATH = "/sql/1.0/warehouses/87e203ea72dc"
-DATABRICKS_ACCESS_TOKEN = "dapide6717021f661821a7e3"
+
 
 def create_connection():
     """Create a Databricks SQL connection."""
@@ -228,3 +226,23 @@ def execute_non_query(query):
     except Exception as e:
         print("SQL execution error:", str(e))
         raise
+
+
+def get_region_by_market(market: str) -> str:
+    """
+    Fetch the region for a given market by querying the Delta path directly via SQL.
+    Uses dc.execute_query(query) to execute SQL.
+    """
+    delta_path = "abfss://curated@rxglobaladlsprodgen2.dfs.core.windows.net/Global/Activity/D_ACCOUNT"
+
+    query = f"""
+        SELECT DISTINCT REGION
+        FROM delta.`{delta_path}`
+        WHERE MarketName = '{market}'
+        LIMIT 1
+    """
+
+    df = execute_query(query)
+    if not df.empty:
+        return df.iloc[0]["REGION"]
+    return None
