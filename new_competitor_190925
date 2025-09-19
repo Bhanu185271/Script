@@ -1,3 +1,437 @@
+
+# Competitor Config – Individual Endpoint 
+
+import os
+import re
+from flask import jsonify, request
+from flask_api import status
+
+COMP_TABLE = "hive_metastore.fieldforce_navigator_deployment.d_ffn_competitor_config"
+
+
+def _clean(s):  # trim spaces
+    return " ".join(str(s).strip().split()) if s is not None else ""
+
+def _sq(s):     # escape single quotes
+    return str(s).replace("'", "''")
+
+def _is_nullish(v):
+    """Return True if value should be treated as SQL NULL."""
+    if v is None:
+        return True
+    t = str(v).strip()
+    if t == "":
+        return True
+    return t.lower() == "null"
+
+def _exists_cmpt_row(market, brand, comp_brand, comp_type):
+    # case-insensitive duplicate check
+    sql = f"""
+        SELECT *
+        FROM {COMP_TABLE}
+        WHERE UPPER(TRIM(MARKET))            = UPPER(TRIM('{_sq(market)}'))
+          AND UPPER(TRIM(BRAND))             = UPPER(TRIM('{_sq(brand)}'))
+          AND UPPER(TRIM(COMPETITOR_BRANDS)) = UPPER(TRIM('{_sq(comp_brand)}'))
+          AND UPPER(TRIM(COMPETITION_TYPE))  = UPPER(TRIM('{_sq(comp_type)}'))
+        LIMIT 1
+    """
+    df = dc.execute_query(sql)
+    return df is not None and not df.empty
+
+def _insert_cmpt_row(market, brand, disease_state, drug_class,
+                     comp_brands, comp_type, molecule, other_names,
+                     combination, added_by):
+    
+    ds_sql  = "NULL" if _is_nullish(disease_state) else f"'{_sq(disease_state)}'"
+    dc_sql  = "NULL" if _is_nullish(drug_class)    else f"'{_sq(drug_class)}'"
+    mol_sql = "NULL" if _is_nullish(molecule)      else f"'{_sq(molecule)}'"
+    oth_sql = "NULL" if _is_nullish(other_names)   else f"'{_sq(other_names)}'"
+    cmb_sql = "NULL" if _is_nullish(combination)   else f"'{_sq(combination)}'"
+
+    sql = f"""
+        INSERT INTO {COMP_TABLE}
+            (MARKET, BRAND, DISEASE_STATE, DRUG_CLASS,
+             COMPETITOR_BRANDS, COMPETITION_TYPE,
+             ADDED_BY, ENTRY_TIME,
+             MOLECULE, OTHER_NAMES, COMBINATION)
+        VALUES
+            ('{_sq(market)}','{_sq(brand)}',{ds_sql},{dc_sql},
+             '{_sq(comp_brands)}','{_sq(comp_type)}',
+             '{_sq(added_by)}',CURRENT_TIMESTAMP(),
+             {mol_sql},{oth_sql},{cmb_sql})
+    """
+    dc.execute_non_query(sql)
+
+# GET: column definitions + simple post template 
+@app.route("/d_ffn_competitor_config", methods=["GET"])
+def competitor_get():
+    try:
+        definitions = {
+            "sample_json": {
+                
+                "MARKET": {
+                    "Example Values": ["GBR", "THA", "ITA", "PRT"],
+                    "Description": "Market country code",
+                    "Parameter_type": "Mandatory"
+                },
+                "BRAND": {
+                    "Example Values": ["AREXVY", "SHINGRIX"],
+                    "Description": "Brand name",
+                    "Parameter_type": "Mandatory"
+                },
+                "DISEASE_STATE": {
+                    "Example Values": ["RSV vaccine", "Shingles"],
+                    "Description": "Primary disease area or indication",
+                    "Parameter_type": "Mandatory"
+                },
+                "DRUG_CLASS": {
+                    "Example Values": ["Non-adjuvanted", "Adjuvanted"],
+                    "Description": "Drug class/category",
+                    "Parameter_type": "Mandatory"
+                },
+                "COMPETITOR_BRANDS": {
+                    "Example Values": ["Abrysvo"],
+                    "Description": "Competing brand name",
+                    "Parameter_type": "Mandatory"
+                },
+                "COMPETITION_TYPE": {
+                    "Example Values": ["COMPETITOR", "ALTERNATIVE"],
+                    "Description": "Relationship type vs our brand",
+                    "Parameter_type": "Mandatory"
+                },
+                "MOLECULE": {
+                    "Example Values": ["RSVPreF"],
+                    "Description": "Active component or molecule",
+                    "Parameter_type": "Optional"
+                },
+                "OTHER_NAMES": {
+                    "Example Values": ["null"],
+                    "Description": "Aliases / other names",
+                    "Parameter_type": "Optional"
+                },
+                "COMBINATION": {
+                    "Example Values": ["null"],
+                    "Description": "Combination component if any",
+                    "Parameter_type": "Optional"
+                },
+                "ADDED_BY": {
+                    "Example Values": ["abc.x.abc@gsk.com"],
+                    "Description": "Auto-picked from 'Username' header in POST",
+                    "Parameter_type": "Mandatory (via header)"
+                },
+                "ENTRY_TIME": {
+                    "Example Values": ["current_timestamp()"],
+                    "Description": "Set by system at insert time",
+                    "Parameter_type": "Auto-generated"
+                }
+            },
+            "post_request_template_json": {
+                "MARKET": "THA",
+                "BRAND": "AREXVY",
+                "DISEASE_STATE": "RSV vaccine",
+                "DRUG_CLASS": "Non-adjuvanted",
+                "COMPETITOR_BRANDS": "Abrysvo",
+                "COMPETITION_TYPE": "COMPETITOR",
+                "MOLECULE": "null",
+                "OTHER_NAMES": "null",
+                "COMBINATION": "null"
+            },
+            "excel_upload_instructions": {
+                "expected_extension": ".xlsx",
+                "form_field_name": "file",
+                "required_columns": ["MARKET", "BRAND", "COMPETITOR_BRANDS", "COMPETITION_TYPE"],
+                "optional_columns": ["MOLECULE", "OTHER_NAMES", "COMBINATION"],
+                "notes": [
+                    "Tablename : hive_metastore.fieldforce_navigator_deployment.d_ffn_competitor_config", 
+                    "If you have data for optional columns, Kindly Insert the value in post request template",
+                    "When optional columns are not included in the post request Excel file, the system will automatically save them as NULL (empty)"
+                ]
+            }
+        }
+        return jsonify(definitions), status.HTTP_200_OK
+    except Exception as e:
+        return jsonify({"error": f"Internal server error: {str(e)}"}), status.HTTP_500_INTERNAL_SERVER_ERROR
+
+# POST: JSON (single/list) OR Excel (.xlsx) 
+@app.route("/d_ffn_competitor_config", methods=["POST"])
+def competitor_post():
+    try:
+        # capture inserting user
+        added_by = _clean(request.headers.get("Username", "") or "")
+        if not added_by:
+            return jsonify({"error": "Missing 'Username' in headers."}), status.HTTP_400_BAD_REQUEST
+
+        rows = []  # list of dicts
+
+        if "file" in request.files:
+            # Excel (multipart/form-data)
+            f = request.files["file"]
+            fname = (f.filename or "").lower().strip()
+
+            # === NEW: TYPE 2: 'template' special handling ===
+            # If the provided excel filename (without extension) is exactly "template"
+            # we read the "Brand - Competitors" sheet, header at row 3, data from row 4.
+            base_fname = os.path.splitext(fname)[0]
+            if base_fname == "template":
+                # Read the required sheet with header at the 3rd row (header=2)
+                try:
+                    df = pd.read_excel(f, sheet_name="Brand - Competitors", engine="openpyxl", header=2)
+                except Exception as ex:
+                    return jsonify({"error": f"Failed to read 'Brand - Competitors' sheet: {str(ex)}"}), status.HTTP_400_BAD_REQUEST
+
+                # Normalize column names (strip) and handle spacing variations via normalized key mapping
+                df.columns = [str(c).strip() for c in df.columns]
+
+                # mapping from normalized excel column name -> DB column name
+                def _norm_col(s):
+                    return re.sub(r"\s+", "", str(s).strip().lower())
+
+                expected_map = {
+                    "market": "MARKET",
+                    "brand": "BRAND",
+                    "drugclass": "DRUG_CLASS",
+                    "brands": "COMPETITOR_BRANDS",
+                    "molecule": "MOLECULE",
+                    "othernames": "OTHER_NAMES",
+                    "combination": "COMBINATION",
+                    "diseasestate": "DISEASE_STATE",
+                    "competitiontype": "COMPETITION_TYPE"
+                }
+
+                # Build mapping from actual df column name -> DB column name where possible
+                actual_to_db = {}
+                for col in df.columns:
+                    key = _norm_col(col)
+                    if key in expected_map:
+                        actual_to_db[col] = expected_map[key]
+                    # else: ignore columns like "Date added"
+
+                # Rename columns (only mapped ones)
+                df = df.rename(columns=actual_to_db)
+
+                # Validate required columns exist after mapping
+                required_cols = ["MARKET", "BRAND", "COMPETITOR_BRANDS", "COMPETITION_TYPE"]
+                missing = [c for c in required_cols if c not in df.columns]
+                if missing:
+                    return jsonify({"error": f"Missing required columns in template Excel after mapping: {', '.join(missing)}"}), status.HTTP_400_BAD_REQUEST
+
+                # normalize NAs to empty strings
+                df = df.replace({pd.NA: "", None: ""}).fillna("")
+
+                # iterate rows; note: header row was row 3, data starts at row 4 => excel row = idx + 4
+                for idx, r in df.iterrows():
+                    market = _clean(r.get("MARKET", ""))
+                    brand  = _clean(r.get("BRAND", ""))
+                    cbrand = _clean(r.get("COMPETITOR_BRANDS", ""))
+                    ctype  = _clean(r.get("COMPETITION_TYPE", ""))
+
+                    if not market or not brand or not cbrand or not ctype:
+                        return jsonify({
+                            "status": "error",
+                            "message": f"Row {int(idx)+4}: Missing MARKET/BRAND/COMPETITOR_BRANDS/COMPETITION_TYPE."
+                        }), status.HTTP_400_BAD_REQUEST
+
+                    disease = _clean(r.get("DISEASE_STATE", ""))
+                    dclass  = _clean(r.get("DRUG_CLASS", ""))
+                    molec   = _clean(r.get("MOLECULE", "null"))
+                    other   = _clean(r.get("OTHER_NAMES", "null"))
+                    comb    = _clean(r.get("COMBINATION", "null"))
+
+                    # store excel row number so we can report it later for duplicates/errors
+                    rows.append({
+                        "MARKET": market,
+                        "BRAND": brand,
+                        "DISEASE_STATE": disease,
+                        "DRUG_CLASS": dclass,
+                        "COMPETITOR_BRANDS": cbrand,
+                        "COMPETITION_TYPE": ctype,
+                        "MOLECULE": molec,
+                        "OTHER_NAMES": other,
+                        "COMBINATION": comb,
+                        "__excel_row": int(idx) + 4
+                    })
+
+            else:
+                # === TYPE 1: normal excel flow (unchanged but we will add duplicate_count to response) ===
+                if not fname.endswith(".xlsx"):
+                    return jsonify({"error": "Only .xlsx files are supported for bulk upload."}), status.HTTP_400_BAD_REQUEST
+
+                df = pd.read_excel(f, engine="openpyxl")
+                df.columns = [str(c).strip().upper() for c in df.columns]
+
+                req = ["MARKET", "BRAND", "COMPETITOR_BRANDS", "COMPETITION_TYPE"]
+                missing = [c for c in req if c not in df.columns]
+                if missing:
+                    return jsonify({"error": f"Missing required columns in Excel: {', '.join(missing)}"}), status.HTTP_400_BAD_REQUEST
+
+                df = df.replace({pd.NA: "", None: ""}).fillna("")
+
+                for idx, r in df.iterrows():
+                    # required
+                    market = _clean(r.get("MARKET", ""))
+                    brand  = _clean(r.get("BRAND", ""))
+                    cbrand = _clean(r.get("COMPETITOR_BRANDS", ""))
+                    ctype  = _clean(r.get("COMPETITION_TYPE", ""))
+
+                    if not market or not brand or not cbrand or not ctype:
+                        return jsonify({
+                            "status": "error",
+                            "message": f"Row {int(idx)+2}: Missing MARKET/BRAND/COMPETITOR_BRANDS/COMPETITION_TYPE."
+                        }), status.HTTP_400_BAD_REQUEST
+
+                    # optional (may be absent in header)
+                    disease = _clean(r.get("DISEASE_STATE", ""))
+                    dclass  = _clean(r.get("DRUG_CLASS", ""))
+                    molec   = _clean(r.get("MOLECULE", "null"))
+                    other   = _clean(r.get("OTHER_NAMES", "null"))
+                    comb    = _clean(r.get("COMBINATION", "null"))
+
+                    # store excel row so we can report duplicate row later in same style as template (excel row)
+                    rows.append({
+                        "MARKET": market,
+                        "BRAND": brand,
+                        "DISEASE_STATE": disease,
+                        "DRUG_CLASS": dclass,
+                        "COMPETITOR_BRANDS": cbrand,
+                        "COMPETITION_TYPE": ctype,
+                        "MOLECULE": molec,
+                        "OTHER_NAMES": other,
+                        "COMBINATION": comb,
+                        "__excel_row": int(idx) + 2
+                    })
+
+        else:
+            # JSON (single object or list)
+            body = request.get_json(force=True, silent=True) or {}
+            items = body if isinstance(body, list) else [body]
+
+            for i, rec in enumerate(items, start=1):
+                market = _clean(rec.get("MARKET", ""))
+                brand  = _clean(rec.get("BRAND", ""))
+                cbrand = _clean(rec.get("COMPETITOR_BRANDS", ""))
+                ctype  = _clean(rec.get("COMPETITION_TYPE", ""))
+
+                if not market or not brand or not cbrand or not ctype:
+                    return jsonify({
+                        "status": "error",
+                        "message": f"Item {i}: Missing MARKET/BRAND/COMPETITOR_BRANDS/COMPETITION_TYPE."
+                    }), status.HTTP_400_BAD_REQUEST
+
+                disease = _clean(rec.get("DISEASE_STATE", ""))
+                dclass  = _clean(rec.get("DRUG_CLASS", ""))
+                molec   = _clean(rec.get("MOLECULE", "null"))
+                other   = _clean(rec.get("OTHER_NAMES", "null"))
+                comb    = _clean(rec.get("COMBINATION", "null"))
+
+                # For JSON we don't have an excel row; keep row as the item index for traceability
+                rows.append({
+                    "MARKET": market,
+                    "BRAND": brand,
+                    "DISEASE_STATE": disease,
+                    "DRUG_CLASS": dclass,
+                    "COMPETITOR_BRANDS": cbrand,
+                    "COMPETITION_TYPE": ctype,
+                    "MOLECULE": molec,
+                    "OTHER_NAMES": other,
+                    "COMBINATION": comb,
+                    "__excel_row": None  # not applicable
+                })
+
+        if not rows:
+            return jsonify({"error": "No valid rows to process."}), status.HTTP_400_BAD_REQUEST
+
+        # process in order: SELECT & INSERT (skip duplicates)
+        inserted = 0
+        duplicates = []
+        errors = []
+
+        for idx, r in enumerate(rows, start=1):
+            try:
+                market = r["MARKET"]
+                brand  = r["BRAND"]
+                cbrand = r["COMPETITOR_BRANDS"]
+                ctype  = r["COMPETITION_TYPE"]
+
+                if _exists_cmpt_row(market, brand, cbrand, ctype):
+                    # report the Excel row number if available, else fallback to enumerated idx
+                    excel_row = r.get("__excel_row") or idx
+                    duplicates.append({
+                        "row": excel_row,
+                        "MARKET": market,
+                        "BRAND": brand,
+                        "COMPETITOR_BRANDS": cbrand,
+                        "COMPETITION_TYPE": ctype,
+                        "reason": "duplicate"
+                    })
+                    continue
+
+                _insert_cmpt_row(
+                    market=market,
+                    brand=brand,
+                    disease_state=r.get("DISEASE_STATE", ""),
+                    drug_class=r.get("DRUG_CLASS", ""),
+                    comp_brands=cbrand,
+                    comp_type=ctype,
+                    molecule=r.get("MOLECULE", ""),
+                    other_names=r.get("OTHER_NAMES", ""),
+                    combination=r.get("COMBINATION", ""),
+                    added_by=added_by
+                )
+                inserted += 1
+
+            except Exception as row_err:
+                excel_row = r.get("__excel_row") or idx
+                errors.append({
+                    "row": excel_row,
+                    "MARKET": r.get("MARKET"),
+                    "BRAND": r.get("BRAND"),
+                    "COMPETITOR_BRANDS": r.get("COMPETITOR_BRANDS"),
+                    "COMPETITION_TYPE": r.get("COMPETITION_TYPE"),
+                    "error": str(row_err)
+                })
+
+        # NEW: include duplicate_count in response (applies to both existing file-type and new template-type)
+        return jsonify({
+            "status": "success" if inserted and not errors else ("partial" if inserted else "no-change"),
+            "mode": "excel" if "file" in request.files else "json",
+            "inserted_count": inserted,
+            "duplicate_count": len(duplicates),
+            "skipped_duplicates": duplicates,
+            "row_errors": errors
+        }), (status.HTTP_201_CREATED if inserted else status.HTTP_200_OK)
+
+    except Exception as e:
+        return jsonify({"error": f"Internal server error: {str(e)}"}), status.HTTP_500_INTERNAL_SERVER_ERROR
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+-----------------------------------------------------------
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 # Competitor Config – Individual Endpoint 
 
 COMP_TABLE = "hive_metastore.fieldforce_navigator_deployment.d_ffn_competitor_config"
