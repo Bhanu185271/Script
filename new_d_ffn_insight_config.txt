@@ -1,4 +1,510 @@
+# d_ffn_insight_config — Individual Endpoint
 
+INS_TABLE = "hive_metastore.fieldforce_navigator_deployment.d_ffn_insight_config"
+MARKET_BRAND_TABLE = "hive_metastore.fieldforce_navigator_deployment.audio_market_brand_config"
+
+# Cache for valid markets and brands 
+_valid_markets_brands_cache = None
+_cache_timestamp = None
+
+import time
+from datetime import datetime, timedelta
+
+def _clean(s):  # trim & collapse spaces
+    return " ".join(str(s).strip().split()) if s is not None else ""
+
+def _sq(s):     # escape single quotes
+    return str(s).replace("'", "''")
+
+def _get_valid_markets_brands(force_refresh=False):
+    """
+    Get valid markets and brands from audio_market_brand_config table.
+    Cache the results to avoid repeated queries.
+    Returns a dict with 'markets' and 'brands' sets.
+    """
+    global _valid_markets_brands_cache, _cache_timestamp
+    
+    # Refresh cache every 5 minutes or on force_refresh
+    cache_duration = timedelta(minutes=5)
+    current_time = datetime.now()
+    
+    if (not force_refresh and 
+        _valid_markets_brands_cache is not None and 
+        _cache_timestamp is not None and 
+        current_time - _cache_timestamp < cache_duration):
+        return _valid_markets_brands_cache
+    
+    try:
+        # Query distinct markets and brands
+        sql = f"""
+            SELECT 
+                DISTINCT UPPER(TRIM(MARKET)) as MARKET,
+                UPPER(TRIM(BRAND)) as BRAND
+            FROM {MARKET_BRAND_TABLE}
+            WHERE MARKET IS NOT NULL AND BRAND IS NOT NULL
+        """
+        
+        df = dc.execute_query(sql)
+        
+        if df is not None and not df.empty:
+            # Create sets for fast lookup
+            valid_markets = set(df['MARKET'].dropna().unique())
+            valid_brands = set(df['BRAND'].dropna().unique())
+            
+            # Also create a set of valid combinations
+            valid_combinations = set()
+            for _, row in df.iterrows():
+                if pd.notna(row['MARKET']) and pd.notna(row['BRAND']):
+                    valid_combinations.add((row['MARKET'], row['BRAND']))
+            
+            _valid_markets_brands_cache = {
+                'markets': valid_markets,
+                'brands': valid_brands,
+                'combinations': valid_combinations
+            }
+            _cache_timestamp = current_time
+        else:
+            # Empty table or query failed
+            _valid_markets_brands_cache = {
+                'markets': set(),
+                'brands': set(),
+                'combinations': set()
+            }
+            _cache_timestamp = current_time
+            
+    except Exception as e:
+        print(f"Error fetching valid markets/brands: {str(e)}")
+        # Return empty sets on error
+        return {'markets': set(), 'brands': set(), 'combinations': set()}
+    
+    return _valid_markets_brands_cache
+
+def _validate_market_brand_separately(market, brand):
+    """
+    Check if market AND brand exist separately in the audio_market_brand_config table
+    """
+    valid_data = _get_valid_markets_brands()
+    
+    market_upper = market.upper().strip()
+    brand_upper = brand.upper().strip()
+    
+    market_valid = market_upper in valid_data['markets']
+    brand_valid = brand_upper in valid_data['brands']
+    
+    return market_valid, brand_valid
+
+def _validate_market_brand_combination(market, brand):
+    """
+    Check if the specific market-brand combination exists in audio_market_brand_config table.
+    """
+    valid_data = _get_valid_markets_brands()
+    
+    market_upper = market.upper().strip()
+    brand_upper = brand.upper().strip()
+    
+    return (market_upper, brand_upper) in valid_data['combinations']
+
+def _exists_ins_row(brand, market, insight, typ):
+    #  duplicate check - case-insensitive
+    sql = f"""
+        SELECT *
+        FROM {INS_TABLE}
+        WHERE UPPER(TRIM(BRAND))  = UPPER(TRIM('{_sq(brand)}'))
+          AND UPPER(TRIM(MARKET)) = UPPER(TRIM('{_sq(market)}'))
+          AND UPPER(TRIM(INSIGHT))= UPPER(TRIM('{_sq(insight)}'))
+          AND UPPER(TRIM(TYPE))   = UPPER(TRIM('{_sq(typ)}'))
+        LIMIT 1
+    """
+    df = dc.execute_query(sql)
+    return df is not None and not df.empty
+
+def _insert_ins_row(brand, market, insight, typ, v1, v2, v3, v4, added_by):
+    # NULLs for optional values
+    v2_sql = "NULL" if v2 is None or str(v2).lower() == "null" or str(v2).strip() == "" else f"'{_sq(v2)}'"
+    v3_sql = "NULL" if v3 is None or str(v3).lower() == "null" or str(v3).strip() == "" else f"'{_sq(v3)}'"
+    v4_sql = "NULL" if v4 is None or str(v4).lower() == "null" or str(v4).strip() == "" else f"'{_sq(v4)}'"
+
+    sql = f"""
+        INSERT INTO {INS_TABLE}
+            (BRAND, MARKET, INSIGHT, TYPE, VALUE_1, VALUE_2, VALUE_3, VALUE_4, ADDED_BY, ENTRY_TIME)
+        VALUES
+            ('{_sq(brand)}','{_sq(market)}','{_sq(insight)}','{_sq(typ)}',
+             '{_sq(v1)}',{v2_sql},{v3_sql},{v4_sql},'{_sq(added_by)}',CURRENT_TIMESTAMP())
+    """
+    dc.execute_non_query(sql)
+
+# GET: column definitions and post template
+@app.route("/d_ffn_insight", methods=["GET"])
+def insight_get():
+    try:
+        # Include valid markets and brands in the response
+        valid_data = _get_valid_markets_brands()
+        
+        definitions = {
+            "sample_json": {
+                
+                "BRAND": {
+                    "Example Values": ["AREXVY", "SHINGRIX"],
+                    "Description": "Brand name",
+                    "Parameter_type": "Mandatory",
+                    "Valid_Values_Count": len(valid_data['brands'])
+                },
+                "MARKET": {
+                    "Example Values": ["THA", "GBR", "VNM", "ITA", "PRT"],
+                    "Description": "Market country code",
+                    "Parameter_type": "Mandatory",
+                    "Valid_Values_Count": len(valid_data['markets'])
+                },
+                "INSIGHT": {
+                    "Example Values": ["overall area of interest or insight"],
+                    "Description": "Insight key/name",
+                    "Parameter_type": "Mandatory"
+                },
+                "TYPE": {
+                    "Example Values": ["Type1", "Type2"],
+                    "Description": "Subtype/category for the insight",
+                    "Parameter_type": "Mandatory"
+                },
+                "VALUE_1": {
+                    "Example Values": ["V1"],
+                    "Description": "Primary value for the insight",
+                    "Parameter_type": "Mandatory"
+                },
+                "VALUE_2": {
+                    "Example Values": ["V2", "null"],
+                    "Description": "Optional Placeholder value",
+                    "Parameter_type": "Optional"
+                },
+                "VALUE_3": {
+                    "Example Values": ["V3", "null"],
+                    "Description": "Optional Placeholder value",
+                    "Parameter_type": "Optional"
+                },
+                "VALUE_4": {
+                    "Example Values": ["V4", "null"],
+                    "Description": "Optional Placeholder value",
+                    "Parameter_type": "Optional"
+                },
+                "ADDED_BY": {
+                    "Example Values": ["abc.x.abc@gsk.com"],
+                    "Description": "Auto picked from 'Username' header on POST request",
+                    "Parameter_type": "Mandatory"
+                },
+                "ENTRY_TIME": {
+                    "Example Values": ["current_timestamp()"],
+                    "Description": "Set by system at insert time",
+                    "Parameter_type": "Auto-generated"
+                }
+            },
+            "post_request_template_json": {
+                "BRAND": "AREXVY",
+                "MARKET": "THA",
+                "INSIGHT": "default",
+                "TYPE": "Type1",
+                "VALUE_1": "V1",
+                "VALUE_2": "null",
+                "VALUE_3": "null",
+                "VALUE_4": "null"
+            },
+            "excel_upload_instructions": {
+                "expected_extension": ".xlsx",
+                "form_field_name": "file",
+                "required_columns": ["BRAND", "MARKET", "INSIGHT", "TYPE", "VALUE_1"],
+                "optional_columns": ["VALUE_2", "VALUE_3", "VALUE_4"],
+                "notes": [
+                    "Tablename : hive_metastore.fieldforce_navigator_deployment.d_ffn_insight_config",
+                    "MARKET must exist in audio_market_brand_config table",
+                    "BRAND must exist in audio_market_brand_config table", 
+                    "Both MARKET and BRAND are validated separately against the audio_market_brand_config table",
+                    "If you have data for optional columns, Kindly Insert the value in post request template",
+                    "When optional columns are not included in the post request Excel file, the system will automatically save them as NULL (empty)"
+                ]
+            },
+            # Include valid values for reference
+            "valid_markets": sorted(list(valid_data['markets'])) if valid_data['markets'] else [],
+            "valid_brands": sorted(list(valid_data['brands'])) if valid_data['brands'] else []
+        }
+        return jsonify(definitions), status.HTTP_200_OK
+    except Exception as e:
+        return jsonify({"error": f"Internal server error: {str(e)}"}), status.HTTP_500_INTERNAL_SERVER_ERROR
+
+# POST: JSON (single/list) OR Excel
+@app.route("/d_ffn_insight", methods=["POST"])
+def insight_post():
+    try:
+        # inserting username
+        added_by = _clean(request.headers.get("Username", "") or "")
+        if not added_by:
+            return jsonify({"error": "Missing 'Username' in headers."}), status.HTTP_400_BAD_REQUEST
+
+        # Refresh cache at the start of POST request to get latest valid values
+        _get_valid_markets_brands(force_refresh=True)
+
+        rows = []  # list of tuples
+
+        if "file" in request.files:
+            # Excel 
+            f = request.files["file"]
+            fname = (f.filename or "").lower().strip()
+            if not fname.endswith(".xlsx"):
+                return jsonify({"error": "Only .xlsx files are supported for bulk upload."}), status.HTTP_400_BAD_REQUEST
+
+            df = pd.read_excel(f, engine="openpyxl")
+            df.columns = [str(c).strip().upper() for c in df.columns]
+
+            req = ["BRAND", "MARKET", "INSIGHT", "TYPE", "VALUE_1"]
+            missing = [c for c in req if c not in df.columns]
+            if missing:
+                return jsonify({"error": f"Missing required columns in Excel: {', '.join(missing)}"}), status.HTTP_400_BAD_REQUEST
+
+            # normalize optional headers
+            has_v2 = "VALUE_2" in df.columns
+            has_v3 = "VALUE_3" in df.columns
+            has_v4 = "VALUE_4" in df.columns
+
+            df = df.replace({pd.NA: "", None: ""}).fillna("")
+
+            for idx, r in df.iterrows():
+                brand   = _clean(r.get("BRAND", ""))
+                market  = _clean(r.get("MARKET", ""))
+                insight = _clean(r.get("INSIGHT", ""))
+                typ     = _clean(r.get("TYPE", ""))
+                v1      = _clean(r.get("VALUE_1", ""))
+
+                if not (brand and market and insight and typ and v1):
+                    return jsonify({
+                        "status": "error",
+                        "message": f"Row {int(idx)+2}: Missing BRAND/MARKET/INSIGHT/TYPE/VALUE_1."
+                    }), status.HTTP_400_BAD_REQUEST
+
+                # Validate MARKET and BRAND separately
+                market_valid, brand_valid = _validate_market_brand_separately(market, brand)
+                
+                if not market_valid:
+                    return jsonify({
+                        "status": "error",
+                        "message": f"Row {int(idx)+2}: Invalid MARKET '{market}'. This market does not exist in audio_market_brand_config table."
+                    }), status.HTTP_400_BAD_REQUEST
+                
+                if not brand_valid:
+                    return jsonify({
+                        "status": "error",
+                        "message": f"Row {int(idx)+2}: Invalid BRAND '{brand}'. This brand does not exist in audio_market_brand_config table."
+                    }), status.HTTP_400_BAD_REQUEST
+
+                # Optional: Also check if the combination exists (uncomment if needed)
+                # if not _validate_market_brand_combination(market, brand):
+                #     return jsonify({
+                #         "status": "error",
+                #         "message": f"Row {int(idx)+2}: The combination of MARKET '{market}' and BRAND '{brand}' does not exist in audio_market_brand_config table."
+                #     }), status.HTTP_400_BAD_REQUEST
+
+                # Optional: if header missing or value blank insert NULL
+                v2 = _clean(r.get("VALUE_2", "")) if has_v2 else None
+                v3 = _clean(r.get("VALUE_3", "")) if has_v3 else None
+                v4 = _clean(r.get("VALUE_4", "")) if has_v4 else None
+
+                v2 = None if (v2 is None or v2 == "") else v2
+                v3 = None if (v3 is None or v3 == "") else v3
+                v4 = None if (v4 is None or v4 == "") else v4
+
+                rows.append((brand, market, insight, typ, v1, v2, v3, v4))
+
+        else:
+            # JSON 
+            body = request.get_json(force=True, silent=True) or {}
+            items = body if isinstance(body, list) else [body]
+
+            for i, rec in enumerate(items, start=1):
+                brand   = _clean(rec.get("BRAND", ""))
+                market  = _clean(rec.get("MARKET", ""))
+                insight = _clean(rec.get("INSIGHT", ""))
+                typ     = _clean(rec.get("TYPE", ""))
+                v1      = _clean(rec.get("VALUE_1", ""))
+
+                if not (brand and market and insight and typ and v1):
+                    return jsonify({
+                        "status": "error",
+                        "message": f"Item {i}: Missing BRAND/MARKET/INSIGHT/TYPE/VALUE_1."
+                    }), status.HTTP_400_BAD_REQUEST
+
+                # Validate MARKET and BRAND separately
+                market_valid, brand_valid = _validate_market_brand_separately(market, brand)
+                
+                if not market_valid:
+                    return jsonify({
+                        "status": "error",
+                        "message": f"Item {i}: Invalid MARKET '{market}'. This market does not exist in audio_market_brand_config table."
+                    }), status.HTTP_400_BAD_REQUEST
+                
+                if not brand_valid:
+                    return jsonify({
+                        "status": "error",
+                        "message": f"Item {i}: Invalid BRAND '{brand}'. This brand does not exist in audio_market_brand_config table."
+                    }), status.HTTP_400_BAD_REQUEST
+
+                # Optional: Also check if the combination exists (uncomment if needed)
+                # if not _validate_market_brand_combination(market, brand):
+                #     return jsonify({
+                #         "status": "error",
+                #         "message": f"Item {i}: The combination of MARKET '{market}' and BRAND '{brand}' does not exist in audio_market_brand_config table."
+                #     }), status.HTTP_400_BAD_REQUEST
+
+                # Optional fields: default to None if "null" or empty insert NULL in sql query
+                def _opt(v):
+                    if v is None:
+                        return None
+                    v = _clean(v)
+                    return None if (v == "" or v.lower() == "null") else v
+
+                v2 = _opt(rec.get("VALUE_2", None))
+                v3 = _opt(rec.get("VALUE_3", None))
+                v4 = _opt(rec.get("VALUE_4", None))
+
+                rows.append((brand, market, insight, typ, v1, v2, v3, v4))
+
+        if not rows:
+            return jsonify({"error": "No valid rows to process."}), status.HTTP_400_BAD_REQUEST
+
+        # INSERT (skip duplicates)
+        inserted = 0
+        duplicates = []
+        errors = []
+        invalid_markets = []
+        invalid_brands = []
+
+        for idx, (brand, market, insight, typ, v1, v2, v3, v4) in enumerate(rows, start=1):
+            try:
+                # Additional validation for batch processing
+                market_valid, brand_valid = _validate_market_brand_separately(market, brand)
+                
+                if not market_valid:
+                    invalid_markets.append({
+                        "row": idx,
+                        "MARKET": market,
+                        "reason": f"MARKET not found in audio_market_brand_config"
+                    })
+                    continue
+                
+                if not brand_valid:
+                    invalid_brands.append({
+                        "row": idx,
+                        "BRAND": brand,
+                        "reason": f"BRAND not found in audio_market_brand_config"
+                    })
+                    continue
+
+                if _exists_ins_row(brand, market, insight, typ):
+                    duplicates.append({
+                        "row": idx,
+                        "BRAND": brand,
+                        "MARKET": market,
+                        "INSIGHT": insight,
+                        "TYPE": typ,
+                        "reason": "duplicate"
+                    })
+                    continue
+
+                _insert_ins_row(brand, market, insight, typ, v1, v2, v3, v4, added_by)
+                inserted += 1
+
+            except Exception as row_err:
+                errors.append({
+                    "row": idx,
+                    "BRAND": brand,
+                    "MARKET": market,
+                    "INSIGHT": insight,
+                    "TYPE": typ,
+                    "error": str(row_err)
+                })
+
+        response = {
+            "status": "success" if inserted and not errors else ("partial" if inserted else "no-change"),
+            "mode": "excel" if "file" in request.files else "json",
+            "inserted_count": inserted,
+            "duplicate_count": len(duplicates),
+            "skipped_duplicates": duplicates,
+            "invalid_markets": invalid_markets,
+            "invalid_brands": invalid_brands,
+            "row_errors": errors
+        }
+        
+        # Remove empty lists from response for cleaner output
+        response = {k: v for k, v in response.items() if not (isinstance(v, list) and len(v) == 0)}
+
+        return jsonify(response), (status.HTTP_201_CREATED if inserted else status.HTTP_200_OK)
+
+    except Exception as e:
+        return jsonify({"error": f"Internal server error: {str(e)}"}), status.HTTP_500_INTERNAL_SERVER_ERROR
+
+
+
+@app.route('/add_llm_prompt_model', methods=['POST'])
+def add_llm_prompt_model():
+    try:
+        data = request.get_json(force=True)
+        username = request.headers.get("Username")
+        if not username:
+            return jsonify({"error": "Missing Username in headers."}), status.HTTP_400_BAD_REQUEST
+
+        # Validate prompt model data
+        is_valid, result = validate_prompt_request(data)
+        if not is_valid:
+            return jsonify({"error": result}), status.HTTP_400_BAD_REQUEST
+
+        validated_data = result
+
+        # --- Validate insight_type against llm_insight_seq ---
+        insight_type = validated_data.get("insight_type")
+        if insight_type:
+            insight_check_query = f"""
+                SELECT DISTINCT insight_type 
+                FROM hive_metastore.fieldforce_navigator_deployment.llm_insight_seq
+                WHERE insight_type = '{insight_type}'
+            """
+            insight_df = dc.execute_query(insight_check_query)
+            if len(insight_df) == 0:
+                return jsonify({"error": f"Invalid insight_type '{insight_type}'. Must exist in llm_insight_seq."}), status.HTTP_400_BAD_REQUEST
+
+        # --- Validate llm_model_name against llm_model_lookup ---
+        llm_model_name = validated_data.get("llm_model_name")
+        if llm_model_name:
+            model_check_query = f"""
+                SELECT DISTINCT model_name
+                FROM hive_metastore.fieldforce_navigator_deployment.llm_model_lookup
+                WHERE model_name = '{llm_model_name}'
+            """
+            model_df = dc.execute_query(model_check_query)
+            if len(model_df) == 0:
+                return jsonify({"error": f"Invalid llm_model_name '{llm_model_name}'. Must exist in llm_model_lookup."}), status.HTTP_400_BAD_REQUEST
+
+        # --- Uniqueness check for prompt model master ---
+        uniq_check_query = f"""
+            SELECT *
+            FROM hive_metastore.fieldforce_navigator_deployment.llm_prompt_model_master
+            WHERE insight_type = '{insight_type}'
+              AND prompt_template = '{validated_data["prompt_template"]}'
+              AND model_name ='{validated_data["llm_model_name"]}'
+        """
+        uniq_df = dc.execute_query(uniq_check_query)
+        if len(uniq_df) > 0:
+            return jsonify({"error": "Duplicate entry exists for given insight_type and prompt_template and model_name in llm_prompt_model_master"}), status.HTTP_400_BAD_REQUEST
+
+        # --- Insert if all validations pass ---
+        model_id = insert_prompt_model(validated_data, username)
+
+        return jsonify({
+            "message": "Prompt model inserted successfully.",
+            "prompt_model_id": model_id
+        }), status.HTTP_200_OK
+
+    except Exception as e:
+        print("ERROR: Exception in /add_llm_prompt_model:", e)
+        traceback.print_exc()
+        return jsonify({"error": "Internal server error."}), status.HTTP_500_INTERNAL_SERVER_ERROR
+
+
+------------------------------------------------------------------------------------------
 # d_ffn_insight_config – Individual Endpoint
 
 INS_TABLE = "hive_metastore.fieldforce_navigator_deployment.d_ffn_insight_config"
