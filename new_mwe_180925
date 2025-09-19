@@ -1,3 +1,217 @@
+#  MWE (Medical Words Examples) – Individual Endpoint
+
+MWE_TABLE = "hive_metastore.fieldforce_navigator_deployment.llm_medical_words_examples"
+
+def _clean(s):  
+    return " ".join(str(s).strip().split()) if s is not None else ""
+
+def _sq(s):     
+    return str(s).replace("'", "''")
+
+def _exists_mwe_row(brand, incorrect, corrected):
+    # case-insensitive duplicate check 
+    sql = f"""
+        SELECT *
+        FROM {MWE_TABLE}
+        WHERE UPPER(TRIM(BRAND))          = UPPER(TRIM('{_sq(brand)}'))
+          AND UPPER(TRIM(INCORRECT_TERM)) = UPPER(TRIM('{_sq(incorrect)}'))
+          AND UPPER(TRIM(CORRECTED_TERM)) = UPPER(TRIM('{_sq(corrected)}'))
+        LIMIT 1
+    """
+    df = dc.execute_query(sql)
+    return df is not None and not df.empty
+
+def _insert_mwe_row(brand, incorrect, corrected, added_by):
+    sql = f"""
+        INSERT INTO {MWE_TABLE}
+            (BRAND, INCORRECT_TERM, CORRECTED_TERM, ADDED_BY, ENTRY_TIME)
+        VALUES
+            ('{_sq(brand)}','{_sq(incorrect)}','{_sq(corrected)}','{_sq(added_by)}',CURRENT_TIMESTAMP())
+    """
+    dc.execute_non_query(sql)
+
+# GET: column definitions + simple post template 
+@app.route("/llm_mwe_table", methods=["GET"])
+def mwe_get():
+    try:
+        definitions = {
+            "sample_json": {
+                "BRAND": {
+                    "Example Values": ["SHINGRIX", "AREXVY"],
+                    "Description": "Brand name",
+                    "Parameter_type": "Mandatory"
+                },
+                "INCORRECT_TERM": {
+                    "Example Values": ["Chingrix", "Arexyv"],
+                    "Description": "Misspelt or wrong medical term",
+                    "Parameter_type": "Mandatory"
+                },
+                "CORRECTED_TERM": {
+                    "Example Values": ["Shingrix", "AREXVY"],
+                    "Description": "Correct replacement term",
+                    "Parameter_type": "Mandatory"
+                },
+                "ADDED_BY": {
+                    "Example Values": ["abc.x.abc@gsk.com"],
+                    "Description": "Auto-picked from 'Username' header in POST",
+                    "Parameter_type": "Mandatory"
+                },
+                "ENTRY_TIME": {
+                    "Example Values": ["current_timestamp()"],
+                    "Description": "Set by system at insert time",
+                    "Parameter_type": "Auto-generated"
+                }
+            },
+            "post_request_template_json": {
+                "BRAND": "SHINGRIX",
+                "INCORRECT_TERM": "Chingrix",
+                "CORRECTED_TERM": "Shingrix"
+            },
+            "excel_upload_instructions": {
+                "expected_extension": ".xlsx",
+                "form_field_name": "file",
+                "required_columns": ["BRAND", "INCORRECT_TERM", "CORRECTED_TERM"],
+                "notes": [
+                    "Tablename : hive_metastore.fieldforce_navigator_deployment.llm_medical_words_examples",
+                    "Incorrect term and Corrected term cannot be the same (case-insensitive)",
+                    "Duplicate records will be skipped automatically"
+                ]
+            }
+        }
+        return jsonify(definitions), status.HTTP_200_OK
+    except Exception as e:
+        return jsonify({"error": f"Internal server error: {str(e)}"}), status.HTTP_500_INTERNAL_SERVER_ERROR
+
+# POST: JSON single list OR Excel
+@app.route("/llm_mwe_table", methods=["POST"])
+def mwe_post():
+    try:
+        # username 
+        added_by = _clean(request.headers.get("Username", "") or "")
+        if not added_by:
+            return jsonify({"error": "Missing 'Username' in headers."}), status.HTTP_400_BAD_REQUEST
+
+        rows = []  # list of (brand, incorrect, corrected)
+
+        if "file" in request.files:
+            # Excel (multipart/form-data)
+            f = request.files["file"]
+            fname = (f.filename or "").lower().strip()
+            if not fname.endswith(".xlsx"):
+                return jsonify({"error": "Only .xlsx files are supported for bulk upload."}), status.HTTP_400_BAD_REQUEST
+
+            df = pd.read_excel(f, engine="openpyxl")
+            df.columns = [str(c).strip().upper() for c in df.columns]
+
+            req = ["BRAND", "INCORRECT_TERM", "CORRECTED_TERM"]
+            missing = [c for c in req if c not in df.columns]
+            if missing:
+                return jsonify({"error": f"Missing required columns in Excel: {', '.join(missing)}"}), status.HTTP_400_BAD_REQUEST
+
+            df = df.replace({pd.NA: "", None: ""}).fillna("")
+            for idx, r in df.iterrows():
+                brand     = _clean(r.get("BRAND", ""))
+                incorrect = _clean(r.get("INCORRECT_TERM", ""))
+                corrected = _clean(r.get("CORRECTED_TERM", ""))
+                if not brand or not incorrect or not corrected:
+                    return jsonify({"status": "error",
+                                    "message": f"Row {int(idx)+2}: Missing BRAND/INCORRECT_TERM/CORRECTED_TERM."}), status.HTTP_400_BAD_REQUEST
+
+                # incorrect term and corrected term should not be same
+                if incorrect.strip().lower() == corrected.strip().lower():
+                    return jsonify({"status": "error",
+                                    "message": f"Row {int(idx)+2}: INCORRECT_TERM and CORRECTED_TERM cannot be the same."}), status.HTTP_400_BAD_REQUEST
+
+                rows.append((brand, incorrect, corrected))
+        else:
+            # JSON (single object or list)
+            body = request.get_json(force=True, silent=True) or {}
+            items = body if isinstance(body, list) else [body]
+            for i, rec in enumerate(items, start=1):
+                brand     = _clean(rec.get("BRAND", ""))
+                incorrect = _clean(rec.get("INCORRECT_TERM", ""))
+                corrected = _clean(rec.get("CORRECTED_TERM", ""))
+                if not brand or not incorrect or not corrected:
+                    return jsonify({"status": "error",
+                                    "message": f"Item {i}: Missing BRAND/INCORRECT_TERM/CORRECTED_TERM."}), status.HTTP_400_BAD_REQUEST
+                if incorrect.strip().lower() == corrected.strip().lower():
+                    return jsonify({"status": "error",
+                                    "message": f"Item {i}: INCORRECT_TERM and CORRECTED_TERM cannot be the same."}), status.HTTP_400_BAD_REQUEST
+                rows.append((brand, incorrect, corrected))
+
+        if not rows:
+            return jsonify({"error": "No valid rows to process."}), status.HTTP_400_BAD_REQUEST
+
+        # process:  INSERT : skip duplicates
+        inserted = 0
+        duplicates = []
+        errors = []
+
+        for idx, (brand, incorrect, corrected) in enumerate(rows, start=1):
+            try:
+                if _exists_mwe_row(brand, incorrect, corrected):
+                    duplicates.append({
+                        "row": idx,
+                        "BRAND": brand,
+                        "INCORRECT_TERM": incorrect,
+                        "CORRECTED_TERM": corrected,
+                        "reason": "duplicate"
+                    })
+                    continue
+
+                _insert_mwe_row(brand, incorrect, corrected, added_by)
+                inserted += 1
+
+            except Exception as row_err:
+                errors.append({
+                    "row": idx,
+                    "BRAND": brand,
+                    "INCORRECT_TERM": incorrect,
+                    "CORRECTED_TERM": corrected,
+                    "error": str(row_err)
+                })
+
+        return jsonify({
+            "status": "success" if inserted and not errors else ("partial" if inserted else "no-change"),
+            "mode": "excel" if "file" in request.files else "json",
+            "inserted_count": inserted,
+            "duplicate_count": len(duplicates),  
+            "skipped_duplicates": duplicates,
+            "row_errors": errors
+        }), (status.HTTP_201_CREATED if inserted else status.HTTP_200_OK)
+
+    except Exception as e:
+        return jsonify({"error": f"Internal server error: {str(e)}"}), status.HTTP_500_INTERNAL_SERVER_ERROR
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+--------------------------------------------------------------
+
+
+
+
+
+
 """
 Module to define all available routes
 """
