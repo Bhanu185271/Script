@@ -1,3 +1,363 @@
+# Competitor Config – Individual Endpoint 
+
+COMP_TABLE = "hive_metastore.fieldforce_navigator_deployment.d_ffn_competitor_config"
+MARKET_BRAND_TABLE = "hive_metastore.fieldforce_navigator_deployment.audio_market_brand_config"
+
+
+def _clean(s):  # trim spaces
+    return " ".join(str(s).strip().split()) if s is not None else ""
+
+def _sq(s):     # escape single quotes
+    return str(s).replace("'", "''")
+
+def _is_nullish(v):
+    """Return True if value should be treated as SQL NULL."""
+    if v is None:
+        return True
+    t = str(v).strip()
+    if t == "":
+        return True
+    return t.lower() == "null"
+
+def _validate_market_brand(market, brand):
+    """Check if market-brand combination exists in audio_market_brand_config table."""
+    sql = f"""
+        SELECT COUNT(*) as cnt
+        FROM {MARKET_BRAND_TABLE}
+        WHERE UPPER(TRIM(MARKET)) = UPPER(TRIM('{_sq(market)}'))
+          AND UPPER(TRIM(BRAND)) = UPPER(TRIM('{_sq(brand)}'))
+    """
+    df = dc.execute_query(sql)
+    if df is not None and not df.empty:
+        return df.iloc[0]['cnt'] > 0
+    return False
+
+def _exists_cmpt_row(market, brand, comp_brand, comp_type):
+    # case-insensitive duplicate check
+    sql = f"""
+        SELECT *
+        FROM {COMP_TABLE}
+        WHERE UPPER(TRIM(MARKET))            = UPPER(TRIM('{_sq(market)}'))
+          AND UPPER(TRIM(BRAND))             = UPPER(TRIM('{_sq(brand)}'))
+          AND UPPER(TRIM(COMPETITOR_BRANDS)) = UPPER(TRIM('{_sq(comp_brand)}'))
+          AND UPPER(TRIM(COMPETITION_TYPE))  = UPPER(TRIM('{_sq(comp_type)}'))
+        LIMIT 1
+    """
+    df = dc.execute_query(sql)
+    return df is not None and not df.empty
+
+def _insert_cmpt_row(market, brand, disease_state, drug_class,
+                     comp_brands, comp_type, molecule, other_names,
+                     combination, added_by):
+    
+    # DISEASE_STATE and DRUG_CLASS are now mandatory - no NULL checks
+    mol_sql = "NULL" if _is_nullish(molecule)      else f"'{_sq(molecule)}'"
+    oth_sql = "NULL" if _is_nullish(other_names)   else f"'{_sq(other_names)}'"
+    cmb_sql = "NULL" if _is_nullish(combination)   else f"'{_sq(combination)}'"
+
+    sql = f"""
+        INSERT INTO {COMP_TABLE}
+            (MARKET, BRAND, DISEASE_STATE, DRUG_CLASS,
+             COMPETITOR_BRANDS, COMPETITION_TYPE,
+             ADDED_BY, ENTRY_TIME,
+             MOLECULE, OTHER_NAMES, COMBINATION)
+        VALUES
+            ('{_sq(market)}','{_sq(brand)}','{_sq(disease_state)}','{_sq(drug_class)}',
+             '{_sq(comp_brands)}','{_sq(comp_type)}',
+             '{_sq(added_by)}',CURRENT_TIMESTAMP(),
+             {mol_sql},{oth_sql},{cmb_sql})
+    """
+    dc.execute_non_query(sql)
+
+# GET: column definitions + simple post template 
+@app.route("/d_ffn_competitor_config", methods=["GET"])
+def competitor_get():
+    try:
+        definitions = {
+            "sample_json": {
+                
+                "MARKET": {
+                    "Example Values": ["GBR", "THA", "ITA", "PRT"],
+                    "Description": "Market country code",
+                    "Parameter_type": "Mandatory"
+                },
+                "BRAND": {
+                    "Example Values": ["AREXVY", "SHINGRIX"],
+                    "Description": "Brand name",
+                    "Parameter_type": "Mandatory"
+                },
+                "DISEASE_STATE": {
+                    "Example Values": ["RSV vaccine", "Shingles"],
+                    "Description": "Primary disease area or indication",
+                    "Parameter_type": "Mandatory"
+                },
+                "DRUG_CLASS": {
+                    "Example Values": ["Non-adjuvanted", "Adjuvanted"],
+                    "Description": "Drug class/category",
+                    "Parameter_type": "Mandatory"
+                },
+                "COMPETITOR_BRANDS": {
+                    "Example Values": ["Abrysvo"],
+                    "Description": "Competing brand name",
+                    "Parameter_type": "Mandatory"
+                },
+                "COMPETITION_TYPE": {
+                    "Example Values": ["COMPETITOR", "ALTERNATIVE"],
+                    "Description": "Relationship type vs our brand",
+                    "Parameter_type": "Mandatory"
+                },
+                "MOLECULE": {
+                    "Example Values": ["RSVPreF"],
+                    "Description": "Active component or molecule",
+                    "Parameter_type": "Optional"
+                },
+                "OTHER_NAMES": {
+                    "Example Values": ["null"],
+                    "Description": "Aliases / other names",
+                    "Parameter_type": "Optional"
+                },
+                "COMBINATION": {
+                    "Example Values": ["null"],
+                    "Description": "Combination component if any",
+                    "Parameter_type": "Optional"
+                },
+                "ADDED_BY": {
+                    "Example Values": ["abc.x.abc@gsk.com"],
+                    "Description": "Auto-picked from 'Username' header in POST",
+                    "Parameter_type": "Mandatory (via header)"
+                },
+                "ENTRY_TIME": {
+                    "Example Values": ["current_timestamp()"],
+                    "Description": "Set by system at insert time",
+                    "Parameter_type": "Auto-generated"
+                }
+            },
+            "post_request_template_json": {
+                "MARKET": "THA",
+                "BRAND": "AREXVY",
+                "DISEASE_STATE": "RSV vaccine",
+                "DRUG_CLASS": "Non-adjuvanted",
+                "COMPETITOR_BRANDS": "Abrysvo",
+                "COMPETITION_TYPE": "COMPETITOR",
+                "MOLECULE": "null",
+                "OTHER_NAMES": "null",
+                "COMBINATION": "null"
+            },
+            "excel_upload_instructions": {
+                "expected_extension": ".xlsx",
+                "form_field_name": "file",
+                "required_columns": ["MARKET", "BRAND", "DISEASE_STATE", "DRUG_CLASS", "COMPETITOR_BRANDS", "COMPETITION_TYPE"],
+                "optional_columns": ["MOLECULE", "OTHER_NAMES", "COMBINATION"],
+                "notes": [
+                    "Tablename : hive_metastore.fieldforce_navigator_deployment.d_ffn_competitor_config",
+                    "MARKET and BRAND combination must exist in audio_market_brand_config table",
+                    "If you have data for optional columns, Kindly Insert the value in post request template",
+                    "When optional columns are not included in the post request Excel file, the system will automatically save them as NULL (empty)"
+                ]
+            }
+        }
+        return jsonify(definitions), status.HTTP_200_OK
+    except Exception as e:
+        return jsonify({"error": f"Internal server error: {str(e)}"}), status.HTTP_500_INTERNAL_SERVER_ERROR
+
+# POST: JSON (single/list) OR Excel (.xlsx) 
+@app.route("/d_ffn_competitor_config", methods=["POST"])
+def competitor_post():
+    try:
+        # capture inserting user
+        added_by = _clean(request.headers.get("Username", "") or "")
+        if not added_by:
+            return jsonify({"error": "Missing 'Username' in headers."}), status.HTTP_400_BAD_REQUEST
+
+        rows = []  # list of dicts
+
+        if "file" in request.files:
+            # Excel (multipart/form-data)
+            f = request.files["file"]
+            fname = (f.filename or "").lower().strip()
+            if not fname.endswith(".xlsx"):
+                return jsonify({"error": "Only .xlsx files are supported for bulk upload."}), status.HTTP_400_BAD_REQUEST
+
+            df = pd.read_excel(f, engine="openpyxl")
+            df.columns = [str(c).strip().upper() for c in df.columns]
+
+            # Updated required columns to include DISEASE_STATE and DRUG_CLASS
+            req = ["MARKET", "BRAND", "DISEASE_STATE", "DRUG_CLASS", "COMPETITOR_BRANDS", "COMPETITION_TYPE"]
+            missing = [c for c in req if c not in df.columns]
+            if missing:
+                return jsonify({"error": f"Missing required columns in Excel: {', '.join(missing)}"}), status.HTTP_400_BAD_REQUEST
+
+            # normalize NAs to empty strings
+            df = df.replace({pd.NA: "", None: ""}).fillna("")
+
+            for idx, r in df.iterrows():
+                # All mandatory fields
+                market = _clean(r.get("MARKET", ""))
+                brand  = _clean(r.get("BRAND", ""))
+                disease = _clean(r.get("DISEASE_STATE", ""))
+                dclass  = _clean(r.get("DRUG_CLASS", ""))
+                cbrand = _clean(r.get("COMPETITOR_BRANDS", ""))
+                ctype  = _clean(r.get("COMPETITION_TYPE", ""))
+
+                # Check all mandatory fields
+                if not market or not brand or not disease or not dclass or not cbrand or not ctype:
+                    return jsonify({
+                        "status": "error",
+                        "message": f"Row {int(idx)+2}: Missing required field(s). All of MARKET, BRAND, DISEASE_STATE, DRUG_CLASS, COMPETITOR_BRANDS, and COMPETITION_TYPE are mandatory."
+                    }), status.HTTP_400_BAD_REQUEST
+
+                # Validate MARKET-BRAND combination
+                if not _validate_market_brand(market, brand):
+                    return jsonify({
+                        "status": "error",
+                        "message": f"Row {int(idx)+2}: Invalid MARKET-BRAND combination. MARKET '{market}' with BRAND '{brand}' does not exist in audio_market_brand_config table."
+                    }), status.HTTP_400_BAD_REQUEST
+
+                # optional columns
+                molec   = _clean(r.get("MOLECULE", ""))
+                other   = _clean(r.get("OTHER_NAMES", ""))
+                comb    = _clean(r.get("COMBINATION", ""))
+
+                rows.append({
+                    "MARKET": market,
+                    "BRAND": brand,
+                    "DISEASE_STATE": disease,
+                    "DRUG_CLASS": dclass,
+                    "COMPETITOR_BRANDS": cbrand,
+                    "COMPETITION_TYPE": ctype,
+                    "MOLECULE": molec,
+                    "OTHER_NAMES": other,
+                    "COMBINATION": comb
+                })
+
+        else:
+            # JSON (single object or list)
+            body = request.get_json(force=True, silent=True) or {}
+            items = body if isinstance(body, list) else [body]
+
+            for i, rec in enumerate(items, start=1):
+                market = _clean(rec.get("MARKET", ""))
+                brand  = _clean(rec.get("BRAND", ""))
+                disease = _clean(rec.get("DISEASE_STATE", ""))
+                dclass  = _clean(rec.get("DRUG_CLASS", ""))
+                cbrand = _clean(rec.get("COMPETITOR_BRANDS", ""))
+                ctype  = _clean(rec.get("COMPETITION_TYPE", ""))
+
+                # Check all mandatory fields
+                if not market or not brand or not disease or not dclass or not cbrand or not ctype:
+                    return jsonify({
+                        "status": "error",
+                        "message": f"Item {i}: Missing required field(s). All of MARKET, BRAND, DISEASE_STATE, DRUG_CLASS, COMPETITOR_BRANDS, and COMPETITION_TYPE are mandatory."
+                    }), status.HTTP_400_BAD_REQUEST
+
+                # Validate MARKET-BRAND combination
+                if not _validate_market_brand(market, brand):
+                    return jsonify({
+                        "status": "error",
+                        "message": f"Item {i}: Invalid MARKET-BRAND combination. MARKET '{market}' with BRAND '{brand}' does not exist in audio_market_brand_config table."
+                    }), status.HTTP_400_BAD_REQUEST
+
+                # optional columns
+                molec   = _clean(rec.get("MOLECULE", "null"))      # default to "null" for JSON template
+                other   = _clean(rec.get("OTHER_NAMES", "null"))
+                comb    = _clean(rec.get("COMBINATION", "null"))
+
+                rows.append({
+                    "MARKET": market,
+                    "BRAND": brand,
+                    "DISEASE_STATE": disease,
+                    "DRUG_CLASS": dclass,
+                    "COMPETITOR_BRANDS": cbrand,
+                    "COMPETITION_TYPE": ctype,
+                    "MOLECULE": molec,
+                    "OTHER_NAMES": other,
+                    "COMBINATION": comb
+                })
+
+        if not rows:
+            return jsonify({"error": "No valid rows to process."}), status.HTTP_400_BAD_REQUEST
+
+        # process in order: SELECT & INSERT (skip duplicates)
+        inserted = 0
+        duplicates = []
+        errors = []
+        invalid_market_brand = []
+
+        for idx, r in enumerate(rows, start=1):
+            try:
+                market = r["MARKET"]
+                brand  = r["BRAND"]
+                cbrand = r["COMPETITOR_BRANDS"]
+                ctype  = r["COMPETITION_TYPE"]
+
+                # Additional validation in case of batch processing where we want to continue
+                # This is redundant for single-row validation but useful for potential future batch processing
+                if not _validate_market_brand(market, brand):
+                    invalid_market_brand.append({
+                        "row": idx,
+                        "MARKET": market,
+                        "BRAND": brand,
+                        "reason": f"MARKET-BRAND combination not found in audio_market_brand_config"
+                    })
+                    continue
+
+                if _exists_cmpt_row(market, brand, cbrand, ctype):
+                    duplicates.append({
+                        "row": idx,
+                        "MARKET": market,
+                        "BRAND": brand,
+                        "COMPETITOR_BRANDS": cbrand,
+                        "COMPETITION_TYPE": ctype,
+                        "reason": "duplicate"
+                    })
+                    continue
+
+                _insert_cmpt_row(
+                    market=market,
+                    brand=brand,
+                    disease_state=r.get("DISEASE_STATE", ""),
+                    drug_class=r.get("DRUG_CLASS", ""),
+                    comp_brands=cbrand,
+                    comp_type=ctype,
+                    molecule=r.get("MOLECULE", ""),
+                    other_names=r.get("OTHER_NAMES", ""),
+                    combination=r.get("COMBINATION", ""),
+                    added_by=added_by
+                )
+                inserted += 1
+
+            except Exception as row_err:
+                errors.append({
+                    "row": idx,
+                    "MARKET": r.get("MARKET"),
+                    "BRAND": r.get("BRAND"),
+                    "COMPETITOR_BRANDS": r.get("COMPETITOR_BRANDS"),
+                    "COMPETITION_TYPE": r.get("COMPETITION_TYPE"),
+                    "error": str(row_err)
+                })
+
+        response = {
+            "status": "success" if inserted and not errors else ("partial" if inserted else "no-change"),
+            "mode": "excel" if "file" in request.files else "json",
+            "inserted_count": inserted,
+            "skipped_duplicates": duplicates,
+            "invalid_market_brand": invalid_market_brand,
+            "row_errors": errors
+        }
+        
+        # Remove empty lists from response for cleaner output
+        response = {k: v for k, v in response.items() if not (isinstance(v, list) and len(v) == 0)}
+        
+        return jsonify(response), (status.HTTP_201_CREATED if inserted else status.HTTP_200_OK)
+
+    except Exception as e:
+        return jsonify({"error": f"Internal server error: {str(e)}"}), status.HTTP_500_INTERNAL_SERVER_ERROR
+
+
+
+
+
+------------------------------------------------------------------------------------------------------------
 
 # Competitor Config – Individual Endpoint 
 
