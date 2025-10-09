@@ -5,6 +5,23 @@ from hive_metastore.fieldforce_navigator_uat.d_ffn_insight_config group by conca
 
 
 
+DELETE FROM hive_metastore.fieldforce_navigator_uat.d_ffn_insight_config
+WHERE ENTRY_TIME IN (
+    SELECT ENTRY_TIME
+    FROM (
+        SELECT 
+            ENTRY_TIME,
+            ROW_NUMBER() OVER (
+                PARTITION BY Brand, Market, Insight, Type, Value_1, Added_by, ENTRY_TIME 
+                ORDER BY ENTRY_TIME
+            ) as rn
+        FROM hive_metastore.fieldforce_navigator_uat.d_ffn_insight_config
+    ) t
+    WHERE rn > 1
+);
+
+
+
 
 
 
