@@ -21,6 +21,27 @@ WHERE ENTRY_TIME IN (
 );
 
 
+DELETE FROM hive_metastore.fieldforce_navigator_uat.d_ffn_insight_config AS target
+WHERE EXISTS (
+    SELECT 1
+    FROM (
+        SELECT 
+            Brand, Market, Insight, Type, Value_1, ENTRY_TIME,
+            ROW_NUMBER() OVER (
+                PARTITION BY Brand, Market, Insight, Type, Value_1
+                ORDER BY ENTRY_TIME ASC  -- keeps the earliest record
+            ) as rn
+        FROM hive_metastore.fieldforce_navigator_uat.d_ffn_insight_config
+    ) dup
+    WHERE dup.Brand = target.Brand
+        AND dup.Market = target.Market
+        AND dup.Insight = target.Insight
+        AND dup.Type = target.Type
+        AND dup.Value_1 = target.Value_1
+        AND dup.ENTRY_TIME = target.ENTRY_TIME
+        AND dup.rn > 1
+);
+
 
 
 
