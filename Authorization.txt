@@ -1,3 +1,28 @@
+
+Select 
+concat(Brand,'-', Market,'-', Insight, '-',Type, '-',Value_1) as clm,  count(*) as count, Added_by, ENTRY_TIME
+from hive_metastore.fieldforce_navigator_uat.d_ffn_insight_config group by concat(Brand,'-', Market,'-', Insight, '-',Type, '-',Value_1), Added_by, ENTRY_TIME having count(*) > 1
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 """
 Module to check authorization for admin routes
 """
