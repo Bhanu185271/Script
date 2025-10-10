@@ -21,6 +21,22 @@ WHERE EXISTS (
 
 
 
+-- Using CTE to find duplicates more efficiently
+WITH ranked_records AS (
+    SELECT 
+        *,
+        ROW_NUMBER() OVER (
+            PARTITION BY Brand, Market, Insight, Type, Value_1
+            ORDER BY ENTRY_TIME ASC  -- Keep oldest record, or use another column for ordering
+        ) as rn
+    FROM hive_metastore.fieldforce_navigator_dev.d_ffn_insight_config
+)
+SELECT * 
+FROM ranked_records
+WHERE rn > 1  -- This shows only the duplicate records that would be deleted
+ORDER BY Brand, Market, Insight, Type, Value_1, rn;
+
+
 
 
 
