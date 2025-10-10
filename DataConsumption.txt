@@ -1,3 +1,51 @@
+
+select *   FROM hive_metastore.fieldforce_navigator_dev.d_ffn_insight_config AS target
+WHERE EXISTS (
+    SELECT 1
+    FROM (
+        SELECT 
+            Brand, Market, Insight, Type, Value_1,
+            ROW_NUMBER() OVER (
+                PARTITION BY Brand, Market, Insight, Type, Value_1
+                ORDER BY BRAND ASC 
+            ) as rn
+        FROM hive_metastore.fieldforce_navigator_dev.d_ffn_insight_config
+    ) dup
+    WHERE dup.Brand = target.Brand
+        AND dup.Market = target.Market
+        AND dup.Insight = target.Insight
+        AND dup.Type = target.Type
+        AND dup.Value_1 = target.Value_1
+        --AND dup.ENTRY_TIME = target.ENTRY_TIME
+        AND dup.rn > 1
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 """
 Module to fetch data from Databricks
 """
