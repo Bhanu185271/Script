@@ -103,6 +103,36 @@ WHERE EXISTS (
 
 
 
+-------------------------------------
+
+
+WITH ranked_records AS (
+    SELECT
+        Brand,
+        Market,
+        Insight,
+        Type,
+        Value_1,
+        ENTRY_TIME,
+        ROW_NUMBER() OVER (
+            PARTITION BY Brand, Market, Insight, Type, Value_1
+            ORDER BY ENTRY_TIME ASC, RAND()  -- random tie-breaker if entry_time is same
+        ) AS rn
+    FROM hive_metastore.fieldforce_navigator_dev.d_ffn_insight_config
+)
+
+DELETE FROM hive_metastore.fieldforce_navigator_dev.d_ffn_insight_config AS t
+WHERE EXISTS (
+    SELECT 1
+    FROM ranked_records r
+    WHERE r.rn > 1
+      AND t.Brand   = r.Brand
+      AND t.Market  = r.Market
+      AND t.Insight = r.Insight
+      AND t.Type    = r.Type
+      AND t.Value_1 = r.Value_1
+      AND t.ENTRY_TIME = r.ENTRY_TIME
+);
 
 
 
