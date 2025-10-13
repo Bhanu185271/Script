@@ -1,4 +1,68 @@
 
+#Fixing the quadrants based on forecast
+from pyspark.sql.window import Window
+roundOffDecimals = 2
+
+fixInitialQuadSDF = (
+  marketSharePerXOitItemSDF.drop('LocSegment','Territory').alias('ms')
+  #.join(other=metricsOitItemSDF.alias('f'), on= [granularity_level,'OitItem'], how='left')
+#   .join(other=spark.table(f"""{db_name}.clientsListRawFull""").alias('cl'), on=['OitItem', 'PharmacyId'], how='left')
+  .join(other=clients.alias('cl'), on=['OitItem', granularity_level], how='left')
+  #.join(clients.alias('cl2'), (col('ms.Brand') == col('cl2.OitItem')) & (col(granularity_level) == col('cl2.' + granularity_level)), how='left')
+  .join(other=commercial.withColumnRenamed('Quadrant', 'BaselineQuadrant').
+        
+  withColumn('Channel', when(col("Channel")=="Independent","Pharmacy").otherwise(col("Channel")))
+
+        .withColumnRenamed('MinMktshare', 'MinVolShare')
+        .withColumnRenamed('MaxMktshare', 'MaxVolShare').alias('cr'), 
+        on=['OitItem', 'Channel', 'LocSegment', 'Territory'], how='inner')
+  .where('(ms.capped_Baseline_Oititem >= QuadMinMktVol and ms.capped_Baseline_Oititem <= QuadMaxMktVol) and \
+          (FcstOitItemMktShare >= QuadMinShare and FcstOitItemMktShare <= QuadMaxShare)')
+  .select('ms.' + granularity_level, 'cl.NumOfPos', 'ms.OitItem', 'ms.Brand', 'cl.Channel', 'cl.LocSegment', 'cl.Territory',
+          'OitItemToBrandWeight', 'ms.SPLY_Oititem', 'ms.SPLYGSK_Oititem','ms.capped_Baseline_Oititem','Fcst_gsk_vol_Oititem',
+          'FcstOitItemMktShare','BaselineQuadrant', 'MoleculeCtcMktGrowth', 'BrandVolGrowthTarget',
+          'MinVolShare', 'TargetShare', 'Target_MS_StepNum', 'MaxVolShare', 'MinVolPerPos', 'MaxVolPerPos', 'QuadMaxShare', 'QuadMinShare',
+          'BenchmarkShare', 'BenchmarkCarryover','AdditionalProfit','MinGrossMargin',
+          'MinDiscQuadMinMktShare', 'MinDiscQuadMaxMktShare', 'MaxDisc', 'MinDiscDiff',
+#           'cr.QuadMinMktVol', 'cr.QuadMaxMktVol', 'cr.QuadMinShare', 'cr.QuadMaxShare',
+          'cr.MinVolForMaxRangePerPos', 'cr.MinOffers', 'cr.ReferencePrice', 'cr.diminishing_gp_offers', 'cr.Offer_Period_Ref_Vol', 'cr.GP_Ref_Vol'
+         ).distinct().alias('l')
+  
+  .join(other=oitItemPricesPerXSDF.alias('oip'), on= [granularity_level,'OitItem'], how='inner')
+  .select('l.*', 'OitItemPTP','OitItemPTC','OitItemPTW','oip.OitItemNetPrice', 'oip.OitItemPrice', 'oip.OitItemNetCogs',\
+          'oip.OitItemVAT', 'oip.OitItemVar_InvoiceValueBaseDiscount','oip.OitItem_PTW_Without_VAT', 'oip.GrossMargin')
+
+).withColumn('rank', row_number().over(Window.partitionBy('OitItem', granularity_level, 'Channel', 'LocSegment', 'Territory', ).orderBy('BaselineQuadrant'))).where('rank = 1').drop('rank')
+
+fixInitialQuadSDF.display()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+''''''''''''''''''''''''''''''''''''
 Select 
 concat(Brand,'-', Market,'-', Insight, '-',Type, '-',Value_1) as clm,  count(*) as count, Added_by, ENTRY_TIME
 from hive_metastore.fieldforce_navigator_uat.d_ffn_insight_config group by concat(Brand,'-', Market,'-', Insight, '-',Type, '-',Value_1), Added_by, ENTRY_TIME having count(*) > 1
