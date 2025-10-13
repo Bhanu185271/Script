@@ -1,3 +1,161 @@
+# Fixing the quadrants based on forecast
+from pyspark.sql.window import Window
+from pyspark.sql.functions import col, when, row_number
+
+roundOffDecimals = 2
+
+fixInitialQuadSDF = (
+    marketSharePerXOitItemSDF.drop('LocSegment', 'Territory').alias('ms')
+    
+    # Fix 1: Use explicit column references with aliases
+    .join(
+        other=clients.alias('cl'), 
+        on=[
+            col('ms.OitItem') == col('cl.OitItem'),
+            col(f'ms.{granularity_level}') == col(f'cl.{granularity_level}')
+        ], 
+        how='left'
+    )
+    
+    # Optional: If you need brand-level join, uncomment and fix:
+    # .join(
+    #     clients.alias('cl2'), 
+    #     on=[
+    #         col('ms.Brand') == col('cl2.OitItem'),
+    #         col(f'ms.{granularity_level}') == col(f'cl2.{granularity_level}')
+    #     ], 
+    #     how='left'
+    # )
+    
+    # Fix 2: Ensure commercial join has proper column references
+    .join(
+        other=commercial
+            .withColumnRenamed('Quadrant', 'BaselineQuadrant')
+            .withColumn('Channel', 
+                       when(col("Channel") == "Independent", "Pharmacy")
+                       .otherwise(col("Channel")))
+            .withColumnRenamed('MinMktshare', 'MinVolShare')
+            .withColumnRenamed('MaxMktshare', 'MaxVolShare')
+            .alias('cr'), 
+        on=[
+            col('ms.OitItem') == col('cr.OitItem'),
+            col('cl.Channel') == col('cr.Channel'),
+            col('cl.LocSegment') == col('cr.LocSegment'),
+            col('cl.Territory') == col('cr.Territory')
+        ], 
+        how='inner'
+    )
+    
+    # Fix 3: Add alias prefixes to filter columns
+    .where(
+        (col('ms.capped_Baseline_Oititem') >= col('cr.QuadMinMktVol')) &
+        (col('ms.capped_Baseline_Oititem') <= col('cr.QuadMaxMktVol')) &
+        (col('ms.FcstOitItemMktShare') >= col('cr.QuadMinShare')) &
+        (col('ms.FcstOitItemMktShare') <= col('cr.QuadMaxShare'))
+    )
+    
+    .select(
+        col(f'ms.{granularity_level}').alias(granularity_level),
+        'cl.NumOfPos',
+        'ms.OitItem',
+        'ms.Brand',
+        'cl.Channel',
+        'cl.LocSegment',
+        'cl.Territory',
+        'ms.OitItemToBrandWeight',
+        'ms.SPLY_Oititem',
+        'ms.SPLYGSK_Oititem',
+        'ms.capped_Baseline_Oititem',
+        'ms.Fcst_gsk_vol_Oititem',
+        'ms.FcstOitItemMktShare',
+        'cr.BaselineQuadrant',
+        'cr.MoleculeCtcMktGrowth',
+        'cr.BrandVolGrowthTarget',
+        'cr.MinVolShare',
+        'cr.TargetShare',
+        'cr.Target_MS_StepNum',
+        'cr.MaxVolShare',
+        'cr.MinVolPerPos',
+        'cr.MaxVolPerPos',
+        'cr.QuadMaxShare',
+        'cr.QuadMinShare',
+        'cr.BenchmarkShare',
+        'cr.BenchmarkCarryover',
+        'cr.AdditionalProfit',
+        'cr.MinGrossMargin',
+        'cr.MinDiscQuadMinMktShare',
+        'cr.MinDiscQuadMaxMktShare',
+        'cr.MaxDisc',
+        'cr.MinDiscDiff',
+        'cr.MinVolForMaxRangePerPos',
+        'cr.MinOffers',
+        'cr.ReferencePrice',
+        'cr.diminishing_gp_offers',
+        'cr.Offer_Period_Ref_Vol',
+        'cr.GP_Ref_Vol'
+    )
+    .distinct()
+    .alias('l')
+    
+    .join(
+        other=oitItemPricesPerXSDF.alias('oip'), 
+        on=[
+            col(f'l.{granularity_level}') == col(f'oip.{granularity_level}'),
+            col('l.OitItem') == col('oip.OitItem')
+        ], 
+        how='inner'
+    )
+    
+    .select(
+        'l.*',
+        'oip.OitItemPTP',
+        'oip.OitItemPTC',
+        'oip.OitItemPTW',
+        'oip.OitItemNetPrice',
+        'oip.OitItemPrice',
+        'oip.OitItemNetCogs',
+        'oip.OitItemVAT',
+        'oip.OitItemVar_InvoiceValueBaseDiscount',
+        'oip.OitItem_PTW_Without_VAT',
+        'oip.GrossMargin'
+    )
+    
+    # Fix 4: Ensure window function uses proper column references
+    .withColumn(
+        'rank', 
+        row_number().over(
+            Window
+            .partitionBy('OitItem', granularity_level, 'Channel', 'LocSegment', 'Territory')
+            .orderBy('BaselineQuadrant')
+        )
+    )
+    .where(col('rank') == 1)
+    .drop('rank')
+)
+
+fixInitialQuadSDF.display()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 #Fixing the quadrants based on forecast
 from pyspark.sql.window import Window
