@@ -1,5 +1,171 @@
 # Fixing the quadrants based on forecast
 from pyspark.sql.window import Window
+from pyspark.sql.functions import col, when, row_number, coalesce
+
+roundOffDecimals = 2
+
+# TEST: Filter for Brand = 'abhi' to debug join issues
+test_brand = 'abhi'
+
+fixInitialQuadSDF = (
+    marketSharePerXOitItemSDF.drop('LocSegment', 'Territory')
+    .where(col('Brand') == test_brand)  # TEST FILTER
+    .alias('ms')
+    
+    # Join 1: OitItem-level join with clients
+    .join(
+        other=clients.alias('cl'), 
+        on=[
+            col('ms.OitItem') == col('cl.OitItem'),
+            col(f'ms.{granularity_level}') == col(f'cl.{granularity_level}')
+        ], 
+        how='left'
+    )
+    
+    # Join 2: Brand-level join with clients (previously optional)
+    .join(
+        clients.alias('cl2'), 
+        on=[
+            col('ms.Brand') == col('cl2.OitItem'),
+            col(f'ms.{granularity_level}') == col(f'cl2.{granularity_level}')
+        ], 
+        how='left'
+    )
+    
+    # Fix 2: Ensure commercial join has proper column references
+    # Using COALESCE to prioritize cl data, fallback to cl2 data
+    .join(
+        other=commercial
+            .withColumnRenamed('Quadrant', 'BaselineQuadrant')
+            .withColumn('Channel', 
+                       when(col("Channel") == "Independent", "Pharmacy")
+                       .otherwise(col("Channel")))
+            .withColumnRenamed('MinMktshare', 'MinVolShare')
+            .withColumnRenamed('MaxMktshare', 'MaxVolShare')
+            .alias('cr'), 
+        on=[
+            col('ms.OitItem') == col('cr.OitItem'),
+            # Use coalesced values from both client joins
+            coalesce(col('cl.Channel'), col('cl2.Channel')) == col('cr.Channel'),
+            coalesce(col('cl.LocSegment'), col('cl2.LocSegment')) == col('cr.LocSegment'),
+            coalesce(col('cl.Territory'), col('cl2.Territory')) == col('cr.Territory')
+        ], 
+        how='inner'
+    )
+    
+    # Fix 3: Add alias prefixes to filter columns
+    .where(
+        (col('ms.capped_Baseline_Oititem') >= col('cr.QuadMinMktVol')) &
+        (col('ms.capped_Baseline_Oititem') <= col('cr.QuadMaxMktVol')) &
+        (col('ms.FcstOitItemMktShare') >= col('cr.QuadMinShare')) &
+        (col('ms.FcstOitItemMktShare') <= col('cr.QuadMaxShare'))
+    )
+    
+    # Select with COALESCE to merge data from both client joins
+    # Priority: cl (OitItem-level) > cl2 (Brand-level)
+    .select(
+        col(f'ms.{granularity_level}').alias(granularity_level),
+        coalesce(col('cl.NumOfPos'), col('cl2.NumOfPos')).alias('NumOfPos'),
+        'ms.OitItem',
+        'ms.Brand',
+        coalesce(col('cl.Channel'), col('cl2.Channel')).alias('Channel'),
+        coalesce(col('cl.LocSegment'), col('cl2.LocSegment')).alias('LocSegment'),
+        coalesce(col('cl.Territory'), col('cl2.Territory')).alias('Territory'),
+        'ms.OitItemToBrandWeight',
+        'ms.SPLY_Oititem',
+        'ms.SPLYGSK_Oititem',
+        'ms.capped_Baseline_Oititem',
+        'ms.Fcst_gsk_vol_Oititem',
+        'ms.FcstOitItemMktShare',
+        'cr.BaselineQuadrant',
+        'cr.MoleculeCtcMktGrowth',
+        'cr.BrandVolGrowthTarget',
+        'cr.MinVolShare',
+        'cr.TargetShare',
+        'cr.Target_MS_StepNum',
+        'cr.MaxVolShare',
+        'cr.MinVolPerPos',
+        'cr.MaxVolPerPos',
+        'cr.QuadMaxShare',
+        'cr.QuadMinShare',
+        'cr.BenchmarkShare',
+        'cr.BenchmarkCarryover',
+        'cr.AdditionalProfit',
+        'cr.MinGrossMargin',
+        'cr.MinDiscQuadMinMktShare',
+        'cr.MinDiscQuadMaxMktShare',
+        'cr.MaxDisc',
+        'cr.MinDiscDiff',
+        'cr.MinVolForMaxRangePerPos',
+        'cr.MinOffers',
+        'cr.ReferencePrice',
+        'cr.diminishing_gp_offers',
+        'cr.Offer_Period_Ref_Vol',
+        'cr.GP_Ref_Vol'
+    )
+    .distinct()
+    .alias('l')
+    
+    .join(
+        other=oitItemPricesPerXSDF.alias('oip'), 
+        on=[
+            col(f'l.{granularity_level}') == col(f'oip.{granularity_level}'),
+            col('l.OitItem') == col('oip.OitItem')
+        ], 
+        how='inner'
+    )
+    
+    .select(
+        'l.*',
+        'oip.OitItemPTP',
+        'oip.OitItemPTC',
+        'oip.OitItemPTW',
+        'oip.OitItemNetPrice',
+        'oip.OitItemPrice',
+        'oip.OitItemNetCogs',
+        'oip.OitItemVAT',
+        'oip.OitItemVar_InvoiceValueBaseDiscount',
+        'oip.OitItem_PTW_Without_VAT',
+        'oip.GrossMargin'
+    )
+    
+    # Fix 4: Ensure window function uses proper column references
+    .withColumn(
+        'rank', 
+        row_number().over(
+            Window
+            .partitionBy('OitItem', granularity_level, 'Channel', 'LocSegment', 'Territory')
+            .orderBy('BaselineQuadrant')
+        )
+    )
+    .where(col('rank') == 1)
+    .drop('rank')
+)
+
+fixInitialQuadSDF.display()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+'''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+# Fixing the quadrants based on forecast
+from pyspark.sql.window import Window
 from pyspark.sql.functions import col, when, row_number
 
 roundOffDecimals = 2
