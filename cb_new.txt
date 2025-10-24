@@ -314,35 +314,29 @@ def _process_template_excel(file_obj):
             )
         
         # Read the target sheet with header at row 3 (index 2)
-        # usecols starting from column B (index 1 onwards)
+        # usecols starting from column B (index 1 onwards) - we skip column A
         df = pd.read_excel(
             file_obj, 
             sheet_name=TARGET_SHEET_NAME,
             header=HEADER_ROW_INDEX,
-            usecols=lambda x: x != 0,  # Skip column A (index 0)
             engine="openpyxl"
         )
+        
+        # Drop the first column (Column A) if it exists
+        if len(df.columns) > 0:
+            df = df.iloc[:, 1:]  # Skip first column (Column A)
         
         # Clean column names (strip whitespace)
         df.columns = [str(c).strip() for c in df.columns]
         
-        # Verify all required Excel columns are present
-        required_excel_cols = ["Market", "Brand", "Disease State", "Drug Class", 
-                               "Brands", "Competition Type"]
-        missing_cols = [col for col in required_excel_cols if col not in df.columns]
-        
-        if missing_cols:
-            raise ValueError(
-                f"Missing required columns in '{TARGET_SHEET_NAME}' sheet (starting from Column B): {', '.join(missing_cols)}"
-            )
-        
-        # Replace NaN/None with empty strings
+        # Replace NaN/None with empty strings FIRST
         df = df.replace({pd.NA: "", None: ""}).fillna("")
         
         # Filter out completely empty rows
         df = df[df.astype(str).apply(lambda x: x.str.strip().str.len().sum(), axis=1) > 0]
         
-        # Create mapped dataframe with database column names
+        # Now apply mapping - this is the KEY fix
+        # We don't validate Excel column names, we just map what exists
         mapped_data = []
         
         for idx, row in df.iterrows():
@@ -351,12 +345,13 @@ def _process_template_excel(file_obj):
             # Map each Excel column to database column
             for excel_col, db_col in EXCEL_TO_DB_MAPPING.items():
                 if excel_col in df.columns:
-                    mapped_row[db_col] = _clean(row.get(excel_col, ""))
+                    value = row.get(excel_col, "")
+                    mapped_row[db_col] = _clean(value)
                 else:
-                    # Optional columns
+                    # Column not found in Excel, set as empty
                     mapped_row[db_col] = ""
             
-            # Only add rows that have at least the mandatory fields
+            # Validate AFTER mapping - check if mandatory DB columns have values
             if (mapped_row.get("MARKET") and 
                 mapped_row.get("BRAND") and 
                 mapped_row.get("DISEASE_STATE") and 
@@ -364,6 +359,18 @@ def _process_template_excel(file_obj):
                 mapped_row.get("COMPETITOR_BRANDS") and 
                 mapped_row.get("COMPETITION_TYPE")):
                 mapped_data.append(mapped_row)
+        
+        # After processing all rows, check if we found any valid data
+        if not mapped_data:
+            # Provide helpful debug info
+            available_columns = list(df.columns) if len(df.columns) > 0 else []
+            expected_columns = list(EXCEL_TO_DB_MAPPING.keys())
+            raise ValueError(
+                f"No valid data rows found in sheet '{TARGET_SHEET_NAME}'. "
+                f"Expected Excel columns: {expected_columns}. "
+                f"Found columns: {available_columns}. "
+                f"Ensure headers are in row {HEADER_ROW_INDEX + 1}, starting from Column B."
+            )
         
         return mapped_data
         
