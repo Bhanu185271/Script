@@ -1,6 +1,3 @@
-
-# Competitor Config – Individual Endpoint 
-
 COMP_TABLE = "hive_metastore.fieldforce_navigator_deployment.d_ffn_competitor_config"
 MARKET_BRAND_TABLE = "hive_metastore.fieldforce_navigator_deployment.audio_market_brand_config"
 
@@ -304,7 +301,8 @@ def _process_template_excel(file_obj):
     Process the template Excel file with specific sheet and header mapping.
     Headers start from Column B (index 1), Row 3 (index 2).
     Data starts from Row 4, Column B onwards.
-    Returns a list of row dictionaries with standardized column names.
+    Flexible mapping - maps only available columns, missing columns will be NULL.
+    Returns a tuple: (list of row dictionaries, list of missing columns or None)
     """
     try:
         # Read all sheet names to verify target sheet exists
@@ -317,7 +315,6 @@ def _process_template_excel(file_obj):
             )
         
         # Read the target sheet with header at row 3 (index 2)
-        # usecols starting from column B (index 1 onwards) - we skip column A
         df = pd.read_excel(
             file_obj, 
             sheet_name=TARGET_SHEET_NAME,
@@ -338,8 +335,33 @@ def _process_template_excel(file_obj):
         # Filter out completely empty rows
         df = df[df.astype(str).apply(lambda x: x.str.strip().str.len().sum(), axis=1) > 0]
         
-        # Now apply mapping - this is the KEY fix
-        # We don't validate Excel column names, we just map what exists
+        # Check which Excel columns are actually present
+        available_excel_cols = set(df.columns)
+        expected_excel_cols = set(EXCEL_TO_DB_MAPPING.keys())
+        found_cols = available_excel_cols.intersection(expected_excel_cols)
+        missing_cols = expected_excel_cols - available_excel_cols
+        
+        # Track missing columns for warning
+        missing_columns_list = list(missing_cols) if missing_cols else None
+        
+        # Log what was found and what's missing (optional - helps debugging)
+        if missing_cols:
+            print(f"Info: Missing Excel columns (will be NULL): {missing_cols}")
+        if found_cols:
+            print(f"Info: Found Excel columns: {found_cols}")
+        
+        # Mandatory columns check - must have at least these Excel columns
+        mandatory_excel_cols = ["Market", "Brand", "Disease State", "Drug Class", 
+                               "Brands", "Competition Type"]
+        missing_mandatory = [col for col in mandatory_excel_cols if col not in df.columns]
+        
+        if missing_mandatory:
+            raise ValueError(
+                f"Missing mandatory columns in '{TARGET_SHEET_NAME}' sheet: {', '.join(missing_mandatory)}. "
+                f"Found columns: {list(df.columns)}"
+            )
+        
+        # Apply flexible mapping - map only available columns
         mapped_data = []
         
         for idx, row in df.iterrows():
@@ -348,13 +370,15 @@ def _process_template_excel(file_obj):
             # Map each Excel column to database column
             for excel_col, db_col in EXCEL_TO_DB_MAPPING.items():
                 if excel_col in df.columns:
+                    # Column exists in Excel, map the value
                     value = row.get(excel_col, "")
                     mapped_row[db_col] = _clean(value)
                 else:
-                    # Column not found in Excel, set as empty
-                    mapped_row[db_col] = ""
+                    # Column missing in Excel, will be inserted as NULL
+                    mapped_row[db_col] = ""  # Empty string will be treated as NULL
             
             # Validate AFTER mapping - check if mandatory DB columns have values
+            # Only mandatory fields need to have values
             if (mapped_row.get("MARKET") and 
                 mapped_row.get("BRAND") and 
                 mapped_row.get("DISEASE_STATE") and 
@@ -365,17 +389,14 @@ def _process_template_excel(file_obj):
         
         # After processing all rows, check if we found any valid data
         if not mapped_data:
-            # Provide helpful debug info
-            available_columns = list(df.columns) if len(df.columns) > 0 else []
-            expected_columns = list(EXCEL_TO_DB_MAPPING.keys())
             raise ValueError(
                 f"No valid data rows found in sheet '{TARGET_SHEET_NAME}'. "
-                f"Expected Excel columns: {expected_columns}. "
-                f"Found columns: {available_columns}. "
-                f"Ensure headers are in row {HEADER_ROW_INDEX + 1}, starting from Column B."
+                f"Ensure mandatory fields (Market, Brand, Disease State, Drug Class, Brands, Competition Type) have values. "
+                f"Found columns: {list(df.columns)}"
             )
         
-        return mapped_data
+        # Return both mapped data AND missing columns info
+        return mapped_data, missing_columns_list
         
     except Exception as e:
         raise Exception(f"Error processing template Excel: {str(e)}")
@@ -492,6 +513,7 @@ def competitor_post():
 
         rows = []  # list of dicts
         is_excel_mode = False
+        missing_columns_warning = None  # Track missing columns for warning
 
         if "file" in request.files:
             # Excel (multipart/form-data) - TEMPLATE BASED
@@ -505,8 +527,8 @@ def competitor_post():
                 }), status.HTTP_400_BAD_REQUEST
 
             try:
-                # Process template Excel with mapping
-                rows = _process_template_excel(f)
+                # Process template Excel with mapping - returns (rows, missing_columns)
+                rows, missing_columns_warning = _process_template_excel(f)
                 
                 if not rows:
                     return jsonify({
@@ -681,6 +703,14 @@ def competitor_post():
             "skipped_duplicates": duplicates,
             "row_errors": errors
         }
+        
+        # Add warning if columns were missing in Excel template
+        if is_excel_mode and missing_columns_warning:
+            response["warning"] = {
+                "message": "The uploaded Excel template is missing some optional columns. Missing columns have been inserted as NULL in the database.",
+                "missing_columns": missing_columns_warning,
+                "note": "To avoid this warning, ensure your Excel template includes all expected columns: Market, Brand, Disease State, Drug Class, Brands, Competition Type, Molecule, Other names, Combination"
+            }
         
         # Remove None and empty lists from response 
         response = {k: v for k, v in response.items() 
