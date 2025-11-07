@@ -16,3 +16,7 @@ I take full ownership of my work and make sure things move forward even without 
 
 
 I take complete ownership of my work and make sure projects move forward without constant follow-ups. In Field Force Navigator, I manage both data engineering and data science parts — from building and maintaining pipelines to creating API endpoints that update Databricks config tables. In Order Intelligence Tool, I handle data workflows and forecasting models to improve offer predictions for pharmacies. I stay accountable for the results and always ensure the work I deliver is reliable and adds real value.
+
+
+
+This year has been steady and meaningful. I focused on doing my work responsibly and understanding things deeply rather than just finishing tasks. I stayed curious, kept learning, and applied those learnings in my daily work. I made sure my deliverables were reliable, collaborated openly with teammates, and stayed accountable for outcomes. Overall, I tried to maintain balance — learning, improving, and delivering work that adds real value.
