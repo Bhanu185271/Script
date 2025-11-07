@@ -1,1 +1,18 @@
+col
 
+I work closely with my team and other functions to make sure goals are achieved smoothly. I share updates, support others when needed, and stay open to feedback. I value clear communication and always try to maintain a positive, respectful working environment.
+
+I actively look for learning opportunities and keep myself updated on new tools or processes that can improve my work.  I stay updated by reading Medium articles, following developer discussions on GitHub, and taking relevant courses on Udemy and Coursera. These help me explore new ideas and apply them in my day-to-day work. I also seek feedback from peers and use it to grow both technically and personally. I have also helped teammates when they needed support or clarification on tasks.
+
+
+
+I try to find simple and practical ways to improve our current processes. Whenever I see a chance to make work more efficient, I share the idea with the team. I like exploring better ways of doing things instead of sticking to the old approach just because it’s familiar.
+
+
+
+Ownership
+
+I take full ownership of my work and make sure things move forward even without follow-ups. In the Field Force Navigator project, I handled both data engineering and data science tasks — managing pipelines, building APIs to update Databricks config tables, and ensuring smooth delivery. In the Order Intelligence Tool project, I took similar responsibility for data workflows and forecasting logic used to predict pharmacy offers. I stay accountable for quality, timelines, and making sure the solutions I build actually help the teams who use them.
+
+
+I take complete ownership of my work and make sure projects move forward without constant follow-ups. In Field Force Navigator, I manage both data engineering and data science parts — from building and maintaining pipelines to creating API endpoints that update Databricks config tables. In Order Intelligence Tool, I handle data workflows and forecasting models to improve offer predictions for pharmacies. I stay accountable for the results and always ensure the work I deliver is reliable and adds real value.
