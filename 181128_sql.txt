@@ -39,3 +39,54 @@ execstmt.close()
 
 %scala
 connection.close()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+// Cell 1: Set up connection properties
+%scala
+import java.util.Properties
+val connectionProperties = new Properties()
+var jdbcPassword = dbutils.secrets.get(scope = "OI_Secrets", key = "oifrontdbo")
+connectionProperties.put("user", s"oifrontdbowner")
+connectionProperties.put("password", s"${jdbcPassword}")
+
+// Cell 2: Set up JDBC connection string (make sure jdbcHostname and jdbcDatabase are defined)
+%scala
+// If not already defined, set these variables:
+// val jdbcHostname = "your-server-name.database.windows.net"
+// val jdbcDatabase = "your-database-name"
+
+val jdbcUrl = s"jdbc:sqlserver://${jdbcHostname}:1433;database=${jdbcDatabase};encrypt=true;trustServerCertificate=false;hostNameInCertificate=*.database.windows.net;loginTimeout=30"
+
+// Cell 3: Set driver class
+%scala
+val driverClass = "com.microsoft.sqlserver.jdbc.SQLServerDriver"
+connectionProperties.setProperty("Driver", driverClass)
+
+// Cell 4: Read the Databricks table
+%scala
+val orderHeaderDF = spark.table("order_header")
+
+// Cell 5: Write data to SQL Server
+%scala
+orderHeaderDF.write
+  .mode("overwrite")  // Change to "append" if you want to add data instead of replacing
+  .jdbc(jdbcUrl, "order_header_sql_server", connectionProperties)
+
+// Cell 6: Verify the load (optional)
+%scala
+println(s"Successfully loaded ${orderHeaderDF.count()} records to SQL Server table: order_header_sql_server")
