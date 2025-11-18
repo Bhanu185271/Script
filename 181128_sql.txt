@@ -1,0 +1,41 @@
+%scala
+import java.util.Properties
+val connectionProperties = new Properties()
+var jdbcPassword = dbutils.secrets.get(scope = "OI_Secrets", key = "oifrontdbo")
+connectionProperties.put("user", s"oifrontdbowner")
+connectionProperties.put("password", s"${jdbcPassword}")
+
+
+%scala
+import java.sql.DriverManager
+
+val connection = DriverManager.getConnection(jdbcHostname+":1433;"+"database="+jdbcDatabase+";"+"user= oifrontdbowner;"+"password="+s"${jdbcPassword}"+";encrypt=true;"+"trustServerCertificate=false;"+"hostNameInCertificate=*.database.windows.net;"+"loginTimeout=30")
+
+//connection.isClosed()
+connection.isValid(30)
+
+
+%scala
+val driverClass = "com.microsoft.sqlserver.jdbc.SQLServerDriver"
+connectionProperties.setProperty("Driver", driverClass)
+
+
+
+%scala
+import java.sql.Statement
+val dropstmt: Statement = connection.createStatement()
+dropstmt.executeUpdate("DROP table IF EXISTS idn_product_offers_quarterly_bkp")
+dropstmt.close()
+
+
+
+%scala
+import java.sql.Statement
+val execstmt: Statement = connection.createStatement()
+execstmt.executeUpdate("exec sp_rename 'idn_product_offers_quarterly_dummy','idn_product_offers_quarterly'")
+execstmt.close()
+
+
+
+%scala
+connection.close()
