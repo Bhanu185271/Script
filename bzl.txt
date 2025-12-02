@@ -1,3 +1,555 @@
+
+def mktSharePerX(country: str, version=""):
+    """
+    Utility function to compute Market Share at Per PoS level for Independentes or at CustGrp level for Mid Size.
+    Enhanced with data quality checks at each transformation step.
+
+    WARNING
+    Some change will happen somewhere when we implement for MidSize Chains
+    """
+    version = "_test" if version == "Test" else ""
+    
+    # Helper function for data quality checks
+    def check_data_quality(df, step_name):
+        """Print data quality metrics for each transformation step"""
+        print(f"\n{'='*80}")
+        print(f"DATA QUALITY CHECK: {step_name}")
+        print(f"{'='*80}")
+        
+        total_records = df.count()
+        print(f"Total Records: {total_records:,}")
+        
+        if total_records > 0:
+            # Check for zeros in key columns
+            if "BrandSize" in df.columns:
+                zero_brandsize = df.filter(col("BrandSize") == 0).count()
+                null_brandsize = df.filter(col("BrandSize").isNull()).count()
+                print(f"  - BrandSize = 0: {zero_brandsize:,} ({zero_brandsize/total_records*100:.2f}%)")
+                print(f"  - BrandSize IS NULL: {null_brandsize:,} ({null_brandsize/total_records*100:.2f}%)")
+            
+            if "MarketSize" in df.columns:
+                zero_marketsize = df.filter(col("MarketSize") == 0).count()
+                null_marketsize = df.filter(col("MarketSize").isNull()).count()
+                print(f"  - MarketSize = 0: {zero_marketsize:,} ({zero_marketsize/total_records*100:.2f}%)")
+                print(f"  - MarketSize IS NULL: {null_marketsize:,} ({null_marketsize/total_records*100:.2f}%)")
+            
+            # Check for NULL market shares
+            for col_name in ["marketShare3M", "marketShare6M", "marketShare12M", "MSApp3Final"]:
+                if col_name in df.columns:
+                    null_count = df.filter(col(col_name).isNull()).count()
+                    print(f"  - {col_name} IS NULL: {null_count:,} ({null_count/total_records*100:.2f}%)")
+            
+            # Check for zero rolling sums
+            for col_name in ["rollingSum3MMS", "rollingSum6MMS", "rollingSum12MMS"]:
+                if col_name in df.columns:
+                    zero_count = df.filter(col(col_name) == 0).count()
+                    null_count = df.filter(col(col_name).isNull()).count()
+                    print(f"  - {col_name} = 0: {zero_count:,} ({zero_count/total_records*100:.2f}%)")
+                    print(f"  - {col_name} IS NULL: {null_count:,} ({null_count/total_records*100:.2f}%)")
+            
+            # Show sample data
+            print(f"\nSample Data (first 5 rows):")
+            df.show(5, truncate=False)
+            
+            # Show schema
+            print(f"\nSchema:")
+            df.printSchema()
+        
+        print(f"{'='*80}\n")
+        return df
+    
+    
+    # Get configuration values
+    mktShareFlexibility = __getConfigValue(
+        country=country, reqdConfig="MktShareFlexibility"
+    )
+    print(f"\n>>> Configuration: MktShareFlexibility = {mktShareFlexibility}")
+
+    fcstInputFullPath = (
+        __getConfigValue(country=country, reqdConfig="FcstInputFullPath") + version
+    )
+    print(f">>> Configuration: FcstInputFullPath = {fcstInputFullPath}")
+
+    
+    # STEP 1: Load initial data
+    print(f"\n{'#'*80}")
+    print(f"STEP 1: LOADING DATA FROM DELTA LAKE")
+    print(f"{'#'*80}")
+    sdf = spark.read.format("delta").load(fcstInputFullPath)
+    sdf = check_data_quality(sdf, "STEP 1: Initial Data Load")
+    
+    
+    # Create temp view
+    vw_Name = f"vw_{country}_fcstInputFull"
+    sdf.createOrReplaceTempView(vw_Name)
+    print(f">>> Temp View Created: {vw_Name}")
+    
+    # Verify temp view
+    print(f"\n>>> Verifying Temp View with SQL Query:")
+    spark.sql(f"SELECT COUNT(*) as record_count FROM {vw_Name}").show()
+    
+
+    # Get max period
+    result = spark.sql(
+        f"select max(period) as maxPeriod, add_months(max(period),-12) as sply from {vw_Name}"
+    ).collect()
+    maxPeriod = result[0][0]
+    sply = result[0][1]
+    print(f"\n>>> Max Period Found: {maxPeriod}")
+    print(f">>> SPLY Period: {sply}")
+
+
+    # STEP 2: 3-Month Rolling Calculations
+    print(f"\n{'#'*80}")
+    print(f"STEP 2: CALCULATING 3-MONTH ROLLING SUMS & MARKET SHARE")
+    print(f"{'#'*80}")
+    
+    sdf = (
+        sdf.withColumn(
+            "rollingSum3MBS",
+            sum(sdf.BrandSize).over(
+                Window.partitionBy("xBrandId").orderBy("Period").rowsBetween(-2, 0)
+            ),
+        )
+        .withColumn(
+            "rollingSum3MMS",
+            sum(sdf.MarketSize).over(
+                Window.partitionBy("xBrandId").orderBy("Period").rowsBetween(-2, 0)
+            ),
+        )
+        .withColumn("marketShare3M", col("rollingSum3MBS") / col("rollingSum3MMS"))
+        .withColumn(
+            "rowNumber3M",
+            row_number().over(
+                Window.partitionBy("xBrandId").orderBy(col("Period").desc())
+            ),
+        )
+    )
+    
+    sdf = check_data_quality(sdf, "STEP 2: After 3-Month Calculations")
+
+
+    # STEP 3: 6-Month Rolling Calculations
+    print(f"\n{'#'*80}")
+    print(f"STEP 3: CALCULATING 6-MONTH ROLLING SUMS & MARKET SHARE")
+    print(f"{'#'*80}")
+    
+    sdf = (
+        sdf.withColumn(
+            "rollingSum6MBS",
+            sum(sdf.BrandSize).over(
+                Window.partitionBy("xBrandId").orderBy("Period").rowsBetween(-5, 0)
+            ),
+        )
+        .withColumn(
+            "rollingSum6MMS",
+            sum(sdf.MarketSize).over(
+                Window.partitionBy("xBrandId").orderBy("Period").rowsBetween(-5, 0)
+            ),
+        )
+        .withColumn("marketShare6M", col("rollingSum6MBS") / col("rollingSum6MMS"))
+        .withColumn(
+            "rowNumber6M",
+            row_number().over(
+                Window.partitionBy("xBrandId").orderBy(col("Period").desc())
+            ),
+        )
+    )
+    
+    sdf = check_data_quality(sdf, "STEP 3: After 6-Month Calculations")
+
+
+    # STEP 4: 12-Month Rolling Calculations
+    print(f"\n{'#'*80}")
+    print(f"STEP 4: CALCULATING 12-MONTH ROLLING SUMS & MARKET SHARE")
+    print(f"{'#'*80}")
+    
+    sdf = (
+        sdf.withColumn(
+            "rollingSum12MBS",
+            sum(sdf.BrandSize).over(
+                Window.partitionBy("xBrandId").orderBy("Period").rowsBetween(-11, 0)
+            ),
+        )
+        .withColumn(
+            "rollingSum12MMS",
+            sum(sdf.MarketSize).over(
+                Window.partitionBy("xBrandId").orderBy("Period").rowsBetween(-11, 0)
+            ),
+        )
+        .withColumn("marketShare12M", col("rollingSum12MBS") / col("rollingSum12MMS"))
+        .withColumn(
+            "rowNumber12M",
+            row_number().over(
+                Window.partitionBy("xBrandId").orderBy(col("Period").desc())
+            ),
+        )
+    )
+    
+    sdf = check_data_quality(sdf, "STEP 4: After 12-Month Calculations")
+
+
+    # STEP 5: Apply Flexibility Bounds
+    print(f"\n{'#'*80}")
+    print(f"STEP 5: APPLYING FLEXIBILITY BOUNDS")
+    print(f"{'#'*80}")
+    
+    sdf = sdf.withColumn(
+        "lowerBound3M", sdf.marketShare3M - mktShareFlexibility
+    ).withColumn("upperBound3M", sdf.marketShare3M + mktShareFlexibility)
+
+    sdf = (
+        sdf.withColumn(
+            "avgMSApp3", greatest("marketShare3M", "marketShare6M", "marketShare12M")
+        )
+        .withColumn(
+            "adjustedApp3UB",
+            when(col("avgMSApp3") > col("upperBound3M"), col("upperBound3M")).otherwise(
+                col("avgMSApp3")
+            ),
+        )
+        .withColumn(
+            "MSApp3Final",
+            when(
+                col("adjustedApp3UB") < col("lowerBound3M"), col("lowerBound3M")
+            ).otherwise(col("adjustedApp3UB")),
+        )
+    )
+    
+    sdf = check_data_quality(sdf, "STEP 5: After Flexibility Bounds Applied")
+
+
+    # STEP 6: Filter to Latest Period
+    print(f"\n{'#'*80}")
+    print(f"STEP 6: FILTERING TO LATEST PERIOD ({maxPeriod})")
+    print(f"{'#'*80}")
+    
+    mktShareApproachesSDF = sdf.where(col("Period") == maxPeriod)
+    mktShareApproachesSDF = check_data_quality(
+        mktShareApproachesSDF, 
+        f"STEP 6: After Filtering to Period = {maxPeriod}"
+    )
+
+
+    # STEP 7: Load Metrics Data
+    print(f"\n{'#'*80}")
+    print(f"STEP 7: LOADING METRICS DATA")
+    print(f"{'#'*80}")
+    
+    metricsPath = __getConfigValue(country=country, reqdConfig="MetricsPath") + version
+    print(f">>> Metrics Path: {metricsPath}")
+    
+    metricsSDF = spark.read.format("delta").load(metricsPath)
+    metricsSDF = check_data_quality(metricsSDF, "STEP 7: Metrics Data Load")
+
+
+    # STEP 8: Join Metrics with Market Share Data
+    print(f"\n{'#'*80}")
+    print(f"STEP 8: JOINING METRICS WITH MARKET SHARE DATA")
+    print(f"{'#'*80}")
+    
+    # Check join key uniqueness before join
+    print(f"\n>>> Pre-Join Analysis:")
+    print(f"Unique xBrandIds in Metrics: {metricsSDF.select('xBrandId').distinct().count():,}")
+    print(f"Unique xBrandIds in Market Share: {mktShareApproachesSDF.select('xBrandId').distinct().count():,}")
+    
+    computeBrandSizeForApproachesSDF = (
+        metricsSDF.alias("m")
+        .join(other=mktShareApproachesSDF.alias("msa"), on="xBrandId", how="inner")
+        .select(
+            "xBrandId",
+            "m." + granularity_level,
+            "m.Brand",
+            "m.L6Avg",
+            "m.L12Avg",
+            "m.BL_SPLY",
+            "m.SPLY",
+            "m.SPLYGSK",
+            "m.capped_Baseline",
+            "msa.Period",
+            "msa.BrandSize",
+            "msa.MarketSize",
+            "msa.rollingSum3MBS",
+            "msa.rollingSum3MMS",
+            "msa.marketShare3M",
+            "msa.rollingSum6MBS",
+            "msa.rollingSum6MMS",
+            "msa.marketShare6M",
+            "msa.rollingSum12MBS",
+            "msa.rollingSum12MMS",
+            "msa.marketShare12M",
+            "msa.MSApp3Final",
+        )
+        .withColumn("BrandSizeApp3", round(col("capped_Baseline") * col("MSApp3Final"), 0))
+    )
+    
+    computeBrandSizeForApproachesSDF = check_data_quality(
+        computeBrandSizeForApproachesSDF, 
+        "STEP 8: After Join and BrandSizeApp3 Calculation"
+    )
+    
+    # Additional checks on final calculations
+    print(f"\n>>> Final Calculation Analysis:")
+    print(f"Records where BrandSizeApp3 IS NULL:")
+    null_forecast = computeBrandSizeForApproachesSDF.filter(col("BrandSizeApp3").isNull())
+    null_forecast_count = null_forecast.count()
+    print(f"  Count: {null_forecast_count:,}")
+    if null_forecast_count > 0:
+        print(f"\n  Sample records with NULL forecast:")
+        null_forecast.select(
+            "xBrandId", "Brand", "capped_Baseline", "MSApp3Final", "BrandSizeApp3",
+            "marketShare3M", "marketShare6M", "marketShare12M"
+        ).show(10, truncate=False)
+
+
+    # STEP 9: Write to Delta Lake
+    print(f"\n{'#'*80}")
+    print(f"STEP 9: WRITING DATA TO DELTA LAKE")
+    print(f"{'#'*80}")
+    
+    MktSharePerXPath = (
+        __getConfigValue(country=country, reqdConfig="MktSharePerXPath") + version
+    )
+    print(f">>> Output Path: {MktSharePerXPath}")
+
+    recursive_delete(MktSharePerXPath)
+    dbutils.fs.rm(MktSharePerXPath, True)
+    
+    print(f"\n>>> Writing the MktSharePerX to disk ...")
+    (
+        computeBrandSizeForApproachesSDF.write.format("delta")
+        .mode("overwrite")
+        .partitionBy("Brand")
+        .save(f"{MktSharePerXPath}")
+    )
+    print(">>> Writing the MktSharePerX to disk complete.")
+
+
+    # STEP 10: Create Delta Table
+    print(f"\n{'#'*80}")
+    print(f"STEP 10: CREATING DELTA TABLE")
+    print(f"{'#'*80}")
+    
+    dsDb = __getConfigValue(country=country, reqdConfig="DsDb")
+    MktSharePerXTable = (
+        __getConfigValue(country=country, reqdConfig="MktSharePerXTable") + version
+    )
+    MktSharePerXTableName = f"{dsDb}.{MktSharePerXTable}"
+
+    print(f"\n>>> Creating the table {MktSharePerXTableName} ...")
+    spark.sql(f"DROP TABLE IF EXISTS {MktSharePerXTableName}")
+    spark.sql(
+        f"CREATE TABLE {MktSharePerXTableName} USING DELTA LOCATION '{MktSharePerXPath}'"
+    )
+    print(f">>> Table {MktSharePerXTableName} created successfully.")
+    
+    # Verify final table
+    print(f"\n>>> Final Table Verification:")
+    spark.sql(f"SELECT COUNT(*) as final_record_count FROM {MktSharePerXTableName}").show()
+
+
+    # FINAL SUMMARY
+    print(f"\n{'#'*80}")
+    print(f"EXECUTION SUMMARY")
+    print(f"{'#'*80}")
+    print(f"Country: {country}")
+    print(f"Version: {'Test' if version == '_test' else 'Production'}")
+    print(f"Max Period: {maxPeriod}")
+    print(f"Market Share Flexibility: {mktShareFlexibility}")
+    print(f"Output Table: {MktSharePerXTableName}")
+    print(f"Final Record Count: {computeBrandSizeForApproachesSDF.count():,}")
+    print(f"{'#'*80}\n")
+
+    return computeBrandSizeForApproachesSDF
+	
+	
+	
+	
+######################################
+
+
+
+# Cell 1: Helper Functions
+def check_data_quality(df, step_name):
+    """Print key metrics for data quality validation"""
+    total = df.count()
+    print(f"\n{step_name}: {total:,} records")
+    
+    if total > 0:
+        for col_name in ["BrandSize", "MarketSize", "marketShare3M", "marketShare6M", 
+                         "marketShare12M", "MSApp3Final", "BrandSizeApp3"]:
+            if col_name in df.columns:
+                zero_cnt = df.filter(col(col_name) == 0).count()
+                null_cnt = df.filter(col(col_name).isNull()).count()
+                if zero_cnt > 0 or null_cnt > 0:
+                    print(f"  {col_name}: {zero_cnt:,} zeros, {null_cnt:,} nulls")
+    
+    return df
+
+
+# Cell 2: Configuration and Initial Load
+version = "_test" if version == "Test" else ""
+mktShareFlexibility = __getConfigValue(country=country, reqdConfig="MktShareFlexibility")
+fcstInputFullPath = __getConfigValue(country=country, reqdConfig="FcstInputFullPath") + version
+
+sdf = spark.read.format("delta").load(fcstInputFullPath)
+sdf = check_data_quality(sdf, "Initial Load")
+
+vw_Name = f"vw_{country}_fcstInputFull"
+sdf.createOrReplaceTempView(vw_Name)
+
+result = spark.sql(f"select max(period) as maxPeriod from {vw_Name}").collect()
+maxPeriod = result[0][0]
+print(f"Max Period: {maxPeriod}")
+
+
+# Cell 3: Rolling Calculations - 3 Month
+sdf = (
+    sdf.withColumn("rollingSum3MBS",
+        sum(sdf.BrandSize).over(Window.partitionBy("xBrandId").orderBy("Period").rowsBetween(-2, 0)))
+    .withColumn("rollingSum3MMS",
+        sum(sdf.MarketSize).over(Window.partitionBy("xBrandId").orderBy("Period").rowsBetween(-2, 0)))
+    .withColumn("marketShare3M", col("rollingSum3MBS") / col("rollingSum3MMS"))
+    .withColumn("rowNumber3M",
+        row_number().over(Window.partitionBy("xBrandId").orderBy(col("Period").desc())))
+)
+
+sdf = check_data_quality(sdf, "3-Month Rolling")
+
+
+# Cell 4: Rolling Calculations - 6 Month
+sdf = (
+    sdf.withColumn("rollingSum6MBS",
+        sum(sdf.BrandSize).over(Window.partitionBy("xBrandId").orderBy("Period").rowsBetween(-5, 0)))
+    .withColumn("rollingSum6MMS",
+        sum(sdf.MarketSize).over(Window.partitionBy("xBrandId").orderBy("Period").rowsBetween(-5, 0)))
+    .withColumn("marketShare6M", col("rollingSum6MBS") / col("rollingSum6MMS"))
+    .withColumn("rowNumber6M",
+        row_number().over(Window.partitionBy("xBrandId").orderBy(col("Period").desc())))
+)
+
+sdf = check_data_quality(sdf, "6-Month Rolling")
+
+
+# Cell 5: Rolling Calculations - 12 Month
+sdf = (
+    sdf.withColumn("rollingSum12MBS",
+        sum(sdf.BrandSize).over(Window.partitionBy("xBrandId").orderBy("Period").rowsBetween(-11, 0)))
+    .withColumn("rollingSum12MMS",
+        sum(sdf.MarketSize).over(Window.partitionBy("xBrandId").orderBy("Period").rowsBetween(-11, 0)))
+    .withColumn("marketShare12M", col("rollingSum12MBS") / col("rollingSum12MMS"))
+    .withColumn("rowNumber12M",
+        row_number().over(Window.partitionBy("xBrandId").orderBy(col("Period").desc())))
+)
+
+sdf = check_data_quality(sdf, "12-Month Rolling")
+
+
+# Cell 6: Apply Flexibility Bounds
+sdf = (
+    sdf.withColumn("lowerBound3M", sdf.marketShare3M - mktShareFlexibility)
+    .withColumn("upperBound3M", sdf.marketShare3M + mktShareFlexibility)
+    .withColumn("avgMSApp3", greatest("marketShare3M", "marketShare6M", "marketShare12M"))
+    .withColumn("adjustedApp3UB",
+        when(col("avgMSApp3") > col("upperBound3M"), col("upperBound3M")).otherwise(col("avgMSApp3")))
+    .withColumn("MSApp3Final",
+        when(col("adjustedApp3UB") < col("lowerBound3M"), col("lowerBound3M")).otherwise(col("adjustedApp3UB")))
+)
+
+sdf = check_data_quality(sdf, "Flexibility Bounds Applied")
+
+
+# Cell 7: Filter to Latest Period
+mktShareApproachesSDF = sdf.where(col("Period") == maxPeriod)
+mktShareApproachesSDF = check_data_quality(mktShareApproachesSDF, f"Filtered to Period {maxPeriod}")
+
+
+# Cell 8: Load and Join Metrics
+metricsPath = __getConfigValue(country=country, reqdConfig="MetricsPath") + version
+metricsSDF = spark.read.format("delta").load(metricsPath)
+metricsSDF = check_data_quality(metricsSDF, "Metrics Load")
+
+computeBrandSizeForApproachesSDF = (
+    metricsSDF.alias("m")
+    .join(mktShareApproachesSDF.alias("msa"), on="xBrandId")
+    .select(
+        "xBrandId",
+        col("m." + granularity_level),
+        "m.Brand", "m.L6Avg", "m.L12Avg", "m.BL_SPLY", "m.SPLY", "m.SPLYGSK", "m.capped_Baseline",
+        "msa.Period", "msa.BrandSize", "msa.MarketSize",
+        "msa.rollingSum3MBS", "msa.rollingSum3MMS", "msa.marketShare3M",
+        "msa.rollingSum6MBS", "msa.rollingSum6MMS", "msa.marketShare6M",
+        "msa.rollingSum12MBS", "msa.rollingSum12MMS", "msa.marketShare12M",
+        "msa.MSApp3Final"
+    )
+    .withColumn("BrandSizeApp3", round(col("capped_Baseline") * col("MSApp3Final"), 0))
+)
+
+computeBrandSizeForApproachesSDF = check_data_quality(computeBrandSizeForApproachesSDF, "Final Dataset")
+
+
+# Cell 9: Write to Delta Lake
+MktSharePerXPath = __getConfigValue(country=country, reqdConfig="MktSharePerXPath") + version
+
+recursive_delete(MktSharePerXPath)
+dbutils.fs.rm(MktSharePerXPath, True)
+
+computeBrandSizeForApproachesSDF.write.format("delta").mode("overwrite").partitionBy("Brand").save(MktSharePerXPath)
+
+print(f"Written to: {MktSharePerXPath}")
+
+
+# Cell 10: Create Delta Table
+dsDb = __getConfigValue(country=country, reqdConfig="DsDb")
+MktSharePerXTable = __getConfigValue(country=country, reqdConfig="MktSharePerXTable") + version
+MktSharePerXTableName = f"{dsDb}.{MktSharePerXTable}"
+
+spark.sql(f"DROP TABLE IF EXISTS {MktSharePerXTableName}")
+spark.sql(f"CREATE TABLE {MktSharePerXTableName} USING DELTA LOCATION '{MktSharePerXPath}'")
+
+print(f"Table created: {MktSharePerXTableName}")
+spark.sql(f"SELECT COUNT(*) as count FROM {MktSharePerXTableName}").show()	
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+###########################################################################################
+
+
+
+
+
+
+
+
 def mktSharePerX(country: str, version=""):
     """
     Utility function to compute Market Share at Per PoS level for Independentes or at CustGrp level for Mid Size.
