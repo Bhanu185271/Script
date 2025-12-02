@@ -1,0 +1,218 @@
+def mktSharePerX(country: str, version=""):
+    """
+    Utility function to compute Market Share at Per PoS level for Independentes or at CustGrp level for Mid Size.
+
+    WARNING
+    Some change will happen somewhere when we implement for MidSize Chains
+    """
+    version = "_test" if version == "Test" else ""
+    #   getMedian_udf = udf(getMedian, DoubleType())
+    #   print(f"|--> getMedian_udf registered.")
+
+    # weight12M = __getConfigValue(country=country, reqdConfig="Weight12M")
+    # weight6M = __getConfigValue(country=country, reqdConfig="Weight6M")
+    # weightSply = __getConfigValue(country=country, reqdConfig="WeightSply")
+    mktShareFlexibility = __getConfigValue(
+        country=country, reqdConfig="MktShareFlexibility"
+    )
+
+    fcstInputFullPath = (
+        __getConfigValue(country=country, reqdConfig="FcstInputFullPath") + version
+    )
+    
+    
+    sdf = spark.read.format("delta").load(fcstInputFullPath)
+    vw_Name = f"vw_{country}_fcstInputFull"
+    sdf.createOrReplaceTempView(vw_Name)
+
+    
+    result = spark.sql(
+        f"select max(period) as maxPeriod,add_months(max(period),-12) as sply from {vw_Name}"
+    ).collect()
+    maxPeriod = result[0][0]
+
+
+    # 3 months rolling sum and marketshare
+    sdf = (
+        sdf.withColumn(
+            "rollingSum3MBS",
+            sum(sdf.BrandSize).over(
+                Window.partitionBy("xBrandId").orderBy("Period").rowsBetween(-2, 0)
+            ),
+        )
+        .withColumn(
+            "rollingSum3MMS",
+            sum(sdf.MarketSize).over(
+                Window.partitionBy("xBrandId").orderBy("Period").rowsBetween(-2, 0)
+            ),
+        )
+        .withColumn("marketShare3M", col("rollingSum3MBS") / col("rollingSum3MMS"))
+        .withColumn(
+            "rowNumber3M",
+            row_number().over(
+                Window.partitionBy("xBrandId").orderBy(col("Period").desc())
+            ),
+        )
+    )
+
+    # final_data3M = sdf.filter("rowNumber3M == 1")
+
+    # 6 months rolling sum and marketshare
+    sdf = (
+        sdf.withColumn(
+            "rollingSum6MBS",
+            sum(sdf.BrandSize).over(
+                Window.partitionBy("xBrandId").orderBy("Period").rowsBetween(-5, 0)
+            ),
+        )
+        .withColumn(
+            "rollingSum6MMS",
+            sum(sdf.MarketSize).over(
+                Window.partitionBy("xBrandId").orderBy("Period").rowsBetween(-5, 0)
+            ),
+        )
+        .withColumn("marketShare6M", col("rollingSum6MBS") / col("rollingSum6MMS"))
+        .withColumn(
+            "rowNumber6M",
+            row_number().over(
+                Window.partitionBy("xBrandId").orderBy(col("Period").desc())
+            ),
+        )
+    )
+
+    # final_data6M = sdf.filter("rowNumber6M == 1").select(
+    #     "xBrandId",
+    #     "Period",
+    #     "BrandSize",
+    #     "MarketSize",
+    #     "rollingSum6MBS",
+    #     "rollingSum6MMS",
+    #     "marketShare6M",
+    # )
+
+    # 12 months rolling sum and marketshare
+    sdf = (
+        sdf.withColumn(
+            "rollingSum12MBS",
+            sum(sdf.BrandSize).over(
+                Window.partitionBy("xBrandId").orderBy("Period").rowsBetween(-11, 0)
+            ),
+        )
+        .withColumn(
+            "rollingSum12MMS",
+            sum(sdf.MarketSize).over(
+                Window.partitionBy("xBrandId").orderBy("Period").rowsBetween(-11, 0)
+            ),
+        )
+        .withColumn("marketShare12M", col("rollingSum12MBS") / col("rollingSum12MMS"))
+        .withColumn(
+            "rowNumber12M",
+            row_number().over(
+                Window.partitionBy("xBrandId").orderBy(col("Period").desc())
+            ),
+        )
+    )
+
+    # final_data12M = sdf.filter("rowNumber12M == 1").select(
+    #     "xBrandId",
+    #     granularity_level,
+    #     "Brand",
+    #     "Period",
+    #     "BrandSize",
+    #     "MarketSize",
+    #     "rollingSum12MBS",
+    #     "rollingSum12MMS",
+    #     "marketShare12M",
+    # )
+
+    sdf = sdf.withColumn(
+        "lowerBound3M", sdf.marketShare3M - mktShareFlexibility
+    ).withColumn("upperBound3M", sdf.marketShare3M + mktShareFlexibility)
+
+    sdf = (
+        sdf.withColumn(
+            "avgMSApp3", greatest("marketShare3M", "marketShare6M", "marketShare12M")
+        )
+        .withColumn(
+            "adjustedApp3UB",
+            when(col("avgMSApp3") > col("upperBound3M"), col("upperBound3M")).otherwise(
+                col("avgMSApp3")
+            ),
+        )
+        .withColumn(
+            "MSApp3Final",
+            when(
+                col("adjustedApp3UB") < col("lowerBound3M"), col("lowerBound3M")
+            ).otherwise(col("adjustedApp3UB")),
+        )
+    )
+
+
+    mktShareApproachesSDF = sdf.where(col("Period") == maxPeriod)
+
+    metricsPath = __getConfigValue(country=country, reqdConfig="MetricsPath") + version
+    metricsSDF = spark.read.format("delta").load(metricsPath)
+
+    computeBrandSizeForApproachesSDF = (
+        metricsSDF.alias("m")
+        .join(other=mktShareApproachesSDF.alias("msa"), on="xBrandId")
+        .select(
+            "xBrandId",
+            "m." + granularity_level,
+            "m.Brand",
+            "m.L6Avg",
+            "m.L12Avg",
+            "m.BL_SPLY",
+            "m.SPLY",
+            "m.SPLYGSK",
+            "m.capped_Baseline",
+            "msa.Period",
+            "msa.BrandSize",
+            "msa.MarketSize",
+            "msa.rollingSum3MBS",
+            "msa.rollingSum3MMS",
+            "msa.marketShare3M",
+            "msa.rollingSum6MBS",
+            "msa.rollingSum6MMS",
+            "msa.marketShare6M",
+            "msa.rollingSum12MBS",
+            "msa.rollingSum12MMS",
+            "msa.marketShare12M",
+            "msa.MSApp3Final",
+        )
+        .withColumn("BrandSizeApp3", round(col("capped_Baseline") * col("MSApp3Final"),0))
+    )
+
+    MktSharePerXPath = (
+        __getConfigValue(country=country, reqdConfig="MktSharePerXPath") + version
+    )
+
+    recursive_delete(MktSharePerXPath)
+
+    dbutils.fs.rm(MktSharePerXPath, True)
+    print(f"\n|--> Writing the MktSharePerX to disk ...")
+    print(f"|--> Writing path {MktSharePerXPath}")
+    (
+        computeBrandSizeForApproachesSDF.write.format("delta")
+        .mode("overwrite")
+        #            .option("overwriteSchema", "true")
+        #            .option("mergeSchema", "true")
+        .partitionBy("Brand")
+        .save(f"{MktSharePerXPath}")
+    )
+    print("|--> Writing the MktSharePerX to disk complete.")
+
+    dsDb = __getConfigValue(country=country, reqdConfig="DsDb")
+    MktSharePerXTable = (
+        __getConfigValue(country=country, reqdConfig="MktSharePerXTable") + version
+    )
+    MktSharePerXTableName = f"{dsDb}.{MktSharePerXTable}"
+
+    print(f"\n|--> Creating the table {MktSharePerXTableName} ...")
+    spark.sql(f"DROP TABLE IF EXISTS {MktSharePerXTableName}")
+    spark.sql(
+        f"CREATE TABLE {MktSharePerXTableName} USING DELTA LOCATION '{MktSharePerXPath}'"
+    )
+    print(f"|--> Table {MktSharePerXTableName} created successfully.")
+
+    return computeBrandSizeForApproachesSDF
