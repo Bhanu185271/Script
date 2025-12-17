@@ -1,0 +1,2410 @@
+#######################################################################################################################################
+
+###### Reference Endpoint Start
+
+#######################################################################################################################################
+
+
+# Competitor Config – Individual Endpoint 
+
+
+COMP_TABLE = "hive_metastore.fieldforce_navigator_deployment.d_ffn_competitor_config"
+MARKET_BRAND_TABLE = "hive_metastore.fieldforce_navigator_deployment.audio_market_brand_config"
+
+_valid_markets_brands_cache = None
+_cache_timestamp = None
+
+import time
+from datetime import datetime, timedelta
+import pandas as pd
+import math
+
+EXCEL_TO_DB_MAPPING = {
+    "Market": "MARKET",
+    "Brand": "BRAND",
+    "Disease State": "DISEASE_STATE",
+    "Drug Class": "DRUG_CLASS",
+    "Brands": "COMPETITOR_BRANDS",
+    "Competition Type": "COMPETITION_TYPE",
+    "Molecule": "MOLECULE",
+    "Other names": "OTHER_NAMES",
+    "Combination": "COMBINATION"
+}
+
+TARGET_SHEET_NAME = "Brand - Competitors"
+HEADER_ROW_INDEX = 2
+
+def _clean(s):  
+    return " ".join(str(s).strip().split()) if s is not None else ""
+
+def _sq(s):     
+    return str(s).replace("'", "''")
+
+def _is_nullish(v):
+    if v is None:
+        return True
+    t = str(v).strip()
+    if t == "":
+        return True
+    return t.lower() == "null"
+
+def _get_valid_markets_brands(force_refresh=False):
+    global _valid_markets_brands_cache, _cache_timestamp
+    
+    cache_duration = timedelta(minutes=5)
+    current_time = datetime.now()
+    
+    if (not force_refresh and 
+        _valid_markets_brands_cache is not None and 
+        _cache_timestamp is not None and 
+        current_time - _cache_timestamp < cache_duration):
+        return _valid_markets_brands_cache
+    
+    try:
+        sql = f"""
+            SELECT 
+                DISTINCT UPPER(TRIM(MARKET)) as MARKET,
+                UPPER(TRIM(BRAND)) as BRAND
+            FROM {MARKET_BRAND_TABLE}
+            WHERE MARKET IS NOT NULL AND BRAND IS NOT NULL
+        """
+        
+        df = dc.execute_query(sql)
+        
+        if df is not None and not df.empty:
+            valid_markets = set(df['MARKET'].dropna().unique())
+            valid_brands = set(df['BRAND'].dropna().unique())
+            
+            valid_combinations = set()
+            for _, row in df.iterrows():
+                if pd.notna(row['MARKET']) and pd.notna(row['BRAND']):
+                    valid_combinations.add((row['MARKET'], row['BRAND']))
+            
+            _valid_markets_brands_cache = {
+                'markets': valid_markets,
+                'brands': valid_brands,
+                'combinations': valid_combinations
+            }
+            _cache_timestamp = current_time
+        else:
+            _valid_markets_brands_cache = {
+                'markets': set(),
+                'brands': set(),
+                'combinations': set()
+            }
+            _cache_timestamp = current_time
+            
+    except Exception as e:
+        print(f"Error fetching valid markets/brands: {str(e)}")
+        return {'markets': set(), 'brands': set(), 'combinations': set()}
+    
+    return _valid_markets_brands_cache
+
+def _process_template_excel(file_obj):
+    try:
+        excel_file = pd.ExcelFile(file_obj, engine="openpyxl")
+        
+        if TARGET_SHEET_NAME not in excel_file.sheet_names:
+            raise ValueError(
+                f"Required sheet '{TARGET_SHEET_NAME}' not found. "
+                f"Available sheets: {', '.join(excel_file.sheet_names)}"
+            )
+        
+        df = pd.read_excel(
+            file_obj, 
+            sheet_name=TARGET_SHEET_NAME,
+            header=HEADER_ROW_INDEX,
+            engine="openpyxl"
+        )
+        
+        if len(df.columns) > 0:
+            df = df.iloc[:, 1:]
+        
+        df.columns = [str(c).strip() for c in df.columns]
+        df = df.replace({pd.NA: "", None: ""}).fillna("")
+        
+        # track excel row numbers
+        df['_excel_row_num'] = range(4, 4 + len(df))
+        df = df[df.drop('_excel_row_num', axis=1).astype(str).apply(lambda x: x.str.strip().str.len().sum(), axis=1) > 0]
+        
+        available_excel_cols = set(df.columns) - {'_excel_row_num'}
+        expected_excel_cols = set(EXCEL_TO_DB_MAPPING.keys())
+        missing_cols = expected_excel_cols - available_excel_cols
+        
+        missing_columns_list = list(missing_cols) if missing_cols else None
+        
+        mandatory_excel_cols = ["Market", "Brand", "Disease State", "Drug Class", 
+                               "Brands", "Competition Type"]
+        missing_mandatory = [col for col in mandatory_excel_cols if col not in df.columns]
+        
+        if missing_mandatory:
+            raise ValueError(
+                f"Missing mandatory columns in '{TARGET_SHEET_NAME}' sheet: {', '.join(missing_mandatory)}. "
+                f"Found columns: {list(df.columns)}"
+            )
+        
+        mapped_data = []
+        
+        for idx, row in df.iterrows():
+            excel_row_num = int(row['_excel_row_num'])
+            mapped_row = {}
+            
+            for excel_col, db_col in EXCEL_TO_DB_MAPPING.items():
+                if excel_col in df.columns:
+                    value = row.get(excel_col, "")
+                    mapped_row[db_col] = _clean(value)
+                else:
+                    mapped_row[db_col] = ""
+            
+            if (mapped_row.get("MARKET") and 
+                mapped_row.get("BRAND") and 
+                mapped_row.get("DISEASE_STATE") and 
+                mapped_row.get("DRUG_CLASS") and 
+                mapped_row.get("COMPETITOR_BRANDS") and 
+                mapped_row.get("COMPETITION_TYPE")):
+                mapped_data.append((excel_row_num, mapped_row))
+        
+        if not mapped_data:
+            raise ValueError(
+                f"No valid data rows found in sheet '{TARGET_SHEET_NAME}'."
+            )
+        
+        return mapped_data, missing_columns_list
+        
+    except Exception as e:
+        raise Exception(f"Error processing template Excel: {str(e)}")
+
+@app.route("/d_ffn_competitor_config", methods=["GET"])
+@cross_origin()
+def competitor_get():
+    try:
+        # Get brand and market from query parameters (Postman Params)
+        brand_param = request.args.get("BRAND", "").strip()
+        market_param = request.args.get("MARKET", "").strip()
+        
+        definitions = {
+            "Description": {
+                "MARKET": {
+                    "Example Values": ["GBR", "THA", "ITA", "PRT"],
+                    "Description": "Name of the Market to be deployed",
+                    "Parameter_type": "Mandatory"
+                },
+                "BRAND": {
+                    "Example Values": ["AREXVY", "SHINGRIX"],
+                    "Description": "Name of Brand to be deployed",
+                    "Parameter_type": "Mandatory"
+                },
+                "DISEASE_STATE": {
+                    "Example Values": ["RSV vaccine", "Shingles"],
+                    "Description": "Primary disease state or indication",
+                    "Parameter_type": "Mandatory"
+                },
+                "DRUG_CLASS": {
+                    "Example Values": ["Non-adjuvanted", "Adjuvanted"],
+                    "Description": "Drug class/category",
+                    "Parameter_type": "Mandatory"
+                },
+                "COMPETITOR_BRANDS": {
+                    "Example Values": ["Abrysvo"],
+                    "Description": "Competing brand name",
+                    "Parameter_type": "Mandatory"
+                },
+                "COMPETITION_TYPE": {
+                    "Example Values": ["COMPETITOR", "GSK"],
+                    "Description": "Relationship type vs our brand",
+                    "Parameter_type": "Mandatory"
+                },
+                "MOLECULE": {
+                    "Example Values": ["RSVPreF"],
+                    "Description": "Active component or molecule",
+                    "Parameter_type": "Optional"
+                },
+                "OTHER_NAMES": {
+                    "Example Values": ["null"],
+                    "Description": "Aliases / other names",
+                    "Parameter_type": "Optional"
+                },
+                "COMBINATION": {
+                    "Example Values": ["null"],
+                    "Description": "Combination component if any",
+                    "Parameter_type": "Optional"
+                },
+                "ADDED_BY": {
+                    "Example Values": ["abc.x.abc@gsk.com"],
+                    "Description": "Auto-picked from 'Username' header in POST",
+                    "Parameter_type": "Mandatory (via header)"
+                },
+                "ENTRY_TIME": {
+                    "Example Values": ["current_timestamp()"],
+                    "Description": "Set by system at insert time",
+                    "Parameter_type": "Auto-generated"
+                }
+            },
+            "sample_json": {
+                "MARKET": "THA",
+                "BRAND": "AREXVY",
+                "DISEASE_STATE": "RSV vaccine",
+                "DRUG_CLASS": "Non-adjuvanted",
+                "COMPETITOR_BRANDS": "Abrysvo",
+                "COMPETITION_TYPE": "COMPETITOR",
+                "MOLECULE": "null",
+                "OTHER_NAMES": "null",
+                "COMBINATION": "null"
+            }
+        }
+        
+        # Build query with optional WHERE clause based on parameters
+        query = f"SELECT * FROM {COMP_TABLE}"
+        where_conditions = []
+        
+        if brand_param:
+            where_conditions.append(f"UPPER(TRIM(BRAND)) = '{_sq(brand_param.upper())}'")
+        
+        if market_param:
+            where_conditions.append(f"UPPER(TRIM(MARKET)) = '{_sq(market_param.upper())}'")
+        
+        if where_conditions:
+            query += " WHERE " + " AND ".join(where_conditions)
+        
+        query += " LIMIT 1"
+        
+        print(f"Executing query: {query}")
+        
+        # Execute query to get sample data
+        sample_df = dc.execute_query(query)
+        
+        # Initialize table_output as None
+        data = None
+        
+        # If data exists, convert to JSON key-value pairs
+        if sample_df is not None and not sample_df.empty:
+            # Get the first row
+            row = sample_df.iloc[0]
+            
+            # Convert row to dictionary, handling None/NaN values
+            data = {}
+            for col in sample_df.columns:
+                value = row[col]
+                # Convert NaN, None, or empty strings to None for cleaner JSON
+                if pd.isna(value) or value == "" or str(value).strip().lower() == "null":
+                    data[col] = None
+                else:
+                    data[col] = str(value)
+        
+        # Build response with table_output nested
+        response = {
+            #"Description": definitions["Description"],
+            #"sample_json": definitions["sample_json"],
+            "data": data
+        }
+        
+        return jsonify(response), status.HTTP_200_OK
+        
+    except Exception as e:
+        import traceback
+        print("ERROR:", traceback.format_exc())
+        return jsonify({"error": f"Internal server error: {str(e)}"}), status.HTTP_500_INTERNAL_SERVER_ERROR
+
+@app.route("/d_ffn_competitor_config", methods=["POST"])
+@cross_origin()
+def competitor_post():
+    try:
+        added_by = _clean(request.headers.get("Username", "") or "")
+        if not added_by:
+            return jsonify({"error": "Missing 'Username' in headers."}), status.HTTP_400_BAD_REQUEST
+
+        # pagination params
+        page = int(request.args.get("page", 1))
+        limit = int(request.args.get("limit", 50))
+        offset = (page - 1) * limit
+
+        valid_markets_brands = _get_valid_markets_brands(force_refresh=True)
+
+        rows = []
+        is_excel_mode = False
+        missing_columns_warning = None
+
+        if "file" in request.files:
+            is_excel_mode = True
+            f = request.files["file"]
+            fname = (f.filename or "").lower().strip()
+            
+            if not fname.endswith(".xlsx"):
+                return jsonify({"error": "Only .xlsx files supported."}), status.HTTP_400_BAD_REQUEST
+
+            try:
+                rows, missing_columns_warning = _process_template_excel(f)
+            except ValueError as ve:
+                return jsonify({"error": str(ve)}), status.HTTP_400_BAD_REQUEST
+            except Exception as e:
+                return jsonify({"error": f"Failed to process Excel: {str(e)}"}), status.HTTP_400_BAD_REQUEST
+
+        else:
+            body = request.get_json(force=True, silent=True) or {}
+            items = body if isinstance(body, list) else [body]
+
+            for i, rec in enumerate(items, start=1):
+                market = _clean(rec.get("MARKET", ""))
+                brand  = _clean(rec.get("BRAND", ""))
+                disease = _clean(rec.get("DISEASE_STATE", ""))
+                dclass  = _clean(rec.get("DRUG_CLASS", ""))
+                cbrand = _clean(rec.get("COMPETITOR_BRANDS", ""))
+                ctype  = _clean(rec.get("COMPETITION_TYPE", ""))
+
+                if not market or not brand or not disease or not dclass or not cbrand or not ctype:
+                    return jsonify({
+                        "status": "error",
+                        "message": f"Item {i}: Missing required fields."
+                    }), status.HTTP_400_BAD_REQUEST
+
+                molec = _clean(rec.get("MOLECULE", "null"))
+                other = _clean(rec.get("OTHER_NAMES", "null"))
+                comb = _clean(rec.get("COMBINATION", "null"))
+
+                rows.append((i, {
+                    "MARKET": market,
+                    "BRAND": brand,
+                    "DISEASE_STATE": disease,
+                    "DRUG_CLASS": dclass,
+                    "COMPETITOR_BRANDS": cbrand,
+                    "COMPETITION_TYPE": ctype,
+                    "MOLECULE": molec,
+                    "OTHER_NAMES": other,
+                    "COMBINATION": comb
+                }))
+
+        if not rows:
+            return jsonify({"error": "No valid rows to process."}), status.HTTP_400_BAD_REQUEST
+
+        # vectorized validation - all markets/brands at once
+        all_markets = {r[1]["MARKET"].strip().upper() if isinstance(r, tuple) else r["MARKET"].strip().upper() for r in rows}
+        all_brands = {r[1]["BRAND"].strip().upper() if isinstance(r, tuple) else r["BRAND"].strip().upper() for r in rows}
+
+        valid_market_set = {m.upper() for m in valid_markets_brands.get("markets", [])}
+        valid_brand_set = {b.upper() for b in valid_markets_brands.get("brands", [])}
+
+        invalid_markets_list = [{"MARKET": m, "reason": "Invalid MARKET"} for m in all_markets if m not in valid_market_set]
+        invalid_brands_list = [{"BRAND": b, "reason": "Invalid BRAND"} for b in all_brands if b not in valid_brand_set]
+
+        if invalid_markets_list or invalid_brands_list:
+            return jsonify({
+                "status": "error",
+                "invalid_markets": invalid_markets_list,
+                "invalid_brands": invalid_brands_list
+            }), status.HTTP_400_BAD_REQUEST
+
+        # batch duplicate check - single query
+        check_values = []
+        for r in rows:
+            row_data = r[1] if isinstance(r, tuple) else r
+            mol = row_data.get("MOLECULE", "")
+            disease = row_data.get("DISEASE_STATE", "")
+            
+            mol_cond = "IS NULL" if _is_nullish(mol) else f"= '{_sq(mol)}'"
+            disease_cond = "IS NULL" if _is_nullish(disease) else f"= '{_sq(disease)}'"
+            
+            check_values.append(
+                f"(UPPER(TRIM(MARKET)) = '{_sq(row_data['MARKET'].upper())}' AND "
+                f"UPPER(TRIM(BRAND)) = '{_sq(row_data['BRAND'].upper())}' AND "
+                f"TRIM(DRUG_CLASS) = '{_sq(row_data['DRUG_CLASS'])}' AND "
+                f"TRIM(COMPETITOR_BRANDS) = '{_sq(row_data['COMPETITOR_BRANDS'])}' AND "
+                f"TRIM(COMPETITION_TYPE) = '{_sq(row_data['COMPETITION_TYPE'])}' AND "
+                f"MOLECULE {mol_cond} AND "
+                f"DISEASE_STATE {disease_cond})"
+            )
+
+        check_query = f"""
+            SELECT UPPER(TRIM(MARKET)) as MARKET,
+                   UPPER(TRIM(BRAND)) as BRAND,
+                   TRIM(DRUG_CLASS) as DRUG_CLASS,
+                   TRIM(COMPETITOR_BRANDS) as COMPETITOR_BRANDS,
+                   TRIM(COMPETITION_TYPE) as COMPETITION_TYPE,
+                   TRIM(MOLECULE) as MOLECULE,
+                   TRIM(DISEASE_STATE) as DISEASE_STATE
+            FROM {COMP_TABLE}
+            WHERE {' OR '.join(check_values)}
+        """
+        
+        existing = dc.execute_query(check_query)
+        existing_set = set()
+        if existing is not None and not existing.empty:
+            for _, row in existing.iterrows():
+                mol_val = None if pd.isna(row['MOLECULE']) or row['MOLECULE'] == '' else row['MOLECULE']
+                disease_val = None if pd.isna(row['DISEASE_STATE']) or row['DISEASE_STATE'] == '' else row['DISEASE_STATE']
+                existing_set.add((
+                    row['MARKET'],
+                    row['BRAND'],
+                    row['DRUG_CLASS'],
+                    row['COMPETITOR_BRANDS'],
+                    row['COMPETITION_TYPE'],
+                    mol_val,
+                    disease_val
+                ))
+
+        inserted_rows, duplicates, errors = [], [], []
+        batch_inserts = []
+
+        for r in rows:
+            try:
+                if isinstance(r, tuple):
+                    row_num, row_data = r
+                else:
+                    row_num = 1
+                    row_data = r
+                
+                market = row_data["MARKET"].upper()
+                brand = row_data["BRAND"].upper()
+                drug_class = row_data["DRUG_CLASS"]
+                cbrand = row_data["COMPETITOR_BRANDS"]
+                ctype = row_data["COMPETITION_TYPE"]
+                mol = row_data.get("MOLECULE", "")
+                disease = row_data.get("DISEASE_STATE", "")
+                
+                mol_val = None if _is_nullish(mol) else mol
+                disease_val = None if _is_nullish(disease) else disease
+                
+                key = (market, brand, drug_class, cbrand, ctype, mol_val, disease_val)
+
+                if key in existing_set:
+                    duplicates.append({
+                        "excel_row": row_num,
+                        "MARKET": market,
+                        "BRAND": brand,
+                        "COMPETITOR_BRANDS": cbrand,
+                        "reason": "Duplicate"
+                    })
+                    continue
+
+                mol_sql = "NULL" if _is_nullish(mol) else f"'{_sq(mol)}'"
+                oth_sql = "NULL" if _is_nullish(row_data.get("OTHER_NAMES")) else f"'{_sq(row_data['OTHER_NAMES'])}'"
+                cmb_sql = "NULL" if _is_nullish(row_data.get("COMBINATION")) else f"'{_sq(row_data['COMBINATION'])}'"
+
+                batch_inserts.append(
+                    f"('{_sq(market)}', '{_sq(brand)}', '{_sq(disease)}', '{_sq(drug_class)}', "
+                    f"'{_sq(cbrand)}', '{_sq(ctype)}', '{_sq(added_by)}', CURRENT_TIMESTAMP(), "
+                    f"{mol_sql}, {oth_sql}, {cmb_sql})"
+                )
+
+                inserted_rows.append({"excel_row": row_num, "MARKET": market, "BRAND": brand})
+
+            except Exception as e:
+                errors.append({"excel_row": row_num if isinstance(r, tuple) else 1, "error": str(e)})
+
+        # batch insert - single query
+        if batch_inserts:
+            insert_query = f"""
+                INSERT INTO {COMP_TABLE}
+                (MARKET, BRAND, DISEASE_STATE, DRUG_CLASS, COMPETITOR_BRANDS,
+                 COMPETITION_TYPE, ADDED_BY, ENTRY_TIME, MOLECULE, OTHER_NAMES, COMBINATION)
+                VALUES {','.join(batch_inserts)}
+            """
+            dc.execute_non_query(insert_query)
+
+        # pagination for response
+        total_rows = len(rows)
+        total_pages = math.ceil(total_rows / limit)
+        start, end = offset, min(offset + limit, total_rows)
+
+        response = {
+            "status": "success" if inserted_rows else ("partial" if errors else "no-change"),
+            "mode": "excel-template" if is_excel_mode else "json",
+            "page": page,
+            "limit": limit,
+            "total_rows": total_rows,
+            "total_pages": total_pages,
+            "processed_rows": end - start,
+            "inserted_count": len(inserted_rows),
+            "duplicate_count": len(duplicates),
+            "validation_errors_count": len(invalid_markets_list) + len(invalid_brands_list),
+            "inserted_rows": inserted_rows[start:end],
+            "duplicates": duplicates[start:end],
+            "errors": errors[start:end]
+        }
+
+        if is_excel_mode and missing_columns_warning:
+            response["warning"] = {
+                "message": "Template missing optional columns, inserted as NULL",
+                "missing_columns": missing_columns_warning
+            }
+
+        # remove empty lists
+        response = {k: v for k, v in response.items() 
+                   if v is not None and not (isinstance(v, list) and len(v) == 0)}
+
+        return jsonify(response), status.HTTP_201_CREATED if inserted_rows else status.HTTP_200_OK
+
+    except Exception as e:
+        import traceback
+        print("ERROR:", traceback.format_exc())
+        return jsonify({"error": f"Internal server error: {str(e)}"}), status.HTTP_500_INTERNAL_SERVER_ERROR
+
+
+
+
+###############################################
+# INSIGHT CONFIG - Key Messages (Optimized)
+###############################################
+
+INSIGHT_TABLE = "hive_metastore.fieldforce_navigator_deployment.d_ffn_insight_config"
+
+EXCEL_TO_DB_MAPPING_KEY_MSG = {
+    "Market": "MARKET",
+    "Brand": "BRAND",
+    "Message": "VALUE_1"
+}
+
+FIXED_INSIGHT_VALUE_KEY_MSG = "mkt-key-messages-categorization-insight"
+FIXED_TYPE_VALUE_KEY_MSG = "Market_Intelligence"
+TARGET_SHEET_NAME_KEY_MSG = "Brand - Key Messages"
+
+def _process_template_excel_key_msg(file_obj):
+    try:
+        excel_file = pd.ExcelFile(file_obj, engine="openpyxl")
+        
+        if TARGET_SHEET_NAME_KEY_MSG not in excel_file.sheet_names:
+            raise ValueError(f"Sheet '{TARGET_SHEET_NAME_KEY_MSG}' not found")
+        
+        df = pd.read_excel(file_obj, sheet_name=TARGET_SHEET_NAME_KEY_MSG, header=HEADER_ROW_INDEX, engine="openpyxl")
+        
+        if len(df.columns) > 0:
+            df = df.iloc[:, 1:]
+        
+        df.columns = [str(c).strip() for c in df.columns]
+        df = df.replace({pd.NA: "", None: ""}).fillna("")
+        
+        df['_excel_row_num'] = range(4, 4 + len(df))
+        df = df[df.drop('_excel_row_num', axis=1).astype(str).apply(lambda x: x.str.strip().str.len().sum(), axis=1) > 0]
+        
+        mandatory_cols = ["Market", "Brand", "Message"]
+        missing = [col for col in mandatory_cols if col not in df.columns]
+        
+        if missing:
+            raise ValueError(f"Missing columns: {', '.join(missing)}")
+        
+        mapped_data = []
+        
+        for idx, row in df.iterrows():
+            excel_row_num = int(row['_excel_row_num'])
+            mapped_row = {}
+            
+            for excel_col, db_col in EXCEL_TO_DB_MAPPING_KEY_MSG.items():
+                if excel_col in df.columns:
+                    mapped_row[db_col] = _clean(row.get(excel_col, ""))
+                else:
+                    mapped_row[db_col] = ""
+            
+            mapped_row["INSIGHT"] = FIXED_INSIGHT_VALUE_KEY_MSG
+            mapped_row["TYPE"] = FIXED_TYPE_VALUE_KEY_MSG
+            
+            if mapped_row.get("MARKET") and mapped_row.get("BRAND") and mapped_row.get("VALUE_1"):
+                mapped_data.append((excel_row_num, mapped_row))
+        
+        return mapped_data, None
+        
+    except Exception as e:
+        raise Exception(f"Error processing Excel: {str(e)}")
+
+@app.route("/d_ffn_insight_config_key_msg", methods=["GET"])
+@cross_origin()
+def insight_key_msg_get():
+    try:
+        # Get brand and market from query parameters (Postman Params)
+        brand_param = request.args.get("BRAND", "").strip()
+        market_param = request.args.get("MARKET", "").strip()
+        
+        definitions = {
+            "Description": {
+                "BRAND": {
+                    "Example Values": ["AREXVY", "SHINGRIX"],
+                    "Description": "Name of Brand to be deployed",
+                    "Parameter_type": "Mandatory"
+                },
+                "MARKET": {
+                    "Example Values": ["GBR", "THA", "ITA", "PRT"],
+                    "Description": "Name of the Market to be deployed",
+                    "Parameter_type": "Mandatory"
+                },
+                "INSIGHT": {
+                    "Example Values": ["mkt-key-messages-categorization-insight"],
+                    "Description": "value for insight type",
+                    "Parameter_type": "Mandatory : Auto-filled"
+                },
+                "TYPE": {
+                    "Example Values": ["Market_Intelligence"],
+                    "Description": "value for Insight type",
+                    "Parameter_type": "Mandatory : Auto-filled"
+                },
+                "VALUE_1": {
+                    "Example Values": ["Key Message Text"],
+                    "Description": "The actual Message Text content",
+                    "Parameter_type": "Mandatory"
+                },
+                "VALUE_2": {
+                    "Example Values": ["NULL"],
+                    "Description": "Value for VALUE_2 Insight Type",
+                    "Parameter_type": "Auto-filled (NULL)"
+                },
+                "VALUE_3": {
+                    "Example Values": ["NULL"],
+                    "Description": "Value for VALUE_3 Insight Type",
+                    "Parameter_type": "Auto-filled (NULL)"
+                },
+                "VALUE_4": {
+                    "Example Values": ["NULL"],
+                    "Description": "Value for VALUE_4 Insight Type",
+                    "Parameter_type": "Auto-filled (NULL)"
+                },
+                "ADDED_BY": {
+                    "Example Values": ["abc.x.abc@gsk.com"],
+                    "Description": "Auto-picked from 'Username' header in POST",
+                    "Parameter_type": "Mandatory (via header)"
+                },
+                "ENTRY_TIME": {
+                    "Example Values": ["current_timestamp()"],
+                    "Description": "Set by system at insert time",
+                    "Parameter_type": "Auto-generated"
+                }
+            },               
+                                 
+            
+            "sample_json": {
+                "MARKET": "THA",
+                "BRAND": "AREXVY",
+                "INSIGHT": "mkt-key-messages-categorization-insight",
+                "TYPE": "Market_Intelligence",
+                "VALUE_1": "Key message text"
+            }
+        }
+        
+        # Build query with optional WHERE clause based on parameters
+        query = f"SELECT * FROM {INSIGHT_TABLE}"
+        where_conditions = []
+        
+        if brand_param:
+            where_conditions.append(f"UPPER(TRIM(BRAND)) = '{_sq(brand_param.upper())}'")
+        
+        if market_param:
+            where_conditions.append(f"UPPER(TRIM(MARKET)) = '{_sq(market_param.upper())}'")
+        
+        # Add filter for key messages
+        where_conditions.append(f"TRIM(INSIGHT) = '{FIXED_INSIGHT_VALUE_KEY_MSG}'")
+        
+        if where_conditions:
+            query += " WHERE " + " AND ".join(where_conditions)
+        
+        # Removed LIMIT 1 to show all records
+        
+        print(f"Executing query: {query}")
+        
+        # Execute query to get sample data
+        sample_df = dc.execute_query(query)
+        
+        # Initialize table_output as None
+        data = None
+        
+        # If data exists, convert to JSON - now returns list of all records
+        if sample_df is not None and not sample_df.empty:
+            data = []
+            for _, row in sample_df.iterrows():
+                record = {}
+                for col in sample_df.columns:
+                    value = row[col]
+                    # Convert NaN, None, or empty strings to None for cleaner JSON
+                    if pd.isna(value) or value == "" or str(value).strip().lower() == "null":
+                        record[col] = None
+                    else:
+                        record[col] = str(value)
+                data.append(record)
+        
+        # Build response with table_output nested
+        response = {
+            #"Description": definitions["Description"],
+            #"sample_json": definitions["sample_json"],
+            "data": data
+        }
+        
+        return jsonify(response), status.HTTP_200_OK
+        
+    except Exception as e:
+        import traceback
+        print("ERROR:", traceback.format_exc())
+        return jsonify({"error": f"Internal error: {str(e)}"}), status.HTTP_500_INTERNAL_SERVER_ERROR
+
+@app.route("/d_ffn_insight_config_key_msg", methods=["POST"])
+@cross_origin()
+def insight_key_msg_post():
+    try:
+        added_by = _clean(request.headers.get("Username", "") or "")
+        if not added_by:
+            return jsonify({"error": "Missing Username"}), status.HTTP_400_BAD_REQUEST
+
+        page = int(request.args.get("page", 1))
+        limit = int(request.args.get("limit", 50))
+        offset = (page - 1) * limit
+
+        valid_markets_brands = _get_valid_markets_brands(force_refresh=True)
+
+        rows = []
+        is_excel_mode = False
+
+        if "file" in request.files:
+            is_excel_mode = True
+            f = request.files["file"]
+            
+            if not (f.filename or "").lower().endswith(".xlsx"):
+                return jsonify({"error": "Only .xlsx files"}), status.HTTP_400_BAD_REQUEST
+
+            try:
+                rows, _ = _process_template_excel_key_msg(f)
+            except Exception as e:
+                return jsonify({"error": str(e)}), status.HTTP_400_BAD_REQUEST
+        else:
+            body = request.get_json(force=True, silent=True) or {}
+            items = body if isinstance(body, list) else [body]
+
+            for i, rec in enumerate(items, start=1):
+                market = _clean(rec.get("MARKET", ""))
+                brand = _clean(rec.get("BRAND", ""))
+                value_1 = _clean(rec.get("VALUE_1", ""))
+
+                if not market or not brand or not value_1:
+                    return jsonify({"error": f"Item {i}: Missing fields"}), status.HTTP_400_BAD_REQUEST
+
+                rows.append((i, {
+                    "MARKET": market,
+                    "BRAND": brand,
+                    "INSIGHT": FIXED_INSIGHT_VALUE_KEY_MSG,
+                    "TYPE": FIXED_TYPE_VALUE_KEY_MSG,
+                    "VALUE_1": value_1
+                }))
+
+        if not rows:
+            return jsonify({"error": "No rows"}), status.HTTP_400_BAD_REQUEST
+
+        # vectorized validation
+        all_markets = {r[1]["MARKET"].upper() for r in rows}
+        all_brands = {r[1]["BRAND"].upper() for r in rows}
+
+        valid_market_set = {m.upper() for m in valid_markets_brands.get("markets", [])}
+        valid_brand_set = {b.upper() for b in valid_markets_brands.get("brands", [])}
+
+        invalid_mkts = [{"MARKET": m} for m in all_markets if m not in valid_market_set]
+        invalid_brnds = [{"BRAND": b} for b in all_brands if b not in valid_brand_set]
+
+        if invalid_mkts or invalid_brnds:
+            return jsonify({"status": "error", "invalid_markets": invalid_mkts, "invalid_brands": invalid_brnds}), status.HTTP_400_BAD_REQUEST
+
+        # batch duplicate check
+        check_vals = []
+        for r in rows:
+            row_data = r[1]
+            check_vals.append(
+                f"(UPPER(TRIM(MARKET)) = '{_sq(row_data['MARKET'].upper())}' AND "
+                f"UPPER(TRIM(BRAND)) = '{_sq(row_data['BRAND'].upper())}' AND "
+                f"TRIM(INSIGHT) = '{_sq(row_data['INSIGHT'])}' AND "
+                f"TRIM(TYPE) = '{_sq(row_data['TYPE'])}' AND "
+                f"TRIM(VALUE_1) = '{_sq(row_data['VALUE_1'])}')"
+            )
+
+        check_query = f"""
+            SELECT UPPER(TRIM(MARKET)) as MARKET, UPPER(TRIM(BRAND)) as BRAND,
+                   TRIM(INSIGHT) as INSIGHT, TRIM(TYPE) as TYPE, TRIM(VALUE_1) as VALUE_1
+            FROM {INSIGHT_TABLE}
+            WHERE {' OR '.join(check_vals)}
+        """
+        
+        existing = dc.execute_query(check_query)
+        existing_set = set()
+        if existing is not None and not existing.empty:
+            for _, row in existing.iterrows():
+                existing_set.add((row['MARKET'], row['BRAND'], row['INSIGHT'], row['TYPE'], row['VALUE_1']))
+
+        inserted_rows, duplicates, errors = [], [], []
+        batch_inserts = []
+
+        for r in rows:
+            try:
+                row_num, row_data = r
+                market = row_data["MARKET"].upper()
+                brand = row_data["BRAND"].upper()
+                
+                key = (market, brand, row_data["INSIGHT"], row_data["TYPE"], row_data["VALUE_1"])
+
+                if key in existing_set:
+                    duplicates.append({"excel_row": row_num, "MARKET": market, "BRAND": brand})
+                    continue
+
+                batch_inserts.append(
+                    f"('{_sq(brand)}', '{_sq(market)}', '{_sq(row_data['INSIGHT'])}', '{_sq(row_data['TYPE'])}', "
+                    f"'{_sq(row_data['VALUE_1'])}', NULL, NULL, NULL, '{_sq(added_by)}', CURRENT_TIMESTAMP())"
+                )
+
+                inserted_rows.append({"excel_row": row_num, "MARKET": market, "BRAND": brand})
+
+            except Exception as e:
+                errors.append({"excel_row": row_num, "error": str(e)})
+
+        # batch insert
+        if batch_inserts:
+            insert_query = f"""
+                INSERT INTO {INSIGHT_TABLE}
+                (BRAND, MARKET, INSIGHT, TYPE, VALUE_1, VALUE_2, VALUE_3, VALUE_4, ADDED_BY, ENTRY_TIME)
+                VALUES {','.join(batch_inserts)}
+            """
+            dc.execute_non_query(insert_query)
+
+        # pagination
+        total_rows = len(rows)
+        total_pages = math.ceil(total_rows / limit)
+        start, end = offset, min(offset + limit, total_rows)
+
+        response = {
+            "status": "success" if inserted_rows else "no-change",
+            "mode": "excel-template" if is_excel_mode else "json",
+            "page": page,
+            "limit": limit,
+            "total_rows": total_rows,
+            "total_pages": total_pages,
+            "inserted_count": len(inserted_rows),
+            "duplicate_count": len(duplicates),
+            "inserted_rows": inserted_rows[start:end],
+            "duplicates": duplicates[start:end],
+            "errors": errors[start:end]
+        }
+
+        response = {k: v for k, v in response.items() if v is not None and not (isinstance(v, list) and len(v) == 0)}
+
+        return jsonify(response), status.HTTP_201_CREATED if inserted_rows else status.HTTP_200_OK
+
+    except Exception as e:
+        import traceback
+        print("ERROR:", traceback.format_exc())
+        return jsonify({"error": f"Internal error: {str(e)}"}), status.HTTP_500_INTERNAL_SERVER_ERROR
+
+
+###############################################
+# ENDPOINT 2: KEY OBJECTIONS (Optimized)
+###############################################
+
+EXCEL_TO_DB_MAPPING_KEY_OBJ = {
+    "Market": "MARKET",
+    "Brand": "BRAND",
+    "Objection": "VALUE_1"
+}
+
+FIXED_INSIGHT_VALUE_KEY_OBJ = "mkt-objections-categorization-insight"
+FIXED_TYPE_VALUE_KEY_OBJ = "Market_Intelligence"
+TARGET_SHEET_NAME_KEY_OBJ = "Brand - Objections & Handlers"
+
+def _process_template_excel_key_obj(file_obj):
+    try:
+        excel_file = pd.ExcelFile(file_obj, engine="openpyxl")
+        
+        if TARGET_SHEET_NAME_KEY_OBJ not in excel_file.sheet_names:
+            raise ValueError(f"Sheet '{TARGET_SHEET_NAME_KEY_OBJ}' not found")
+        
+        df = pd.read_excel(file_obj, sheet_name=TARGET_SHEET_NAME_KEY_OBJ, header=HEADER_ROW_INDEX, engine="openpyxl")
+        
+        if len(df.columns) > 0:
+            df = df.iloc[:, 1:]
+        
+        df.columns = [str(c).strip() for c in df.columns]
+        df = df.replace({pd.NA: "", None: ""}).fillna("")
+        
+        df['_excel_row_num'] = range(4, 4 + len(df))
+        df = df[df.drop('_excel_row_num', axis=1).astype(str).apply(lambda x: x.str.strip().str.len().sum(), axis=1) > 0]
+        
+        mandatory_cols = ["Market", "Brand", "Objection"]
+        missing = [col for col in mandatory_cols if col not in df.columns]
+        
+        if missing:
+            raise ValueError(f"Missing columns: {', '.join(missing)}")
+        
+        mapped_data = []
+        
+        for idx, row in df.iterrows():
+            excel_row_num = int(row['_excel_row_num'])
+            mapped_row = {}
+            
+            for excel_col, db_col in EXCEL_TO_DB_MAPPING_KEY_OBJ.items():
+                if excel_col in df.columns:
+                    mapped_row[db_col] = _clean(row.get(excel_col, ""))
+                else:
+                    mapped_row[db_col] = ""
+            
+            mapped_row["INSIGHT"] = FIXED_INSIGHT_VALUE_KEY_OBJ
+            mapped_row["TYPE"] = FIXED_TYPE_VALUE_KEY_OBJ
+            
+            if mapped_row.get("MARKET") and mapped_row.get("BRAND") and mapped_row.get("VALUE_1"):
+                mapped_data.append((excel_row_num, mapped_row))
+        
+        return mapped_data, None
+        
+    except Exception as e:
+        raise Exception(f"Error processing Excel: {str(e)}")
+
+@app.route("/d_ffn_insight_config_key_obj", methods=["GET"])
+@cross_origin()
+def insight_key_obj_get():
+    try:
+        # Get brand and market from query parameters (Postman Params)
+        brand_param = request.args.get("BRAND", "").strip()
+        market_param = request.args.get("MARKET", "").strip()
+        
+        definitions = {
+            "Description": {
+                "BRAND": {
+                    "Example Values": ["AREXVY", "SHINGRIX"],
+                    "Description": "Name of Brand to be deployed",
+                    "Parameter_type": "Mandatory"
+                },
+                "MARKET": {
+                    "Example Values": ["GBR", "THA", "ITA", "PRT"],
+                    "Description": "Name of the Market to be deployed",
+                    "Parameter_type": "Mandatory"
+                },
+                "INSIGHT": {
+                    "Example Values": ["mkt-objections-categorization-insight"],
+                    "Description": "value for insight type",
+                    "Parameter_type": "Mandatory : Auto-filled"
+                },
+                "TYPE": {
+                    "Example Values": ["Market_Intelligence"],
+                    "Description": "value for Insight type",
+                    "Parameter_type": "Mandatory : Auto-filled"
+                },
+                "VALUE_1": {
+                    "Example Values": ["Key Objection Text"],
+                    "Description": "The actual objection text content",
+                    "Parameter_type": "Mandatory"
+                },
+                "VALUE_2": {
+                    "Example Values": ["NULL"],
+                    "Description": "Value for VALUE_2 Insight Type",
+                    "Parameter_type": "Auto-filled (NULL)"
+                },
+                "VALUE_3": {
+                    "Example Values": ["NULL"],
+                    "Description": "Value for VALUE_3 Insight Type",
+                    "Parameter_type": "Auto-filled (NULL)"
+                },
+                "VALUE_4": {
+                    "Example Values": ["NULL"],
+                    "Description": "Value for VALUE_4 Insight Type",
+                    "Parameter_type": "Auto-filled (NULL)"
+                },
+                "ADDED_BY": {
+                    "Example Values": ["abc.x.abc@gsk.com"],
+                    "Description": "Auto-picked from 'Username' header in POST",
+                    "Parameter_type": "Mandatory (via header)"
+                },
+                "ENTRY_TIME": {
+                    "Example Values": ["current_timestamp()"],
+                    "Description": "Set by system at insert time",
+                    "Parameter_type": "Auto-generated"
+                }
+            },               
+                                 
+            
+            "sample_json": {
+                "MARKET": "THA",
+                "BRAND": "AREXVY",
+                "INSIGHT": "mkt-objections-categorization-insight",
+                "TYPE": "Market_Intelligence",
+                "VALUE_1": "Key Objection text"
+            }
+        }
+        
+        # Build query with optional WHERE clause based on parameters
+        query = f"SELECT * FROM {INSIGHT_TABLE}"
+        where_conditions = []
+        
+        if brand_param:
+            where_conditions.append(f"UPPER(TRIM(BRAND)) = '{_sq(brand_param.upper())}'")
+        
+        if market_param:
+            where_conditions.append(f"UPPER(TRIM(MARKET)) = '{_sq(market_param.upper())}'")
+        
+        # Add filter for key objections
+        where_conditions.append(f"TRIM(INSIGHT) = '{FIXED_INSIGHT_VALUE_KEY_OBJ}'")
+        
+        if where_conditions:
+            query += " WHERE " + " AND ".join(where_conditions)
+        
+        # Removed LIMIT 1 to show all records
+        
+        print(f"Executing query: {query}")
+        
+        # Execute query to get sample data
+        sample_df = dc.execute_query(query)
+        
+        # Initialize table_output as None
+        data = None
+        
+        # If data exists, convert to JSON - now returns list of all records
+        if sample_df is not None and not sample_df.empty:
+            data = []
+            for _, row in sample_df.iterrows():
+                record = {}
+                for col in sample_df.columns:
+                    value = row[col]
+                    # Convert NaN, None, or empty strings to None for cleaner JSON
+                    if pd.isna(value) or value == "" or str(value).strip().lower() == "null":
+                        record[col] = None
+                    else:
+                        record[col] = str(value)
+                data.append(record)
+        
+        # Build response with table_output nested
+        response = {
+            #"Description": definitions["Description"],
+            #"sample_json": definitions["sample_json"],
+            "data": data
+        }
+        
+        return jsonify(response), status.HTTP_200_OK
+        
+    except Exception as e:
+        import traceback
+        print("ERROR:", traceback.format_exc())
+        return jsonify({"error": f"Internal error: {str(e)}"}), status.HTTP_500_INTERNAL_SERVER_ERROR
+
+@app.route("/d_ffn_insight_config_key_obj", methods=["POST"])
+@cross_origin()
+def insight_key_obj_post():
+    try:
+        added_by = _clean(request.headers.get("Username", "") or "")
+        if not added_by:
+            return jsonify({"error": "Missing Username"}), status.HTTP_400_BAD_REQUEST
+
+        page = int(request.args.get("page", 1))
+        limit = int(request.args.get("limit", 50))
+        offset = (page - 1) * limit
+
+        valid_markets_brands = _get_valid_markets_brands(force_refresh=True)
+
+        rows = []
+        is_excel_mode = False
+
+        if "file" in request.files:
+            is_excel_mode = True
+            f = request.files["file"]
+            
+            if not (f.filename or "").lower().endswith(".xlsx"):
+                return jsonify({"error": "Only .xlsx files"}), status.HTTP_400_BAD_REQUEST
+
+            try:
+                rows, _ = _process_template_excel_key_obj(f)
+            except Exception as e:
+                return jsonify({"error": str(e)}), status.HTTP_400_BAD_REQUEST
+        else:
+            body = request.get_json(force=True, silent=True) or {}
+            items = body if isinstance(body, list) else [body]
+
+            for i, rec in enumerate(items, start=1):
+                market = _clean(rec.get("MARKET", ""))
+                brand = _clean(rec.get("BRAND", ""))
+                value_1 = _clean(rec.get("VALUE_1", ""))
+
+                if not market or not brand or not value_1:
+                    return jsonify({"error": f"Item {i}: Missing fields"}), status.HTTP_400_BAD_REQUEST
+
+                rows.append((i, {
+                    "MARKET": market,
+                    "BRAND": brand,
+                    "INSIGHT": FIXED_INSIGHT_VALUE_KEY_OBJ,
+                    "TYPE": FIXED_TYPE_VALUE_KEY_OBJ,
+                    "VALUE_1": value_1
+                }))
+
+        if not rows:
+            return jsonify({"error": "No rows"}), status.HTTP_400_BAD_REQUEST
+
+        # vectorized validation
+        all_markets = {r[1]["MARKET"].upper() for r in rows}
+        all_brands = {r[1]["BRAND"].upper() for r in rows}
+
+        valid_market_set = {m.upper() for m in valid_markets_brands.get("markets", [])}
+        valid_brand_set = {b.upper() for b in valid_markets_brands.get("brands", [])}
+
+        invalid_mkts = [{"MARKET": m} for m in all_markets if m not in valid_market_set]
+        invalid_brnds = [{"BRAND": b} for b in all_brands if b not in valid_brand_set]
+
+        if invalid_mkts or invalid_brnds:
+            return jsonify({"status": "error", "invalid_markets": invalid_mkts, "invalid_brands": invalid_brnds}), status.HTTP_400_BAD_REQUEST
+
+        # batch duplicate check
+        check_vals = []
+        for r in rows:
+            row_data = r[1]
+            check_vals.append(
+                f"(UPPER(TRIM(MARKET)) = '{_sq(row_data['MARKET'].upper())}' AND "
+                f"UPPER(TRIM(BRAND)) = '{_sq(row_data['BRAND'].upper())}' AND "
+                f"TRIM(INSIGHT) = '{_sq(row_data['INSIGHT'])}' AND "
+                f"TRIM(TYPE) = '{_sq(row_data['TYPE'])}' AND "
+                f"TRIM(VALUE_1) = '{_sq(row_data['VALUE_1'])}')"
+            )
+
+        check_query = f"""
+            SELECT UPPER(TRIM(MARKET)) as MARKET, UPPER(TRIM(BRAND)) as BRAND,
+                   TRIM(INSIGHT) as INSIGHT, TRIM(TYPE) as TYPE, TRIM(VALUE_1) as VALUE_1
+            FROM {INSIGHT_TABLE}
+            WHERE {' OR '.join(check_vals)}
+        """
+        
+        existing = dc.execute_query(check_query)
+        existing_set = set()
+        if existing is not None and not existing.empty:
+            for _, row in existing.iterrows():
+                existing_set.add((row['MARKET'], row['BRAND'], row['INSIGHT'], row['TYPE'], row['VALUE_1']))
+
+        inserted_rows, duplicates, errors = [], [], []
+        batch_inserts = []
+
+        for r in rows:
+            try:
+                row_num, row_data = r
+                market = row_data["MARKET"].upper()
+                brand = row_data["BRAND"].upper()
+                
+                key = (market, brand, row_data["INSIGHT"], row_data["TYPE"], row_data["VALUE_1"])
+
+                if key in existing_set:
+                    duplicates.append({"excel_row": row_num, "MARKET": market, "BRAND": brand})
+                    continue
+
+                batch_inserts.append(
+                    f"('{_sq(brand)}', '{_sq(market)}', '{_sq(row_data['INSIGHT'])}', '{_sq(row_data['TYPE'])}', "
+                    f"'{_sq(row_data['VALUE_1'])}', NULL, NULL, NULL, '{_sq(added_by)}', CURRENT_TIMESTAMP())"
+                )
+
+                inserted_rows.append({"excel_row": row_num, "MARKET": market, "BRAND": brand})
+
+            except Exception as e:
+                errors.append({"excel_row": row_num, "error": str(e)})
+
+        # batch insert
+        if batch_inserts:
+            insert_query = f"""
+                INSERT INTO {INSIGHT_TABLE}
+                (BRAND, MARKET, INSIGHT, TYPE, VALUE_1, VALUE_2, VALUE_3, VALUE_4, ADDED_BY, ENTRY_TIME)
+                VALUES {','.join(batch_inserts)}
+            """
+            dc.execute_non_query(insert_query)
+
+        # pagination
+        total_rows = len(rows)
+        total_pages = math.ceil(total_rows / limit)
+        start, end = offset, min(offset + limit, total_rows)
+
+        response = {
+            "status": "success" if inserted_rows else "no-change",
+            "mode": "excel-template" if is_excel_mode else "json",
+            "page": page,
+            "limit": limit,
+            "total_rows": total_rows,
+            "total_pages": total_pages,
+            "inserted_count": len(inserted_rows),
+            "duplicate_count": len(duplicates),
+            "inserted_rows": inserted_rows[start:end],
+            "duplicates": duplicates[start:end],
+            "errors": errors[start:end]
+        }
+
+        response = {k: v for k, v in response.items() if v is not None and not (isinstance(v, list) and len(v) == 0)}
+
+        return jsonify(response), status.HTTP_201_CREATED if inserted_rows else status.HTTP_200_OK
+
+    except Exception as e:
+        import traceback
+        print("ERROR:", traceback.format_exc())
+        return jsonify({"error": f"Internal error: {str(e)}"}), status.HTTP_500_INTERNAL_SERVER_ERROR
+
+
+###############################################
+# ENDPOINT 3: BRAND STUDIES (Optimized)
+###############################################
+
+EXCEL_TO_DB_MAPPING_BRAND_STUDY = {
+    "Market": "MARKET",
+    "Brand": "BRAND",
+    "Study Name": "VALUE_1"
+}
+
+FIXED_INSIGHT_VALUE_BRAND_STUDY = "medical-word-reassignment"
+FIXED_TYPE_VALUE_BRAND_STUDY = "STUDY"
+TARGET_SHEET_NAME_BRAND_STUDY = "Brand - Studies"
+
+def _process_template_excel_brand_study(file_obj):
+    try:
+        excel_file = pd.ExcelFile(file_obj, engine="openpyxl")
+        
+        if TARGET_SHEET_NAME_BRAND_STUDY not in excel_file.sheet_names:
+            raise ValueError(f"Sheet '{TARGET_SHEET_NAME_BRAND_STUDY}' not found")
+        
+        df = pd.read_excel(file_obj, sheet_name=TARGET_SHEET_NAME_BRAND_STUDY, header=HEADER_ROW_INDEX, engine="openpyxl")
+        
+        if len(df.columns) > 0:
+            df = df.iloc[:, 1:]
+        
+        df.columns = [str(c).strip() for c in df.columns]
+        df = df.replace({pd.NA: "", None: ""}).fillna("")
+        
+        df['_excel_row_num'] = range(4, 4 + len(df))
+        df = df[df.drop('_excel_row_num', axis=1).astype(str).apply(lambda x: x.str.strip().str.len().sum(), axis=1) > 0]
+        
+        mandatory_cols = ["Market", "Brand", "Study Name"]
+        missing = [col for col in mandatory_cols if col not in df.columns]
+        
+        if missing:
+            raise ValueError(f"Missing columns: {', '.join(missing)}")
+        
+        mapped_data = []
+        
+        for idx, row in df.iterrows():
+            excel_row_num = int(row['_excel_row_num'])
+            mapped_row = {}
+            
+            for excel_col, db_col in EXCEL_TO_DB_MAPPING_BRAND_STUDY.items():
+                if excel_col in df.columns:
+                    mapped_row[db_col] = _clean(row.get(excel_col, ""))
+                else:
+                    mapped_row[db_col] = ""
+            
+            mapped_row["INSIGHT"] = FIXED_INSIGHT_VALUE_BRAND_STUDY
+            mapped_row["TYPE"] = FIXED_TYPE_VALUE_BRAND_STUDY
+            
+            if mapped_row.get("MARKET") and mapped_row.get("BRAND") and mapped_row.get("VALUE_1"):
+                mapped_data.append((excel_row_num, mapped_row))
+        
+        return mapped_data, None
+        
+    except Exception as e:
+        raise Exception(f"Error processing Excel: {str(e)}")
+
+@app.route("/d_ffn_insight_config_brand_study", methods=["GET"])
+@cross_origin()
+def insight_brand_study_get():
+    try:
+        # Get brand and market from query parameters (Postman Params)
+        brand_param = request.args.get("BRAND", "").strip()
+        market_param = request.args.get("MARKET", "").strip()
+        
+        definitions = {
+            "Description": {
+                "BRAND": {
+                    "Example Values": ["AREXVY", "SHINGRIX"],
+                    "Description": "Name of Brand to be deployed",
+                    "Parameter_type": "Mandatory"
+                },
+                "MARKET": {
+                    "Example Values": ["GBR", "THA", "ITA", "PRT"],
+                    "Description": "Name of the Market to be deployed",
+                    "Parameter_type": "Mandatory"
+                },
+                "INSIGHT": {
+                    "Example Values": ["medical-word-reassignment"],
+                    "Description": "value for insight type",
+                    "Parameter_type": "Mandatory : Auto-filled"
+                },
+                "TYPE": {
+                    "Example Values": ["STUDY"],
+                    "Description": "value for Insight type",
+                    "Parameter_type": "Mandatory : Auto-filled"
+                },
+                "VALUE_1": {
+                    "Example Values": ["Key Brand Study text"],
+                    "Description": "The actual Brand Study content",
+                    "Parameter_type": "Mandatory"
+                },
+                "VALUE_2": {
+                    "Example Values": ["NULL"],
+                    "Description": "Value for VALUE_2 Insight Type",
+                    "Parameter_type": "Auto-filled (NULL)"
+                },
+                "VALUE_3": {
+                    "Example Values": ["NULL"],
+                    "Description": "Value for VALUE_3 Insight Type",
+                    "Parameter_type": "Auto-filled (NULL)"
+                },
+                "VALUE_4": {
+                    "Example Values": ["NULL"],
+                    "Description": "Value for VALUE_4 Insight Type",
+                    "Parameter_type": "Auto-filled (NULL)"
+                },
+                "ADDED_BY": {
+                    "Example Values": ["abc.x.abc@gsk.com"],
+                    "Description": "Auto-picked from 'Username' header in POST",
+                    "Parameter_type": "Mandatory (via header)"
+                },
+                "ENTRY_TIME": {
+                    "Example Values": ["current_timestamp()"],
+                    "Description": "Set by system at insert time",
+                    "Parameter_type": "Auto-generated"
+                }
+            },
+            
+            
+            "sample_json": {
+                "MARKET": "THA",
+                "BRAND": "AREXVY",
+                "INSIGHT": "medical-word-reassignment",
+                "TYPE": "STUDY",
+                "VALUE_1": "Key Brand Study"
+            }
+        }
+        
+        # Build query with optional WHERE clause based on parameters
+        query = f"SELECT * FROM {INSIGHT_TABLE}"
+        where_conditions = []
+        
+        if brand_param:
+            where_conditions.append(f"UPPER(TRIM(BRAND)) = '{_sq(brand_param.upper())}'")
+        
+        if market_param:
+            where_conditions.append(f"UPPER(TRIM(MARKET)) = '{_sq(market_param.upper())}'")
+        
+        # Add filter for brand studies
+        where_conditions.append(f"TRIM(INSIGHT) = '{FIXED_INSIGHT_VALUE_BRAND_STUDY}'")
+        where_conditions.append(f"TRIM(TYPE) = '{FIXED_TYPE_VALUE_BRAND_STUDY}'")
+        
+        if where_conditions:
+            query += " WHERE " + " AND ".join(where_conditions)
+        
+        # Removed LIMIT 1 to show all records
+        
+        print(f"Executing query: {query}")
+        
+        # Execute query to get sample data
+        sample_df = dc.execute_query(query)
+        
+        # Initialize table_output as None
+        data = None
+        
+        # If data exists, convert to JSON - now returns list of all records
+        if sample_df is not None and not sample_df.empty:
+            data = []
+            for _, row in sample_df.iterrows():
+                record = {}
+                for col in sample_df.columns:
+                    value = row[col]
+                    # Convert NaN, None, or empty strings to None for cleaner JSON
+                    if pd.isna(value) or value == "" or str(value).strip().lower() == "null":
+                        record[col] = None
+                    else:
+                        record[col] = str(value)
+                data.append(record)
+        
+        # Build response with table_output nested
+        response = {
+            #"Description": definitions["Description"],
+            #"sample_json": definitions["sample_json"],
+            "data": data
+        }
+        
+        return jsonify(response), status.HTTP_200_OK
+        
+    except Exception as e:
+        import traceback
+        print("ERROR:", traceback.format_exc())
+        return jsonify({"error": f"Internal error: {str(e)}"}), status.HTTP_500_INTERNAL_SERVER_ERROR
+
+@app.route("/d_ffn_insight_config_brand_study", methods=["POST"])
+@cross_origin()
+def insight_brand_study_post():
+    try:
+        added_by = _clean(request.headers.get("Username", "") or "")
+        if not added_by:
+            return jsonify({"error": "Missing Username"}), status.HTTP_400_BAD_REQUEST
+
+        page = int(request.args.get("page", 1))
+        limit = int(request.args.get("limit", 50))
+        offset = (page - 1) * limit
+
+        valid_markets_brands = _get_valid_markets_brands(force_refresh=True)
+
+        rows = []
+        is_excel_mode = False
+
+        if "file" in request.files:
+            is_excel_mode = True
+            f = request.files["file"]
+            
+            if not (f.filename or "").lower().endswith(".xlsx"):
+                return jsonify({"error": "Only .xlsx files"}), status.HTTP_400_BAD_REQUEST
+
+            try:
+                rows, _ = _process_template_excel_brand_study(f)
+            except Exception as e:
+                return jsonify({"error": str(e)}), status.HTTP_400_BAD_REQUEST
+        else:
+            body = request.get_json(force=True, silent=True) or {}
+            items = body if isinstance(body, list) else [body]
+
+            for i, rec in enumerate(items, start=1):
+                market = _clean(rec.get("MARKET", ""))
+                brand = _clean(rec.get("BRAND", ""))
+                value_1 = _clean(rec.get("VALUE_1", ""))
+
+                if not market or not brand or not value_1:
+                    return jsonify({"error": f"Item {i}: Missing fields"}), status.HTTP_400_BAD_REQUEST
+
+                rows.append((i, {
+                    "MARKET": market,
+                    "BRAND": brand,
+                    "INSIGHT": FIXED_INSIGHT_VALUE_BRAND_STUDY,
+                    "TYPE": FIXED_TYPE_VALUE_BRAND_STUDY,
+                    "VALUE_1": value_1
+                }))
+
+        if not rows:
+            return jsonify({"error": "No rows"}), status.HTTP_400_BAD_REQUEST
+
+        # vectorized validation
+        all_markets = {r[1]["MARKET"].upper() for r in rows}
+        all_brands = {r[1]["BRAND"].upper() for r in rows}
+
+        valid_market_set = {m.upper() for m in valid_markets_brands.get("markets", [])}
+        valid_brand_set = {b.upper() for b in valid_markets_brands.get("brands", [])}
+
+        invalid_mkts = [{"MARKET": m} for m in all_markets if m not in valid_market_set]
+        invalid_brnds = [{"BRAND": b} for b in all_brands if b not in valid_brand_set]
+
+        if invalid_mkts or invalid_brnds:
+            return jsonify({"status": "error", "invalid_markets": invalid_mkts, "invalid_brands": invalid_brnds}), status.HTTP_400_BAD_REQUEST
+
+        # batch duplicate check
+        check_vals = []
+        for r in rows:
+            row_data = r[1]
+            check_vals.append(
+                f"(UPPER(TRIM(MARKET)) = '{_sq(row_data['MARKET'].upper())}' AND "
+                f"UPPER(TRIM(BRAND)) = '{_sq(row_data['BRAND'].upper())}' AND "
+                f"TRIM(INSIGHT) = '{_sq(row_data['INSIGHT'])}' AND "
+                f"TRIM(TYPE) = '{_sq(row_data['TYPE'])}' AND "
+                f"TRIM(VALUE_1) = '{_sq(row_data['VALUE_1'])}')"
+            )
+
+        check_query = f"""
+            SELECT UPPER(TRIM(MARKET)) as MARKET, UPPER(TRIM(BRAND)) as BRAND,
+                   TRIM(INSIGHT) as INSIGHT, TRIM(TYPE) as TYPE, TRIM(VALUE_1) as VALUE_1
+            FROM {INSIGHT_TABLE}
+            WHERE {' OR '.join(check_vals)}
+        """
+        
+        existing = dc.execute_query(check_query)
+        existing_set = set()
+        if existing is not None and not existing.empty:
+            for _, row in existing.iterrows():
+                existing_set.add((row['MARKET'], row['BRAND'], row['INSIGHT'], row['TYPE'], row['VALUE_1']))
+
+        inserted_rows, duplicates, errors = [], [], []
+        batch_inserts = []
+
+        for r in rows:
+            try:
+                row_num, row_data = r
+                market = row_data["MARKET"].upper()
+                brand = row_data["BRAND"].upper()
+                
+                key = (market, brand, row_data["INSIGHT"], row_data["TYPE"], row_data["VALUE_1"])
+
+                if key in existing_set:
+                    duplicates.append({"excel_row": row_num, "MARKET": market, "BRAND": brand})
+                    continue
+
+                batch_inserts.append(
+                    f"('{_sq(brand)}', '{_sq(market)}', '{_sq(row_data['INSIGHT'])}', '{_sq(row_data['TYPE'])}', "
+                    f"'{_sq(row_data['VALUE_1'])}', NULL, NULL, NULL, '{_sq(added_by)}', CURRENT_TIMESTAMP())"
+                )
+
+                inserted_rows.append({"excel_row": row_num, "MARKET": market, "BRAND": brand})
+
+            except Exception as e:
+                errors.append({"excel_row": row_num, "error": str(e)})
+
+        # batch insert
+        if batch_inserts:
+            insert_query = f"""
+                INSERT INTO {INSIGHT_TABLE}
+                (BRAND, MARKET, INSIGHT, TYPE, VALUE_1, VALUE_2, VALUE_3, VALUE_4, ADDED_BY, ENTRY_TIME)
+                VALUES {','.join(batch_inserts)}
+            """
+            dc.execute_non_query(insert_query)
+
+        # pagination
+        total_rows = len(rows)
+        total_pages = math.ceil(total_rows / limit)
+        start, end = offset, min(offset + limit, total_rows)
+
+        response = {
+            "status": "success" if inserted_rows else "no-change",
+            "mode": "excel-template" if is_excel_mode else "json",
+            "page": page,
+            "limit": limit,
+            "total_rows": total_rows,
+            "total_pages": total_pages,
+            "inserted_count": len(inserted_rows),
+            "duplicate_count": len(duplicates),
+            "inserted_rows": inserted_rows[start:end],
+            "duplicates": duplicates[start:end],
+            "errors": errors[start:end]
+        }
+
+        response = {k: v for k, v in response.items() if v is not None and not (isinstance(v, list) and len(v) == 0)}
+
+        return jsonify(response), status.HTTP_201_CREATED if inserted_rows else status.HTTP_200_OK
+
+    except Exception as e:
+        import traceback
+        print("ERROR:", traceback.format_exc())
+        return jsonify({"error": f"Internal error: {str(e)}"}), status.HTTP_500_INTERNAL_SERVER_ERROR
+
+
+
+        
+        
+# ============================================================================
+# ENDPOINT 4: MEDICAL TERMS
+# ============================================================================
+
+EXCEL_TO_DB_MAPPING_MEDICAL_TERM = {
+    "MARKET": "MARKET",
+    "BRAND": "BRAND",
+    "Term": "VALUE_1"
+}
+
+FIXED_INSIGHT_VALUE_MEDICAL_TERM = "medical-word-reassignment"
+FIXED_TYPE_VALUE_MEDICAL_TERM = "TERM"
+TARGET_SHEET_NAME_MEDICAL_TERM = "Brand - Medical Terms"
+HEADER_ROW_INDEX_MEDICAL_TERM = 2
+
+def _process_template_excel_medical_term(file_obj):
+    """Process Excel template for Medical Terms endpoint"""
+    try:
+        excel_file = pd.ExcelFile(file_obj, engine="openpyxl")
+
+        if TARGET_SHEET_NAME_MEDICAL_TERM not in excel_file.sheet_names:
+            raise ValueError(
+                f"Required sheet '{TARGET_SHEET_NAME_MEDICAL_TERM}' not found. "
+                f"Available sheets: {', '.join(excel_file.sheet_names)}"
+            )
+
+        df = pd.read_excel(
+            file_obj,
+            sheet_name=TARGET_SHEET_NAME_MEDICAL_TERM,
+            header=HEADER_ROW_INDEX_MEDICAL_TERM,
+            engine="openpyxl"
+        )
+
+        if len(df.columns) > 0:
+            df = df.iloc[:, 1:]
+
+        df.columns = [str(c).strip() for c in df.columns]
+        df = df.replace({pd.NA: "", None: ""}).fillna("")
+
+        df['_excel_row_num'] = range(4, 4 + len(df))
+        df = df[df.drop('_excel_row_num', axis=1).astype(str).apply(lambda x: x.str.strip().str.len().sum(), axis=1) > 0]
+
+        available_excel_cols = set(df.columns) - {'_excel_row_num'}
+        expected_excel_cols = set(EXCEL_TO_DB_MAPPING_MEDICAL_TERM.keys())
+        missing_cols = expected_excel_cols - available_excel_cols
+
+        missing_columns_list = list(missing_cols) if missing_cols else None
+
+        mandatory_excel_cols = ["MARKET", "BRAND", "Term"]
+        missing_mandatory = [col for col in mandatory_excel_cols if col not in df.columns]
+
+        if missing_mandatory:
+            raise ValueError(
+                f"Missing mandatory columns in '{TARGET_SHEET_NAME_MEDICAL_TERM}' sheet: {', '.join(missing_mandatory)}. "
+                f"Found columns: {list(df.columns)}"
+            )
+
+        mapped_data = []
+
+        for idx, row in df.iterrows():
+            excel_row_num = int(row['_excel_row_num'])
+            mapped_row = {}
+
+            for excel_col, db_col in EXCEL_TO_DB_MAPPING_MEDICAL_TERM.items():
+                if excel_col in df.columns:
+                    value = row.get(excel_col, "")
+                    mapped_row[db_col] = _clean(value)
+                else:
+                    mapped_row[db_col] = ""
+
+            mapped_row["INSIGHT"] = FIXED_INSIGHT_VALUE_MEDICAL_TERM
+            mapped_row["TYPE"] = FIXED_TYPE_VALUE_MEDICAL_TERM
+            mapped_row["VALUE_2"] = None
+            mapped_row["VALUE_3"] = None
+            mapped_row["VALUE_4"] = None
+
+            if (mapped_row.get("MARKET") and
+                mapped_row.get("BRAND") and
+                mapped_row.get("VALUE_1")):
+                mapped_data.append((excel_row_num, mapped_row))
+
+        if not mapped_data:
+            raise ValueError(
+                f"No valid data rows found in sheet '{TARGET_SHEET_NAME_MEDICAL_TERM}'. "
+                f"Ensure mandatory fields (MARKET, BRAND, Term) have values."
+            )
+
+        return mapped_data, missing_columns_list
+
+    except Exception as e:
+        raise Exception(f"Error processing template Excel: {str(e)}")
+
+@app.route("/d_ffn_insight_config_medical_term", methods=["GET"])
+@cross_origin()
+def insight_medical_term_get():
+    try:
+        # Get brand and market from query parameters (Postman Params)
+        brand_param = request.args.get("BRAND", "").strip()
+        market_param = request.args.get("MARKET", "").strip()
+        
+        definitions = {
+            "Description": {
+                "BRAND": {
+                    "Example Values": ["AREXVY", "SHINGRIX"],
+                    "Description": "Name of Brand to be deployed",
+                    "Parameter_type": "Mandatory"
+                },
+                "MARKET": {
+                    "Example Values": ["GBR", "THA", "ITA", "PRT"],
+                    "Description": "Name of the Market to be deployed",
+                    "Parameter_type": "Mandatory"
+                },
+                "INSIGHT": {
+                    "Example Values": ["medical-word-reassignment"],
+                    "Description": "value for insight type",
+                    "Parameter_type": "Mandatory : Auto-filled"
+                },
+                "TYPE": {
+                    "Example Values": ["TERM"],
+                    "Description": "value for Insight type",
+                    "Parameter_type": "Mandatory : Auto-filled"
+                },
+                "VALUE_1": {
+                    "Example Values": ["Key Medical Term text"],
+                    "Description": "The actual Medical Term content",
+                    "Parameter_type": "Mandatory"
+                },
+                "VALUE_2": {
+                    "Example Values": ["NULL"],
+                    "Description": "Value for VALUE_2 Insight Type",
+                    "Parameter_type": "Auto-filled (NULL)"
+                },
+                "VALUE_3": {
+                    "Example Values": ["NULL"],
+                    "Description": "Value for VALUE_3 Insight Type",
+                    "Parameter_type": "Auto-filled (NULL)"
+                },
+                "VALUE_4": {
+                    "Example Values": ["NULL"],
+                    "Description": "Value for VALUE_4 Insight Type",
+                    "Parameter_type": "Auto-filled (NULL)"
+                },
+                "ADDED_BY": {
+                    "Example Values": ["abc.x.abc@gsk.com"],
+                    "Description": "Auto-picked from 'Username' header in POST",
+                    "Parameter_type": "Mandatory (via header)"
+                },
+                "ENTRY_TIME": {
+                    "Example Values": ["current_timestamp()"],
+                    "Description": "Set by system at insert time",
+                    "Parameter_type": "Auto-generated"
+                }
+            },
+            "sample_json": {
+                "MARKET": "THA",
+                "BRAND": "AREXVY",
+                "INSIGHT": "medical-word-reassignment",
+                "TYPE": "TERM",
+                "VALUE_1": "Key Medical Term"
+            },
+            "excel_upload_instructions": {
+                "expected_extension": ".xlsx",
+                "template_sheet_name": TARGET_SHEET_NAME_MEDICAL_TERM,
+                "form_field_name": "file",
+                "required_columns": ["Market", "Brand", "Term"],
+                "notes": [
+                    "Tablename: hive_metastore.fieldforce_navigator_deployment.d_ffn_insight_config",
+                    f"The Excel file must contain a sheet named '{TARGET_SHEET_NAME_MEDICAL_TERM}'",
+                    "VALUE_2, VALUE_3, VALUE_4 are automatically set to NULL"
+                ]
+            }
+        }
+        
+        # Build query with optional WHERE clause based on parameters
+        query = f"SELECT * FROM {INSIGHT_TABLE}"
+        where_conditions = []
+        
+        if brand_param:
+            where_conditions.append(f"UPPER(TRIM(BRAND)) = '{_sq(brand_param.upper())}'")
+        
+        if market_param:
+            where_conditions.append(f"UPPER(TRIM(MARKET)) = '{_sq(market_param.upper())}'")
+        
+        # Add filter for medical terms
+        where_conditions.append(f"TRIM(INSIGHT) = '{FIXED_INSIGHT_VALUE_MEDICAL_TERM}'")
+        where_conditions.append(f"TRIM(TYPE) = '{FIXED_TYPE_VALUE_MEDICAL_TERM}'")
+        
+        if where_conditions:
+            query += " WHERE " + " AND ".join(where_conditions)
+        
+        # Removed LIMIT 1 to show all records
+        
+        print(f"Executing query: {query}")
+        
+        # Execute query to get sample data
+        sample_df = dc.execute_query(query)
+        
+        # Initialize table_output as None
+        data = None
+        
+        # If data exists, convert to JSON - now returns list of all records
+        if sample_df is not None and not sample_df.empty:
+            data = []
+            for _, row in sample_df.iterrows():
+                record = {}
+                for col in sample_df.columns:
+                    value = row[col]
+                    # Convert NaN, None, or empty strings to None for cleaner JSON
+                    if pd.isna(value) or value == "" or str(value).strip().lower() == "null":
+                        record[col] = None
+                    else:
+                        record[col] = str(value)
+                data.append(record)
+        
+        # Build response - NOT displaying Description and sample_json
+        response = {
+            "data": data
+        }
+        
+        return jsonify(response), status.HTTP_200_OK
+        
+    except Exception as e:
+        import traceback
+        print("ERROR:", traceback.format_exc())
+        return jsonify({"error": f"Internal server error: {str(e)}"}), status.HTTP_500_INTERNAL_SERVER_ERROR
+
+
+@app.route("/d_ffn_insight_config_medical_term", methods=["POST"])
+@cross_origin()
+def insight_medical_term_post():
+    try:
+        import math
+
+        added_by = _clean(request.headers.get("Username", "") or "")
+        if not added_by:
+            return jsonify({"error": "Missing 'Username' in headers."}), status.HTTP_400_BAD_REQUEST
+
+        # pagination params
+        page = int(request.args.get("page", 1))
+        limit = int(request.args.get("limit", 50))
+        offset = (page - 1) * limit
+
+        valid_markets_brands = _get_valid_markets_brands(force_refresh=True)
+
+        rows = []
+        is_excel_mode = False
+        missing_columns_warning = None
+
+        if "file" in request.files:
+            is_excel_mode = True
+            f = request.files["file"]
+            fname = (f.filename or "").lower().strip()
+            
+            if not fname.endswith(".xlsx"):
+                return jsonify({
+                    "error": "Only .xlsx files are supported for bulk upload."
+                }), status.HTTP_400_BAD_REQUEST
+
+            try:
+                rows, missing_columns_warning = _process_template_excel_medical_term(f)
+                
+                if not rows:
+                    return jsonify({
+                        "error": f"No valid data rows found in sheet '{TARGET_SHEET_NAME_MEDICAL_TERM}'."
+                    }), status.HTTP_400_BAD_REQUEST
+                
+            except ValueError as ve:
+                return jsonify({"error": str(ve)}), status.HTTP_400_BAD_REQUEST
+            except Exception as e:
+                return jsonify({
+                    "error": f"Failed to process Excel template: {str(e)}"
+                }), status.HTTP_400_BAD_REQUEST
+
+        else:
+            body = request.get_json(force=True, silent=True) or {}
+            items = body if isinstance(body, list) else [body]
+
+            for i, rec in enumerate(items, start=1):
+                market = _clean(rec.get("MARKET", ""))
+                brand  = _clean(rec.get("BRAND", ""))
+                value_1 = _clean(rec.get("VALUE_1", ""))
+
+                if not market or not brand or not value_1:
+                    return jsonify({
+                        "status": "error",
+                        "message": f"Item {i}: Missing required field(s). MARKET, BRAND, and VALUE_1 are mandatory."
+                    }), status.HTTP_400_BAD_REQUEST
+
+                rows.append((i, {
+                    "MARKET": market,
+                    "BRAND": brand,
+                    "INSIGHT": FIXED_INSIGHT_VALUE_MEDICAL_TERM,
+                    "TYPE": FIXED_TYPE_VALUE_MEDICAL_TERM,
+                    "VALUE_1": value_1,
+                    "VALUE_2": None,
+                    "VALUE_3": None,
+                    "VALUE_4": None
+                }))
+
+        if not rows:
+            return jsonify({"error": "No valid rows to process."}), status.HTTP_400_BAD_REQUEST
+
+        # vectorized market/brand validation
+        all_markets = {r[1].get("MARKET", "").strip().upper() for r in rows if r[1].get("MARKET")}
+        all_brands = {r[1].get("BRAND", "").strip().upper() for r in rows if r[1].get("BRAND")}
+
+        valid_market_set = {m.upper() for m in valid_markets_brands.get("markets", [])}
+        valid_brand_set = {b.upper() for b in valid_markets_brands.get("brands", [])}
+
+        invalid_markets = [{"MARKET": m, "reason": "Invalid MARKET"} for m in all_markets if m not in valid_market_set]
+        invalid_brands = [{"BRAND": b, "reason": "Invalid BRAND"} for b in all_brands if b not in valid_brand_set]
+
+        if invalid_markets or invalid_brands:
+            return jsonify({
+                "status": "error",
+                "invalid_markets": invalid_markets,
+                "invalid_brands": invalid_brands
+            }), status.HTTP_400_BAD_REQUEST
+
+        # batch duplicate check
+        check_values = []
+        for row_num, r in rows:
+            check_values.append(
+                f"('{_sq(r['MARKET'].upper())}', '{_sq(r['BRAND'].upper())}', "
+                f"'{_sq(r['INSIGHT'])}', '{_sq(r['TYPE'])}', '{_sq(r['VALUE_1'])}')"
+            )
+
+        check_query = f"""
+            SELECT UPPER(TRIM(MARKET)) as MARKET,
+                   UPPER(TRIM(BRAND)) as BRAND,
+                   TRIM(INSIGHT) as INSIGHT,
+                   TRIM(TYPE) as TYPE,
+                   TRIM(VALUE_1) as VALUE_1
+            FROM {INSIGHT_TABLE}
+            WHERE (UPPER(TRIM(MARKET)), UPPER(TRIM(BRAND)), TRIM(INSIGHT), TRIM(TYPE), TRIM(VALUE_1)) 
+            IN ({','.join(check_values)})
+        """
+        existing = dc.execute_query(check_query)
+        existing_set = {
+            (row.MARKET, row.BRAND, row.INSIGHT, row.TYPE, row.VALUE_1)
+            for _, row in existing.iterrows()
+        } if existing is not None and not existing.empty else set()
+
+        inserted_list, duplicates, errors = [], [], []
+        batch_inserts = []
+
+        for row_num, r in rows:
+            try:
+                market_upper = r['MARKET'].upper()
+                brand_upper = r['BRAND'].upper()
+                
+                key = (market_upper, brand_upper, r['INSIGHT'], r['TYPE'], r['VALUE_1'])
+                
+                if key in existing_set:
+                    duplicates.append({
+                        "excel_row": row_num,
+                        "MARKET": market_upper,
+                        "BRAND": brand_upper,
+                        "VALUE_1": r['VALUE_1']
+                    })
+                    continue
+
+									
+					
+                batch_inserts.append(
+                    f"('{_sq(brand_upper)}', '{_sq(market_upper)}', '{_sq(r['INSIGHT'])}', '{_sq(r['TYPE'])}', "
+                    f"'{_sq(r['VALUE_1'])}', NULL, NULL, NULL, '{_sq(added_by)}', CURRENT_TIMESTAMP())"
+                )
+                
+                inserted_list.append({"excel_row": row_num, "MARKET": market_upper, "BRAND": brand_upper})
+
+            except Exception as e:
+                errors.append({"excel_row": row_num, "error": str(e)})
+
+        # batch insert
+        if batch_inserts:
+            insert_query = f"""
+                INSERT INTO {INSIGHT_TABLE}
+                (BRAND, MARKET, INSIGHT, TYPE, VALUE_1, VALUE_2, VALUE_3, VALUE_4, ADDED_BY, ENTRY_TIME)
+                VALUES {','.join(batch_inserts)}
+            """
+            dc.execute_non_query(insert_query)
+
+        # pagination for response
+        total_rows = len(rows)
+        total_pages = math.ceil(total_rows / limit)
+        start, end = offset, offset + limit
+
+        response = {
+            "status": "success" if inserted_list else ("partial" if errors else "no-change"),
+            "mode": "excel-template" if is_excel_mode else "json",
+            "sheet_processed": TARGET_SHEET_NAME_MEDICAL_TERM if is_excel_mode else None,
+            "page": page,
+            "limit": limit,
+            "total_rows": total_rows,
+            "total_pages": total_pages,
+            "inserted_count": len(inserted_list),
+            "duplicate_count": len(duplicates),
+            "inserted_rows": inserted_list[start:end],
+            "duplicates": duplicates[start:end],
+            "errors": errors[start:end]
+        }
+        
+        if is_excel_mode and missing_columns_warning:
+            response["warning"] = {
+                "message": "The uploaded Excel template is missing some required columns.",
+                "missing_columns": missing_columns_warning
+            }
+        
+        response = {k: v for k, v in response.items() 
+                   if v is not None and not (isinstance(v, list) and len(v) == 0)}
+        
+        return jsonify(response), status.HTTP_201_CREATED if inserted_list else status.HTTP_200_OK
+
+    except Exception as e:
+        import traceback
+        print("ERROR:", traceback.format_exc())
+        return jsonify({"error": f"Internal server error: {str(e)}"}), status.HTTP_500_INTERNAL_SERVER_ERROR	
+
+
+# ============================================================================
+# ENDPOINT 5: BRAND ACRONYMS
+# ============================================================================
+
+import json
+
+EXCEL_TO_DB_MAPPING_ABBRV = {
+    "Market": "MARKET",
+    "Brand": "BRAND"
+}
+
+FIXED_INSIGHT_VALUE_ABBRV = "medical-word-reassignment"
+FIXED_TYPE_VALUE_ABBRV = "ABBRV"
+TARGET_SHEET_NAME_ABBRV = "Brand - Acronyms"
+HEADER_ROW_INDEX_ABBRV = 2
+
+def _process_template_excel_abbrv(file_obj):
+    """Process Excel template for Brand Acronyms endpoint"""
+    try:
+        excel_file = pd.ExcelFile(file_obj, engine="openpyxl")
+        
+        if TARGET_SHEET_NAME_ABBRV not in excel_file.sheet_names:
+            raise ValueError(
+                f"Required sheet '{TARGET_SHEET_NAME_ABBRV}' not found. "
+                f"Available sheets: {', '.join(excel_file.sheet_names)}"
+            )
+        
+        df = pd.read_excel(
+            file_obj, 
+            sheet_name=TARGET_SHEET_NAME_ABBRV,
+            header=HEADER_ROW_INDEX_ABBRV,
+            engine="openpyxl"
+        )
+        
+        if len(df.columns) > 0:
+            df = df.iloc[:, 1:]
+        
+        df.columns = [str(c).strip() for c in df.columns]
+        df = df.replace({pd.NA: "", None: ""}).fillna("")
+        
+        df['_excel_row_num'] = range(4, 4 + len(df))
+        df = df[df.drop('_excel_row_num', axis=1).astype(str).apply(lambda x: x.str.strip().str.len().sum(), axis=1) > 0]
+        
+        mandatory_excel_cols = ["Market", "Brand", "Term", "Definition"]
+        missing_mandatory = [col for col in mandatory_excel_cols if col not in df.columns]
+        
+        if missing_mandatory:
+            raise ValueError(
+                f"Missing mandatory columns in '{TARGET_SHEET_NAME_ABBRV}' sheet: {', '.join(missing_mandatory)}. "
+                f"Found columns: {list(df.columns)}"
+            )
+        
+        mapped_data = []
+        
+        for idx, row in df.iterrows():
+            excel_row_num = int(row['_excel_row_num'])
+            
+            market_value = _clean(row.get("Market", ""))
+            brand_value = _clean(row.get("Brand", ""))
+            term_value = _clean(row.get("Term", ""))
+            definition_value = _clean(row.get("Definition", ""))
+            
+            value_1_json = json.dumps({
+                "term": term_value,
+                "definition": definition_value
+            })
+            
+            mapped_row = {
+                "MARKET": market_value,
+                "BRAND": brand_value,
+                "VALUE_1": value_1_json,
+                "INSIGHT": FIXED_INSIGHT_VALUE_ABBRV,
+                "TYPE": FIXED_TYPE_VALUE_ABBRV,
+                "VALUE_2": None,
+                "VALUE_3": None,
+                "VALUE_4": None
+            }
+            
+            if market_value and brand_value and term_value and definition_value:
+                mapped_data.append((excel_row_num, mapped_row))
+        
+        if not mapped_data:
+            raise ValueError(
+                f"No valid data rows found in sheet '{TARGET_SHEET_NAME_ABBRV}'. "
+                f"Ensure mandatory fields (Market, Brand, Term, Definition) have values."
+            )
+        
+        return mapped_data, None
+        
+    except Exception as e:
+        raise Exception(f"Error processing template Excel: {str(e)}")
+
+@app.route("/d_ffn_insight_config_abbrv", methods=["GET"])
+@cross_origin()
+def insight_abbrv_get():
+    try:
+        # Get brand and market from query parameters (Postman Params)
+        brand_param = request.args.get("BRAND", "").strip()
+        market_param = request.args.get("MARKET", "").strip()
+        
+        definitions = {
+            "Description": {
+                "BRAND": {
+                    "Example Values": ["AREXVY", "SHINGRIX"],
+                    "Description": "Name of Brand to be deployed",
+                    "Parameter_type": "Mandatory"
+                },
+                "MARKET": {
+                    "Example Values": ["GBR", "THA", "ITA", "PRT"],
+                    "Description": "Name of the Market to be deployed",
+                    "Parameter_type": "Mandatory"
+                },
+                "INSIGHT": {
+                    "Example Values": ["medical-word-reassignment"],
+                    "Description": "value for insight type",
+                    "Parameter_type": "Mandatory : Auto-filled"
+                },
+                "TYPE": {
+                    "Example Values": ["ABBRV"],
+                    "Description": "value for Insight type",
+                    "Parameter_type": "Mandatory : Auto-filled"
+                },
+                "VALUE_1": {
+                    "Example Values": ['{"term":"RSV", "definition":"Respiratory Syncytial Virus"}'],
+                    "Description": "JSON format with term and definition",
+                    "Parameter_type": "Mandatory"
+                },
+                "VALUE_2": {
+                    "Example Values": ["NULL"],
+                    "Description": "Value for VALUE_2 Insight Type",
+                    "Parameter_type": "Auto-filled (NULL)"
+                },
+                "VALUE_3": {
+                    "Example Values": ["NULL"],
+                    "Description": "Value for VALUE_3 Insight Type",
+                    "Parameter_type": "Auto-filled (NULL)"
+                },
+                "VALUE_4": {
+                    "Example Values": ["NULL"],
+                    "Description": "Value for VALUE_4 Insight Type",
+                    "Parameter_type": "Auto-filled (NULL)"
+                },
+                "ADDED_BY": {
+                    "Example Values": ["abc.x.abc@gsk.com"],
+                    "Description": "Auto-picked from 'Username' header in POST",
+                    "Parameter_type": "Mandatory (via header)"
+                },
+                "ENTRY_TIME": {
+                    "Example Values": ["current_timestamp()"],
+                    "Description": "Set by system at insert time",
+                    "Parameter_type": "Auto-generated"
+                }
+            },
+            "sample_json": {
+                "MARKET": "THA",
+                "BRAND": "AREXVY",
+                "INSIGHT": "medical-word-reassignment",
+                "TYPE": "ABBRV",
+                "VALUE_1": '{"term":"RSV", "definition":"Respiratory Syncytial Virus"}'
+            },
+            "excel_upload_instructions": {
+                "expected_extension": ".xlsx",
+                "template_sheet_name": TARGET_SHEET_NAME_ABBRV,
+                "form_field_name": "file",
+                "required_columns": ["Market", "Brand", "Term", "Definition"],
+                "notes": [
+                    "Tablename: hive_metastore.fieldforce_navigator_deployment.d_ffn_insight_config",
+                    f"The Excel file must contain a sheet named '{TARGET_SHEET_NAME_ABBRV}'",
+                    "VALUE_2, VALUE_3, VALUE_4 are automatically set to NULL"
+                ]
+            }
+        }
+        
+        # Build query with optional WHERE clause based on parameters
+        query = f"SELECT * FROM {INSIGHT_TABLE}"
+        where_conditions = []
+        
+        if brand_param:
+            where_conditions.append(f"UPPER(TRIM(BRAND)) = '{_sq(brand_param.upper())}'")
+        
+        if market_param:
+            where_conditions.append(f"UPPER(TRIM(MARKET)) = '{_sq(market_param.upper())}'")
+        
+        # Add filter for brand acronyms
+        where_conditions.append(f"TRIM(INSIGHT) = '{FIXED_INSIGHT_VALUE_ABBRV}'")
+        where_conditions.append(f"TRIM(TYPE) = '{FIXED_TYPE_VALUE_ABBRV}'")
+        
+        if where_conditions:
+            query += " WHERE " + " AND ".join(where_conditions)
+        
+        # Removed LIMIT 1 to show all records
+        
+        print(f"Executing query: {query}")
+        
+        # Execute query to get sample data
+        sample_df = dc.execute_query(query)
+        
+        # Initialize table_output as None
+        data = None
+        
+        # If data exists, convert to JSON - now returns list of all records
+        if sample_df is not None and not sample_df.empty:
+            data = []
+            for _, row in sample_df.iterrows():
+                record = {}
+                for col in sample_df.columns:
+                    value = row[col]
+                    # Convert NaN, None, or empty strings to None for cleaner JSON
+                    if pd.isna(value) or value == "" or str(value).strip().lower() == "null":
+                        record[col] = None
+                    else:
+                        record[col] = str(value)
+                data.append(record)
+        
+        # Build response - only displaying table_output
+        response = {
+            "data": data
+        }
+        
+        return jsonify(response), status.HTTP_200_OK
+        
+    except Exception as e:
+        import traceback
+        print("ERROR:", traceback.format_exc())
+        return jsonify({"error": f"Internal server error: {str(e)}"}), status.HTTP_500_INTERNAL_SERVER_ERROR
+
+
+@app.route("/d_ffn_insight_config_abbrv", methods=["POST"])
+@cross_origin()
+def insight_abbrv_post():
+    try:
+        import math
+
+        added_by = _clean(request.headers.get("Username", "") or "")
+        if not added_by:
+            return jsonify({"error": "Missing 'Username' in headers."}), status.HTTP_400_BAD_REQUEST
+
+        # pagination params
+        page = int(request.args.get("page", 1))
+        limit = int(request.args.get("limit", 50))
+        offset = (page - 1) * limit
+
+        valid_markets_brands = _get_valid_markets_brands(force_refresh=True)
+
+        rows = []
+        is_excel_mode = False
+        missing_columns_warning = None
+
+        if "file" in request.files:
+            is_excel_mode = True
+            f = request.files["file"]
+            fname = (f.filename or "").lower().strip()
+            
+            if not fname.endswith(".xlsx"):
+                return jsonify({
+                    "error": "Only .xlsx files are supported for bulk upload."
+                }), status.HTTP_400_BAD_REQUEST
+
+            try:
+                rows, missing_columns_warning = _process_template_excel_abbrv(f)
+                
+                if not rows:
+                    return jsonify({
+                        "error": f"No valid data rows found in sheet '{TARGET_SHEET_NAME_ABBRV}'."
+                    }), status.HTTP_400_BAD_REQUEST
+                
+            except ValueError as ve:
+                return jsonify({"error": str(ve)}), status.HTTP_400_BAD_REQUEST
+            except Exception as e:
+                return jsonify({
+                    "error": f"Failed to process Excel template: {str(e)}"
+                }), status.HTTP_400_BAD_REQUEST
+
+        else:
+            body = request.get_json(force=True, silent=True) or {}
+            items = body if isinstance(body, list) else [body]
+
+            for i, rec in enumerate(items, start=1):
+                market = _clean(rec.get("MARKET", ""))
+                brand  = _clean(rec.get("BRAND", ""))
+                value_1 = _clean(rec.get("VALUE_1", ""))
+
+                if not market or not brand or not value_1:
+                    return jsonify({
+                        "status": "error",
+                        "message": f"Item {i}: Missing required field(s). MARKET, BRAND, and VALUE_1 are mandatory."
+                    }), status.HTTP_400_BAD_REQUEST
+
+                rows.append((i, {
+                    "MARKET": market,
+                    "BRAND": brand,
+                    "INSIGHT": FIXED_INSIGHT_VALUE_ABBRV,
+                    "TYPE": FIXED_TYPE_VALUE_ABBRV,
+                    "VALUE_1": value_1,
+                    "VALUE_2": None,
+                    "VALUE_3": None,
+                    "VALUE_4": None
+                }))
+
+        if not rows:
+            return jsonify({"error": "No valid rows to process."}), status.HTTP_400_BAD_REQUEST
+
+        # vectorized market/brand validation
+        all_markets = {r[1].get("MARKET", "").strip().upper() for r in rows if r[1].get("MARKET")}
+        all_brands = {r[1].get("BRAND", "").strip().upper() for r in rows if r[1].get("BRAND")}
+
+        valid_market_set = {m.upper() for m in valid_markets_brands.get("markets", [])}
+        valid_brand_set = {b.upper() for b in valid_markets_brands.get("brands", [])}
+
+        invalid_markets = [{"MARKET": m, "reason": "Invalid MARKET"} for m in all_markets if m not in valid_market_set]
+        invalid_brands = [{"BRAND": b, "reason": "Invalid BRAND"} for b in all_brands if b not in valid_brand_set]
+
+        if invalid_markets or invalid_brands:
+            return jsonify({
+                "status": "error",
+                "invalid_markets": invalid_markets,
+                "invalid_brands": invalid_brands
+            }), status.HTTP_400_BAD_REQUEST
+
+        # batch duplicate check
+        check_values = []
+        for row_num, r in rows:
+            check_values.append(
+                f"('{_sq(r['MARKET'].upper())}', '{_sq(r['BRAND'].upper())}', "
+                f"'{_sq(r['INSIGHT'])}', '{_sq(r['TYPE'])}', '{_sq(r['VALUE_1'])}')"
+            )
+
+        check_query = f"""
+            SELECT UPPER(TRIM(MARKET)) as MARKET,
+                   UPPER(TRIM(BRAND)) as BRAND,
+                   TRIM(INSIGHT) as INSIGHT,
+                   TRIM(TYPE) as TYPE,
+                   TRIM(VALUE_1) as VALUE_1
+            FROM {INSIGHT_TABLE}
+            WHERE (UPPER(TRIM(MARKET)), UPPER(TRIM(BRAND)), TRIM(INSIGHT), TRIM(TYPE), TRIM(VALUE_1)) 
+            IN ({','.join(check_values)})
+        """
+        existing = dc.execute_query(check_query)
+        existing_set = {
+            (row.MARKET, row.BRAND, row.INSIGHT, row.TYPE, row.VALUE_1)
+            for _, row in existing.iterrows()
+        } if existing is not None and not existing.empty else set()
+
+        inserted_list, duplicates, errors = [], [], []
+        batch_inserts = []
+
+        for row_num, r in rows:
+            try:
+                market_upper = r['MARKET'].upper()
+                brand_upper = r['BRAND'].upper()
+                
+                key = (market_upper, brand_upper, r['INSIGHT'], r['TYPE'], r['VALUE_1'])
+                
+                if key in existing_set:
+                    duplicates.append({
+                        "excel_row": row_num,
+                        "MARKET": market_upper,
+                        "BRAND": brand_upper,
+                        "VALUE_1": r['VALUE_1']
+                    })
+                    continue
+
+                batch_inserts.append(
+                    f"('{_sq(brand_upper)}', '{_sq(market_upper)}', '{_sq(r['INSIGHT'])}', '{_sq(r['TYPE'])}', "
+                    f"'{_sq(r['VALUE_1'])}', NULL, NULL, NULL, '{_sq(added_by)}', CURRENT_TIMESTAMP())"
+                )
+                
+                inserted_list.append({"excel_row": row_num, "MARKET": market_upper, "BRAND": brand_upper})
+
+            except Exception as e:
+                errors.append({"excel_row": row_num, "error": str(e)})
+
+        # batch insert
+        if batch_inserts:
+            insert_query = f"""
+                INSERT INTO {INSIGHT_TABLE}
+                (BRAND, MARKET, INSIGHT, TYPE, VALUE_1, VALUE_2, VALUE_3, VALUE_4, ADDED_BY, ENTRY_TIME)
+                VALUES {','.join(batch_inserts)}
+            """
+            dc.execute_non_query(insert_query)
+
+        # pagination for response
+        total_rows = len(rows)
+        total_pages = math.ceil(total_rows / limit)
+        start, end = offset, offset + limit
+
+        response = {
+            "status": "success" if inserted_list else ("partial" if errors else "no-change"),
+            "mode": "excel-template" if is_excel_mode else "json",
+            "sheet_processed": TARGET_SHEET_NAME_ABBRV if is_excel_mode else None,
+            "page": page,
+            "limit": limit,
+            "total_rows": total_rows,
+            "total_pages": total_pages,
+            "inserted_count": len(inserted_list),
+            "duplicate_count": len(duplicates),
+            "inserted_rows": inserted_list[start:end],
+            "duplicates": duplicates[start:end],
+            "errors": errors[start:end]
+        }
+        
+        if is_excel_mode and missing_columns_warning:
+            response["warning"] = {
+                "message": "The uploaded Excel template is missing some required columns.",
+                "missing_columns": missing_columns_warning
+            }
+        
+        response = {k: v for k, v in response.items() 
+                   if v is not None and not (isinstance(v, list) and len(v) == 0)}
+        
+        return jsonify(response), status.HTTP_201_CREATED if inserted_list else status.HTTP_200_OK
+
+    except Exception as e:
+        import traceback
+        print("ERROR:", traceback.format_exc())
+        return jsonify({"error": f"Internal server error: {str(e)}"}), status.HTTP_500_INTERNAL_SERVER_ERROR    
+
+
+
+###################################################################################################################################
+
+###### Reference Endpoint End 
+
+###################################################################################################################################
