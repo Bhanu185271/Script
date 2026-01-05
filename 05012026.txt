@@ -1,4 +1,61 @@
 
+CREATE TABLE hive_metastore.fieldforce_navigator_deployment.d_ffn_insight_key_msg_config 
+(
+MARKET          VARCHAR(100),
+BRAND           VARCHAR(500),
+SOB             VARCHAR(1000),
+MESSAGE_GROUP   VARCHAR(1000),
+SPECIALITY      VARCHAR(1000),
+MESSAGE         NVARCHAR(MAX),     
+DATE_ADDED      DATE);
+
+
+
+CREATE TABLE hive_metastore.fieldforce_navigator_deployment.d_ffn_insight_key_obj_config 
+(
+MARKET          VARCHAR(100),
+BRAND           VARCHAR(500),
+OBJECTION_GROUP VARCHAR(1000),
+OBJECTION       NVARCHAR(MAX),
+ACKNOWLEDGE     VARCHAR(1000),
+PROBE           NVARCHAR(MAX),     
+ANSWER          NVARCHAR(MAX), 
+CONFIRMATION    NVARCHAR(MAX), 
+TRANSITION      NVARCHAR(MAX), 
+DATE_ADDED      DATE);
+
+
+
+CREATE TABLE hive_metastore.fieldforce_navigator_deployment.d_ffn_insight_brand_studies_config 
+(
+MARKET          VARCHAR(100),
+BRAND           VARCHAR(500),
+STUDY_NAME      VARCHAR(1000),
+DATE_ADDED      DATE);
+
+
+CREATE TABLE hive_metastore.fieldforce_navigator_deployment.d_ffn_insight_brand_abbrv_config 
+(
+MARKET          VARCHAR(100),
+BRAND           VARCHAR(500),
+TERM            VARCHAR(1000),
+DEFINITION      VARCHAR(1000),
+DATE_ADDED      DATE);
+
+CREATE TABLE hive_metastore.fieldforce_navigator_deployment.d_ffn_insight_medical_term_config 
+(
+MARKET          VARCHAR(100),
+BRAND           VARCHAR(500),
+TERM            VARCHAR(1000),
+DATE_ADDED      DATE);
+
+
+
+
+
+
+
+
 #######################################################################################################################################
 
 
