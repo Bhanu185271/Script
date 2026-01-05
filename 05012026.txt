@@ -1,200 +1,170 @@
 -- =====================================================
--- Stored Procedure: Update FFN Insight Config Main Table
--- Purpose: Insert data from 5 intermediate tables into main table
+-- Stored Procedure: Update FFN Insight Config Main Table (WITH MERGE)
+-- Purpose: Incremental load with MERGE to handle duplicates gracefully
 -- Frequency: Runs 2 times daily
 -- =====================================================
 
-CREATE OR REPLACE PROCEDURE hive_metastore.fieldforce_navigator_deployment.sp_update_ffn_insight_config()
+CREATE OR REPLACE PROCEDURE hive_metastore.fieldforce_navigator_deployment.sp_update_ffn_insight_config_merge()
 LANGUAGE SQL
 AS
 BEGIN
   
-  DECLARE v_row_count INT DEFAULT 0;
   DECLARE v_total_inserted INT DEFAULT 0;
-  DECLARE v_error_msg STRING DEFAULT '';
   
-  -- Start transaction
   BEGIN
     
     -- =====================================================
-    -- STEP 1: Insert from Intermediate Table 1 (Key Messages)
+    -- STEP 1: Merge from Key Messages Table
     -- =====================================================
-    INSERT INTO hive_metastore.fieldforce_navigator_deployment.d_ffn_insight_config
-    (BRAND, MARKET, INSIGHT, TYPE, VALUE_1, VALUE_2, VALUE_3, VALUE_4, ADDED_BY, ENTRY_TIME)
-    SELECT 
-      t1.BRAND,
-      t1.MARKET,
-      'mkt-key-messages-categorization-insight' AS INSIGHT,
-      'Market_Intelligence' AS TYPE,
-      t1.MESSAGE AS VALUE_1,
-      NULL AS VALUE_2,
-      NULL AS VALUE_3,
-      NULL AS VALUE_4,
-      'SYSTEM' AS ADDED_BY,
-      t1.DATE_ADDED AS ENTRY_TIME
-    FROM hive_metastore.fieldforce_navigator_deployment.d_ffn_insight_key_msg_config t1
-    WHERE t1.DATE_ADDED = CURRENT_DATE()
-      AND NOT EXISTS (
-        SELECT 1 
-        FROM hive_metastore.fieldforce_navigator_deployment.d_ffn_insight_config main
-        WHERE main.MARKET = t1.MARKET
-          AND main.BRAND = t1.BRAND
-          AND main.VALUE_1 = t1.MESSAGE
-          AND main.INSIGHT = 'mkt-key-messages-categorization-insight'
-          AND main.ENTRY_TIME = t1.DATE_ADDED
-      );
+    MERGE INTO hive_metastore.fieldforce_navigator_deployment.d_ffn_insight_config AS target
+    USING (
+      SELECT 
+        BRAND,
+        MARKET,
+        'mkt-key-messages-categorization-insight' AS INSIGHT,
+        'Market_Intelligence' AS TYPE,
+        MESSAGE AS VALUE_1,
+        DATE_ADDED AS ENTRY_TIME
+      FROM hive_metastore.fieldforce_navigator_deployment.d_ffn_insight_key_msg_config
+      WHERE DATE_ADDED = CURRENT_DATE()
+    ) AS source
+    ON target.BRAND = source.BRAND
+      AND target.MARKET = source.MARKET
+      AND target.INSIGHT = source.INSIGHT
+      AND target.VALUE_1 = source.VALUE_1
+      AND target.ENTRY_TIME = source.ENTRY_TIME
+    WHEN NOT MATCHED THEN
+      INSERT (BRAND, MARKET, INSIGHT, TYPE, VALUE_1, VALUE_2, VALUE_3, VALUE_4, ADDED_BY, ENTRY_TIME)
+      VALUES (source.BRAND, source.MARKET, source.INSIGHT, source.TYPE, source.VALUE_1, 
+              NULL, NULL, NULL, 'SYSTEM', source.ENTRY_TIME);
     
-    SET v_row_count = ROW_COUNT();
-    SET v_total_inserted = v_total_inserted + v_row_count;
-    SELECT CONCAT('Table 1 (Key Messages): ', v_row_count, ' rows inserted');
+    SET v_total_inserted = v_total_inserted + ROW_COUNT();
     
     
     -- =====================================================
-    -- STEP 2: Insert from Intermediate Table 2 (Key Objections)
+    -- STEP 2: Merge from Key Objections Table
     -- =====================================================
-    INSERT INTO hive_metastore.fieldforce_navigator_deployment.d_ffn_insight_config
-    (BRAND, MARKET, INSIGHT, TYPE, VALUE_1, VALUE_2, VALUE_3, VALUE_4, ADDED_BY, ENTRY_TIME)
-    SELECT 
-      t2.BRAND,
-      t2.MARKET,
-      'mkt-objections-categorization-insight' AS INSIGHT,
-      'Market_Intelligence' AS TYPE,
-      t2.OBJECTION AS VALUE_1,
-      NULL AS VALUE_2,
-      NULL AS VALUE_3,
-      NULL AS VALUE_4,
-      'SYSTEM' AS ADDED_BY,
-      t2.DATE_ADDED AS ENTRY_TIME
-    FROM hive_metastore.fieldforce_navigator_deployment.d_ffn_insight_key_obj_config t2
-    WHERE t2.DATE_ADDED = CURRENT_DATE()
-      AND NOT EXISTS (
-        SELECT 1 
-        FROM hive_metastore.fieldforce_navigator_deployment.d_ffn_insight_config main
-        WHERE main.MARKET = t2.MARKET
-          AND main.BRAND = t2.BRAND
-          AND main.VALUE_1 = t2.OBJECTION
-          AND main.INSIGHT = 'mkt-objections-categorization-insight'
-          AND main.ENTRY_TIME = t2.DATE_ADDED
-      );
+    MERGE INTO hive_metastore.fieldforce_navigator_deployment.d_ffn_insight_config AS target
+    USING (
+      SELECT 
+        BRAND,
+        MARKET,
+        'mkt-objections-categorization-insight' AS INSIGHT,
+        'Market_Intelligence' AS TYPE,
+        OBJECTION AS VALUE_1,
+        DATE_ADDED AS ENTRY_TIME
+      FROM hive_metastore.fieldforce_navigator_deployment.d_ffn_insight_key_obj_config
+      WHERE DATE_ADDED = CURRENT_DATE()
+    ) AS source
+    ON target.BRAND = source.BRAND
+      AND target.MARKET = source.MARKET
+      AND target.INSIGHT = source.INSIGHT
+      AND target.VALUE_1 = source.VALUE_1
+      AND target.ENTRY_TIME = source.ENTRY_TIME
+    WHEN NOT MATCHED THEN
+      INSERT (BRAND, MARKET, INSIGHT, TYPE, VALUE_1, VALUE_2, VALUE_3, VALUE_4, ADDED_BY, ENTRY_TIME)
+      VALUES (source.BRAND, source.MARKET, source.INSIGHT, source.TYPE, source.VALUE_1, 
+              NULL, NULL, NULL, 'SYSTEM', source.ENTRY_TIME);
     
-    SET v_row_count = ROW_COUNT();
-    SET v_total_inserted = v_total_inserted + v_row_count;
-    SELECT CONCAT('Table 2 (Key Objections): ', v_row_count, ' rows inserted');
+    SET v_total_inserted = v_total_inserted + ROW_COUNT();
     
     
     -- =====================================================
-    -- STEP 3: Insert from Intermediate Table 3 (Brand Studies)
+    -- STEP 3: Merge from Brand Studies Table
     -- =====================================================
-    INSERT INTO hive_metastore.fieldforce_navigator_deployment.d_ffn_insight_config
-    (BRAND, MARKET, INSIGHT, TYPE, VALUE_1, VALUE_2, VALUE_3, VALUE_4, ADDED_BY, ENTRY_TIME)
-    SELECT 
-      t3.BRAND,
-      t3.MARKET,
-      'medical-word-reassignment' AS INSIGHT,
-      'STUDY' AS TYPE,
-      t3.STUDY_NAME AS VALUE_1,
-      NULL AS VALUE_2,
-      NULL AS VALUE_3,
-      NULL AS VALUE_4,
-      'SYSTEM' AS ADDED_BY,
-      t3.DATE_ADDED AS ENTRY_TIME
-    FROM hive_metastore.fieldforce_navigator_deployment.d_ffn_insight_brand_studies_config t3
-    WHERE t3.DATE_ADDED = CURRENT_DATE()
-      AND NOT EXISTS (
-        SELECT 1 
-        FROM hive_metastore.fieldforce_navigator_deployment.d_ffn_insight_config main
-        WHERE main.MARKET = t3.MARKET
-          AND main.BRAND = t3.BRAND
-          AND main.VALUE_1 = t3.STUDY_NAME
-          AND main.INSIGHT = 'medical-word-reassignment'
-          AND main.TYPE = 'STUDY'
-          AND main.ENTRY_TIME = t3.DATE_ADDED
-      );
+    MERGE INTO hive_metastore.fieldforce_navigator_deployment.d_ffn_insight_config AS target
+    USING (
+      SELECT 
+        BRAND,
+        MARKET,
+        'medical-word-reassignment' AS INSIGHT,
+        'STUDY' AS TYPE,
+        STUDY_NAME AS VALUE_1,
+        DATE_ADDED AS ENTRY_TIME
+      FROM hive_metastore.fieldforce_navigator_deployment.d_ffn_insight_brand_studies_config
+      WHERE DATE_ADDED = CURRENT_DATE()
+    ) AS source
+    ON target.BRAND = source.BRAND
+      AND target.MARKET = source.MARKET
+      AND target.INSIGHT = source.INSIGHT
+      AND target.TYPE = source.TYPE
+      AND target.VALUE_1 = source.VALUE_1
+      AND target.ENTRY_TIME = source.ENTRY_TIME
+    WHEN NOT MATCHED THEN
+      INSERT (BRAND, MARKET, INSIGHT, TYPE, VALUE_1, VALUE_2, VALUE_3, VALUE_4, ADDED_BY, ENTRY_TIME)
+      VALUES (source.BRAND, source.MARKET, source.INSIGHT, source.TYPE, source.VALUE_1, 
+              NULL, NULL, NULL, 'SYSTEM', source.ENTRY_TIME);
     
-    SET v_row_count = ROW_COUNT();
-    SET v_total_inserted = v_total_inserted + v_row_count;
-    SELECT CONCAT('Table 3 (Brand Studies): ', v_row_count, ' rows inserted');
+    SET v_total_inserted = v_total_inserted + ROW_COUNT();
     
     
     -- =====================================================
-    -- STEP 4: Insert from Intermediate Table 4 (Medical Terms)
+    -- STEP 4: Merge from Medical Terms Table
     -- =====================================================
-    INSERT INTO hive_metastore.fieldforce_navigator_deployment.d_ffn_insight_config
-    (BRAND, MARKET, INSIGHT, TYPE, VALUE_1, VALUE_2, VALUE_3, VALUE_4, ADDED_BY, ENTRY_TIME)
-    SELECT 
-      t4.BRAND,
-      t4.MARKET,
-      'medical-word-reassignment' AS INSIGHT,
-      'TERM' AS TYPE,
-      t4.TERM AS VALUE_1,
-      NULL AS VALUE_2,
-      NULL AS VALUE_3,
-      NULL AS VALUE_4,
-      'SYSTEM' AS ADDED_BY,
-      t4.DATE_ADDED AS ENTRY_TIME
-    FROM hive_metastore.fieldforce_navigator_deployment.d_ffn_insight_medical_term_config t4
-    WHERE t4.DATE_ADDED = CURRENT_DATE()
-      AND NOT EXISTS (
-        SELECT 1 
-        FROM hive_metastore.fieldforce_navigator_deployment.d_ffn_insight_config main
-        WHERE main.MARKET = t4.MARKET
-          AND main.BRAND = t4.BRAND
-          AND main.VALUE_1 = t4.TERM
-          AND main.INSIGHT = 'medical-word-reassignment'
-          AND main.TYPE = 'TERM'
-          AND main.ENTRY_TIME = t4.DATE_ADDED
-      );
+    MERGE INTO hive_metastore.fieldforce_navigator_deployment.d_ffn_insight_config AS target
+    USING (
+      SELECT 
+        BRAND,
+        MARKET,
+        'medical-word-reassignment' AS INSIGHT,
+        'TERM' AS TYPE,
+        TERM AS VALUE_1,
+        DATE_ADDED AS ENTRY_TIME
+      FROM hive_metastore.fieldforce_navigator_deployment.d_ffn_insight_medical_term_config
+      WHERE DATE_ADDED = CURRENT_DATE()
+    ) AS source
+    ON target.BRAND = source.BRAND
+      AND target.MARKET = source.MARKET
+      AND target.INSIGHT = source.INSIGHT
+      AND target.TYPE = source.TYPE
+      AND target.VALUE_1 = source.VALUE_1
+      AND target.ENTRY_TIME = source.ENTRY_TIME
+    WHEN NOT MATCHED THEN
+      INSERT (BRAND, MARKET, INSIGHT, TYPE, VALUE_1, VALUE_2, VALUE_3, VALUE_4, ADDED_BY, ENTRY_TIME)
+      VALUES (source.BRAND, source.MARKET, source.INSIGHT, source.TYPE, source.VALUE_1, 
+              NULL, NULL, NULL, 'SYSTEM', source.ENTRY_TIME);
     
-    SET v_row_count = ROW_COUNT();
-    SET v_total_inserted = v_total_inserted + v_row_count;
-    SELECT CONCAT('Table 4 (Medical Terms): ', v_row_count, ' rows inserted');
+    SET v_total_inserted = v_total_inserted + ROW_COUNT();
     
     
     -- =====================================================
-    -- STEP 5: Insert from Intermediate Table 5 (Brand Abbreviations)
-    -- With JSON formatted concatenation
+    -- STEP 5: Merge from Brand Abbreviations Table
     -- =====================================================
-    INSERT INTO hive_metastore.fieldforce_navigator_deployment.d_ffn_insight_config
-    (BRAND, MARKET, INSIGHT, TYPE, VALUE_1, VALUE_2, VALUE_3, VALUE_4, ADDED_BY, ENTRY_TIME)
-    SELECT 
-      t5.BRAND,
-      t5.MARKET,
-      'medical-word-reassignment' AS INSIGHT,
-      'ABBRV' AS TYPE,
-      CONCAT('{"term":"', t5.TERM, '","definition":"', t5.DEFINITION, '"}') AS VALUE_1,
-      NULL AS VALUE_2,
-      NULL AS VALUE_3,
-      NULL AS VALUE_4,
-      'SYSTEM' AS ADDED_BY,
-      t5.DATE_ADDED AS ENTRY_TIME
-    FROM hive_metastore.fieldforce_navigator_deployment.d_ffn_insight_brand_abbrv_config t5
-    WHERE t5.DATE_ADDED = CURRENT_DATE()
-      AND NOT EXISTS (
-        SELECT 1 
-        FROM hive_metastore.fieldforce_navigator_deployment.d_ffn_insight_config main
-        WHERE main.MARKET = t5.MARKET
-          AND main.BRAND = t5.BRAND
-          AND main.VALUE_1 = CONCAT('{"term":"', t5.TERM, '","definition":"', t5.DEFINITION, '"}')
-          AND main.INSIGHT = 'medical-word-reassignment'
-          AND main.TYPE = 'ABBRV'
-          AND main.ENTRY_TIME = t5.DATE_ADDED
-      );
+    MERGE INTO hive_metastore.fieldforce_navigator_deployment.d_ffn_insight_config AS target
+    USING (
+      SELECT 
+        BRAND,
+        MARKET,
+        'medical-word-reassignment' AS INSIGHT,
+        'ABBRV' AS TYPE,
+        CONCAT('{"term":"', TERM, '","definition":"', DEFINITION, '"}') AS VALUE_1,
+        DATE_ADDED AS ENTRY_TIME
+      FROM hive_metastore.fieldforce_navigator_deployment.d_ffn_insight_brand_abbrv_config
+      WHERE DATE_ADDED = CURRENT_DATE()
+    ) AS source
+    ON target.BRAND = source.BRAND
+      AND target.MARKET = source.MARKET
+      AND target.INSIGHT = source.INSIGHT
+      AND target.TYPE = source.TYPE
+      AND target.VALUE_1 = source.VALUE_1
+      AND target.ENTRY_TIME = source.ENTRY_TIME
+    WHEN NOT MATCHED THEN
+      INSERT (BRAND, MARKET, INSIGHT, TYPE, VALUE_1, VALUE_2, VALUE_3, VALUE_4, ADDED_BY, ENTRY_TIME)
+      VALUES (source.BRAND, source.MARKET, source.INSIGHT, source.TYPE, source.VALUE_1, 
+              NULL, NULL, NULL, 'SYSTEM', source.ENTRY_TIME);
     
-    SET v_row_count = ROW_COUNT();
-    SET v_total_inserted = v_total_inserted + v_row_count;
-    SELECT CONCAT('Table 5 (Brand Abbreviations): ', v_row_count, ' rows inserted');
+    SET v_total_inserted = v_total_inserted + ROW_COUNT();
     
     
     -- =====================================================
     -- Summary
     -- =====================================================
-    SELECT CONCAT('Total rows inserted across all tables: ', v_total_inserted) AS Summary;
+    SELECT CONCAT('Total rows processed: ', v_total_inserted) AS Summary;
     
     
   EXCEPTION
     WHEN OTHERS THEN
-      SET v_error_msg = CONCAT('Error occurred: ', SQLERRM());
-      SELECT v_error_msg AS Error_Message;
+      SELECT CONCAT('Error occurred: ', SQLERRM()) AS Error_Message;
       RAISE;
   END;
   
@@ -202,13 +172,6 @@ END;
 
 
 -- =====================================================
--- How to Execute the Procedure
+-- How to Execute
 -- =====================================================
--- CALL hive_metastore.fieldforce_navigator_deployment.sp_update_ffn_insight_config();
-
-
--- =====================================================
--- Optional: Create a Job to Schedule this procedure
--- =====================================================
--- You can schedule this using Databricks Jobs to run 2 times daily
--- Example schedule: "0 9,17 * * *" (runs at 9 AM and 5 PM daily)
+-- CALL hive_metastore.fieldforce_navigator_deployment.sp_update_ffn_insight_config_merge();
