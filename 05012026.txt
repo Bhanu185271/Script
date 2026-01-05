@@ -1,28 +1,28 @@
 ###############################################
-# INSIGHT CONFIG - Brand Studies (Updated)
+# INSIGHT CONFIG - Medical Terms (Updated)
 ###############################################
 
-# NEW TABLE for Brand Studies
-INSIGHT_BRAND_STUDY_TABLE = "hive_metastore.fieldforce_navigator_deployment.d_ffn_insight_brand_studies_config"
+# NEW TABLE for Medical Terms
+INSIGHT_MEDICAL_TERM_TABLE = "hive_metastore.fieldforce_navigator_deployment.d_ffn_insight_medical_term_config"
 MARKET_BRAND_TABLE = "hive_metastore.fieldforce_navigator_deployment.audio_market_brand_config"
 
 # UPDATED MAPPING - Only 3 columns now
-EXCEL_TO_DB_MAPPING_BRAND_STUDY = {
+EXCEL_TO_DB_MAPPING_MEDICAL_TERM = {
     "Market": "MARKET",
     "Brand": "BRAND",
-    "Study Name": "STUDY_NAME"
+    "Term": "TERM"
 }
 
-TARGET_SHEET_NAME_BRAND_STUDY = "Brand - Studies"
+TARGET_SHEET_NAME_MEDICAL_TERM = "Brand - Medical Terms"
 
-def _process_template_excel_brand_study(file_obj):
+def _process_template_excel_medical_term(file_obj):
     try:
         excel_file = pd.ExcelFile(file_obj, engine="openpyxl")
         
-        if TARGET_SHEET_NAME_BRAND_STUDY not in excel_file.sheet_names:
-            raise ValueError(f"Sheet '{TARGET_SHEET_NAME_BRAND_STUDY}' not found")
+        if TARGET_SHEET_NAME_MEDICAL_TERM not in excel_file.sheet_names:
+            raise ValueError(f"Sheet '{TARGET_SHEET_NAME_MEDICAL_TERM}' not found")
         
-        df = pd.read_excel(file_obj, sheet_name=TARGET_SHEET_NAME_BRAND_STUDY, header=HEADER_ROW_INDEX, engine="openpyxl")
+        df = pd.read_excel(file_obj, sheet_name=TARGET_SHEET_NAME_MEDICAL_TERM, header=HEADER_ROW_INDEX, engine="openpyxl")
         
         if len(df.columns) > 0:
             df = df.iloc[:, 1:]
@@ -34,7 +34,7 @@ def _process_template_excel_brand_study(file_obj):
         df = df[df.drop('_excel_row_num', axis=1).astype(str).apply(lambda x: x.str.strip().str.len().sum(), axis=1) > 0]
         
         # Updated mandatory columns as per new mapping
-        mandatory_cols = ["Market", "Brand", "Study Name"]
+        mandatory_cols = ["Market", "Brand", "Term"]
         missing = [col for col in mandatory_cols if col not in df.columns]
         
         if missing:
@@ -46,14 +46,14 @@ def _process_template_excel_brand_study(file_obj):
             excel_row_num = int(row['_excel_row_num'])
             mapped_row = {}
             
-            for excel_col, db_col in EXCEL_TO_DB_MAPPING_BRAND_STUDY.items():
+            for excel_col, db_col in EXCEL_TO_DB_MAPPING_MEDICAL_TERM.items():
                 if excel_col in df.columns:
                     mapped_row[db_col] = _clean(row.get(excel_col, ""))
                 else:
                     mapped_row[db_col] = ""
             
             # Check if all required fields are present
-            if mapped_row.get("MARKET") and mapped_row.get("BRAND") and mapped_row.get("STUDY_NAME"):
+            if mapped_row.get("MARKET") and mapped_row.get("BRAND") and mapped_row.get("TERM"):
                 mapped_data.append((excel_row_num, mapped_row))
         
         return mapped_data, None
@@ -64,16 +64,16 @@ def _process_template_excel_brand_study(file_obj):
 
 ###############################################
 # ENDPOINT 1: RETRIEVE DATA (GET-like using POST)
-# Purpose: Fetch existing brand study records filtered by MARKET and BRAND
+# Purpose: Fetch existing medical term records filtered by MARKET and BRAND
 # Method: POST
-# URL: /d_ffn_insight_config_brand_study/get_data
+# URL: /d_ffn_insight_config_medical_term/get_data
 # Payload: {"MARKET": "...", "BRAND": "..."}  (both optional)
 ###############################################
-@app.route("/d_ffn_insight_config_brand_study/get_data", methods=["POST"])
+@app.route("/d_ffn_insight_config_medical_term/get_data", methods=["POST"])
 @cross_origin()
-def insight_brand_study_get_data():
+def insight_medical_term_get_data():
     """
-    Retrieves brand study data from the database based on MARKET and BRAND filters.
+    Retrieves medical term data from the database based on MARKET and BRAND filters.
     Both parameters are OPTIONAL in the POST body.
     
     Example POST body:
@@ -113,7 +113,7 @@ def insight_brand_study_get_data():
             return jsonify({"error": f"Invalid MARKET: '{market_param}' is not available in the database"}), status.HTTP_400_BAD_REQUEST
         
         # Build query with optional WHERE clause based on parameters
-        query = f"SELECT * FROM {INSIGHT_BRAND_STUDY_TABLE}"
+        query = f"SELECT * FROM {INSIGHT_MEDICAL_TERM_TABLE}"
         where_conditions = []
         
         if brand_param:
@@ -162,23 +162,23 @@ def insight_brand_study_get_data():
 
 ###############################################
 # ENDPOINT 2: INSERT/UPLOAD DATA
-# Purpose: Add new brand study records to the database
+# Purpose: Add new medical term records to the database
 # Method: POST
-# URL: /d_ffn_insight_config_brand_study
-# Payload: JSON object(s) with MARKET, BRAND, STUDY_NAME (all required)
+# URL: /d_ffn_insight_config_medical_term
+# Payload: JSON object(s) with MARKET, BRAND, TERM (all required)
 ###############################################
-@app.route("/d_ffn_insight_config_brand_study", methods=["POST"])
+@app.route("/d_ffn_insight_config_medical_term", methods=["POST"])
 @cross_origin()
-def insight_brand_study_post():
+def insight_medical_term_post():
     """
-    Inserts new brand study data into the database.
-    Requires MARKET, BRAND, and STUDY_NAME in the POST body.
+    Inserts new medical term data into the database.
+    Requires MARKET, BRAND, and TERM in the POST body.
     
     Example POST body for single record:
     {
         "MARKET": "US",
         "BRAND": "AREXVY",
-        "STUDY_NAME": "Key Brand Study Name"
+        "TERM": "Medical Term"
     }
     
     Or array of records:
@@ -186,12 +186,12 @@ def insight_brand_study_post():
         {
             "MARKET": "US",
             "BRAND": "AREXVY",
-            "STUDY_NAME": "Study 1"
+            "TERM": "Term 1"
         },
         {
             "MARKET": "EU",
             "BRAND": "SHINGRIX",
-            "STUDY_NAME": "Study 2"
+            "TERM": "Term 2"
         }
     ]
     """
@@ -218,27 +218,27 @@ def insight_brand_study_post():
                 return jsonify({"error": "Only .xlsx files"}), status.HTTP_400_BAD_REQUEST
 
             try:
-                rows, _ = _process_template_excel_brand_study(f)
+                rows, _ = _process_template_excel_medical_term(f)
             except Exception as e:
                 return jsonify({"error": str(e)}), status.HTTP_400_BAD_REQUEST
         else:
-            # JSON body mode - Requires MARKET, BRAND, and STUDY_NAME
+            # JSON body mode - Requires MARKET, BRAND, and TERM
             body = request.get_json(force=True, silent=True) or {}
             items = body if isinstance(body, list) else [body]
 
             for i, rec in enumerate(items, start=1):
                 market = _clean(rec.get("MARKET", ""))
                 brand = _clean(rec.get("BRAND", ""))
-                study_name = _clean(rec.get("STUDY_NAME", ""))
+                term = _clean(rec.get("TERM", ""))
 
                 # Validate all three required fields
-                if not market or not brand or not study_name:
-                    return jsonify({"error": f"Item {i}: Missing required fields (MARKET, BRAND, STUDY_NAME)"}), status.HTTP_400_BAD_REQUEST
+                if not market or not brand or not term:
+                    return jsonify({"error": f"Item {i}: Missing required fields (MARKET, BRAND, TERM)"}), status.HTTP_400_BAD_REQUEST
 
                 rows.append((i, {
                     "MARKET": market,
                     "BRAND": brand,
-                    "STUDY_NAME": study_name
+                    "TERM": term
                 }))
 
         if not rows:
@@ -264,13 +264,13 @@ def insight_brand_study_post():
             check_vals.append(
                 f"(UPPER(TRIM(MARKET)) = '{_sq(row_data['MARKET'].upper())}' AND "
                 f"UPPER(TRIM(BRAND)) = '{_sq(row_data['BRAND'].upper())}' AND "
-                f"TRIM(STUDY_NAME) = '{_sq(row_data['STUDY_NAME'])}')"
+                f"TRIM(TERM) = '{_sq(row_data['TERM'])}')"
             )
 
         check_query = f"""
             SELECT UPPER(TRIM(MARKET)) as MARKET, UPPER(TRIM(BRAND)) as BRAND,
-                   TRIM(STUDY_NAME) as STUDY_NAME
-            FROM {INSIGHT_BRAND_STUDY_TABLE}
+                   TRIM(TERM) as TERM
+            FROM {INSIGHT_MEDICAL_TERM_TABLE}
             WHERE {' OR '.join(check_vals)}
         """
         
@@ -278,7 +278,7 @@ def insight_brand_study_post():
         existing_set = set()
         if existing is not None and not existing.empty:
             for _, row in existing.iterrows():
-                existing_set.add((row['MARKET'], row['BRAND'], row['STUDY_NAME']))
+                existing_set.add((row['MARKET'], row['BRAND'], row['TERM']))
 
         inserted_rows, duplicates, errors = [], [], []
         batch_inserts = []
@@ -289,15 +289,15 @@ def insight_brand_study_post():
                 market = row_data["MARKET"].upper()
                 brand = row_data["BRAND"].upper()
                 
-                key = (market, brand, row_data["STUDY_NAME"])
+                key = (market, brand, row_data["TERM"])
 
                 if key in existing_set:
                     duplicates.append({"excel_row": row_num, "MARKET": market, "BRAND": brand})
                     continue
 
-                # Build insert values - only MARKET, BRAND, STUDY_NAME, and DATE_ADDED
+                # Build insert values - only MARKET, BRAND, TERM, and DATE_ADDED
                 batch_inserts.append(
-                    f"('{_sq(market)}', '{_sq(brand)}', '{_sq(row_data['STUDY_NAME'])}', CURRENT_TIMESTAMP())"
+                    f"('{_sq(market)}', '{_sq(brand)}', '{_sq(row_data['TERM'])}', CURRENT_TIMESTAMP())"
                 )
 
                 inserted_rows.append({"excel_row": row_num, "MARKET": market, "BRAND": brand})
@@ -309,8 +309,8 @@ def insight_brand_study_post():
         if batch_inserts:
             # Updated insert query with new table and columns
             insert_query = f"""
-                INSERT INTO {INSIGHT_BRAND_STUDY_TABLE}
-                (MARKET, BRAND, STUDY_NAME, DATE_ADDED)
+                INSERT INTO {INSIGHT_MEDICAL_TERM_TABLE}
+                (MARKET, BRAND, TERM, DATE_ADDED)
                 VALUES {','.join(batch_inserts)}
             """
             dc.execute_non_query(insert_query)
@@ -342,3 +342,29 @@ def insight_brand_study_post():
         import traceback
         print("ERROR:", traceback.format_exc())
         return jsonify({"error": f"Internal error: {str(e)}"}), status.HTTP_500_INTERNAL_SERVER_ERROR
+
+
+###############################################
+# SUMMARY OF MEDICAL TERM ENDPOINTS
+###############################################
+"""
+ENDPOINT USAGE:
+
+1. TO RETRIEVE MEDICAL TERM DATA (GET-like functionality using POST):
+   POST to: /d_ffn_insight_config_medical_term/get_data
+   Body: {"MARKET": "US", "BRAND": "AREXVY"}  # both optional
+   Table: hive_metastore.fieldforce_navigator_deployment.d_ffn_insight_medical_term_config
+   
+2. TO INSERT NEW MEDICAL TERM DATA:
+   POST to: /d_ffn_insight_config_medical_term
+   Body: {"MARKET": "US", "BRAND": "AREXVY", "TERM": "Medical Term"}
+   Table: hive_metastore.fieldforce_navigator_deployment.d_ffn_insight_medical_term_config
+   
+KEY CHANGES FROM PREVIOUS VERSION:
+- New dedicated table: d_ffn_insight_medical_term_config
+- Simplified mapping: Market → MARKET, Brand → BRAND, Term → TERM
+- Removed hardcoded INSIGHT and TYPE values
+- Changed GET to POST for data retrieval endpoint (/get_data)
+- Direct insertion based on Excel/JSON mapping only
+- Table has only 4 columns: MARKET, BRAND, TERM, DATE_ADDED
+"""
