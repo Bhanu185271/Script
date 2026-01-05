@@ -3,6 +3,7 @@
 ###############################################
 
 INSIGHT_KEY_MSG_TABLE = "hive_metastore.fieldforce_navigator_deployment.d_ffn_insight_key_msg_config"
+MARKET_BRAND_TABLE = "hive_metastore.fieldforce_navigator_deployment.audio_market_brand_config"
 
 EXCEL_TO_DB_MAPPING_KEY_MSG = {
     "Market": "MARKET",
@@ -68,18 +69,33 @@ def insight_key_msg_get_data():
         brand_param = _clean(body.get("BRAND", ""))
         market_param = _clean(body.get("MARKET", ""))
         
-        # Build query with optional WHERE clause based on parameters
+        # Validate that BRAND and MARKET are provided
+        if not brand_param or not market_param:
+            return jsonify({"error": "Both BRAND and MARKET are required in request body"}), status.HTTP_400_BAD_REQUEST
+        
+        # Validate BRAND and MARKET against master table
+        valid_markets_brands = _get_valid_markets_brands(force_refresh=True)
+        
+        brand_upper = brand_param.upper()
+        market_upper = market_param.upper()
+        
+        valid_market_set = {m.upper() for m in valid_markets_brands.get("markets", [])}
+        valid_brand_set = {b.upper() for b in valid_markets_brands.get("brands", [])}
+        
+        if market_upper not in valid_market_set:
+            return jsonify({"error": f"Invalid MARKET: '{market_param}' is not available in the database"}), status.HTTP_400_BAD_REQUEST
+        
+        if brand_upper not in valid_brand_set:
+            return jsonify({"error": f"Invalid BRAND: '{brand_param}' is not available in the database"}), status.HTTP_400_BAD_REQUEST
+        
+        # Build query with WHERE clause
         query = f"SELECT * FROM {INSIGHT_KEY_MSG_TABLE}"
         where_conditions = []
         
-        if brand_param:
-            where_conditions.append(f"UPPER(TRIM(BRAND)) = '{_sq(brand_param.upper())}'")
+        where_conditions.append(f"UPPER(TRIM(BRAND)) = '{_sq(brand_upper)}'")
+        where_conditions.append(f"UPPER(TRIM(MARKET)) = '{_sq(market_upper)}'")
         
-        if market_param:
-            where_conditions.append(f"UPPER(TRIM(MARKET)) = '{_sq(market_param.upper())}'")
-        
-        if where_conditions:
-            query += " WHERE " + " AND ".join(where_conditions)
+        query += " WHERE " + " AND ".join(where_conditions)
         
         print(f"Executing query: {query}")
         
@@ -153,7 +169,7 @@ def insight_key_msg_post():
                 message = _clean(rec.get("MESSAGE", ""))
 
                 if not market or not brand or not message:
-                    return jsonify({"error": f"Item {i}: Missing fields"}), status.HTTP_400_BAD_REQUEST
+                    return jsonify({"error": f"Item {i}: Missing required fields (MARKET, BRAND, MESSAGE)"}), status.HTTP_400_BAD_REQUEST
 
                 rows.append((i, {
                     "MARKET": market,
@@ -174,8 +190,8 @@ def insight_key_msg_post():
         valid_market_set = {m.upper() for m in valid_markets_brands.get("markets", [])}
         valid_brand_set = {b.upper() for b in valid_markets_brands.get("brands", [])}
 
-        invalid_mkts = [{"MARKET": m} for m in all_markets if m not in valid_market_set]
-        invalid_brnds = [{"BRAND": b} for b in all_brands if b not in valid_brand_set]
+        invalid_mkts = [{"MARKET": m, "reason": "Invalid MARKET"} for m in all_markets if m not in valid_market_set]
+        invalid_brnds = [{"BRAND": b, "reason": "Invalid BRAND"} for b in all_brands if b not in valid_brand_set]
 
         if invalid_mkts or invalid_brnds:
             return jsonify({"status": "error", "invalid_markets": invalid_mkts, "invalid_brands": invalid_brnds}), status.HTTP_400_BAD_REQUEST
@@ -343,18 +359,33 @@ def insight_key_obj_get_data():
         brand_param = _clean(body.get("BRAND", ""))
         market_param = _clean(body.get("MARKET", ""))
         
-        # Build query with optional WHERE clause based on parameters
+        # Validate that BRAND and MARKET are provided
+        if not brand_param or not market_param:
+            return jsonify({"error": "Both BRAND and MARKET are required in request body"}), status.HTTP_400_BAD_REQUEST
+        
+        # Validate BRAND and MARKET against master table
+        valid_markets_brands = _get_valid_markets_brands(force_refresh=True)
+        
+        brand_upper = brand_param.upper()
+        market_upper = market_param.upper()
+        
+        valid_market_set = {m.upper() for m in valid_markets_brands.get("markets", [])}
+        valid_brand_set = {b.upper() for b in valid_markets_brands.get("brands", [])}
+        
+        if market_upper not in valid_market_set:
+            return jsonify({"error": f"Invalid MARKET: '{market_param}' is not available in the database"}), status.HTTP_400_BAD_REQUEST
+        
+        if brand_upper not in valid_brand_set:
+            return jsonify({"error": f"Invalid BRAND: '{brand_param}' is not available in the database"}), status.HTTP_400_BAD_REQUEST
+        
+        # Build query with WHERE clause
         query = f"SELECT * FROM {INSIGHT_KEY_OBJ_TABLE}"
         where_conditions = []
         
-        if brand_param:
-            where_conditions.append(f"UPPER(TRIM(BRAND)) = '{_sq(brand_param.upper())}'")
+        where_conditions.append(f"UPPER(TRIM(BRAND)) = '{_sq(brand_upper)}'")
+        where_conditions.append(f"UPPER(TRIM(MARKET)) = '{_sq(market_upper)}'")
         
-        if market_param:
-            where_conditions.append(f"UPPER(TRIM(MARKET)) = '{_sq(market_param.upper())}'")
-        
-        if where_conditions:
-            query += " WHERE " + " AND ".join(where_conditions)
+        query += " WHERE " + " AND ".join(where_conditions)
         
         print(f"Executing query: {query}")
         
@@ -428,7 +459,7 @@ def insight_key_obj_post():
                 objection = _clean(rec.get("OBJECTION", ""))
 
                 if not market or not brand or not objection:
-                    return jsonify({"error": f"Item {i}: Missing fields"}), status.HTTP_400_BAD_REQUEST
+                    return jsonify({"error": f"Item {i}: Missing required fields (MARKET, BRAND, OBJECTION)"}), status.HTTP_400_BAD_REQUEST
 
                 rows.append((i, {
                     "MARKET": market,
@@ -452,8 +483,8 @@ def insight_key_obj_post():
         valid_market_set = {m.upper() for m in valid_markets_brands.get("markets", [])}
         valid_brand_set = {b.upper() for b in valid_markets_brands.get("brands", [])}
 
-        invalid_mkts = [{"MARKET": m} for m in all_markets if m not in valid_market_set]
-        invalid_brnds = [{"BRAND": b} for b in all_brands if b not in valid_brand_set]
+        invalid_mkts = [{"MARKET": m, "reason": "Invalid MARKET"} for m in all_markets if m not in valid_market_set]
+        invalid_brnds = [{"BRAND": b, "reason": "Invalid BRAND"} for b in all_brands if b not in valid_brand_set]
 
         if invalid_mkts or invalid_brnds:
             return jsonify({"status": "error", "invalid_markets": invalid_mkts, "invalid_brands": invalid_brnds}), status.HTTP_400_BAD_REQUEST
