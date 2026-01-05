@@ -1,3 +1,7 @@
+      CONCAT('{"term":"', t5.TERM, '","definition":"', t5.DEFINITION, '"}') AS VALUE_1,
+
+
+
 ###############################################
 # INSIGHT CONFIG - Key Messages (Updated & Optimized)
 ###############################################
