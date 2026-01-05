@@ -69,33 +69,33 @@ def insight_key_msg_get_data():
         brand_param = _clean(body.get("BRAND", ""))
         market_param = _clean(body.get("MARKET", ""))
         
-        # Validate that BRAND and MARKET are provided
-        if not brand_param or not market_param:
-            return jsonify({"error": "Both BRAND and MARKET are required in request body"}), status.HTTP_400_BAD_REQUEST
-        
         # Validate BRAND and MARKET against master table
         valid_markets_brands = _get_valid_markets_brands(force_refresh=True)
         
-        brand_upper = brand_param.upper()
-        market_upper = market_param.upper()
+        brand_upper = brand_param.upper() if brand_param else ""
+        market_upper = market_param.upper() if market_param else ""
         
         valid_market_set = {m.upper() for m in valid_markets_brands.get("markets", [])}
         valid_brand_set = {b.upper() for b in valid_markets_brands.get("brands", [])}
         
-        if market_upper not in valid_market_set:
-            return jsonify({"error": f"Invalid MARKET: '{market_param}' is not available in the database"}), status.HTTP_400_BAD_REQUEST
-        
-        if brand_upper not in valid_brand_set:
+        if brand_param and brand_upper not in valid_brand_set:
             return jsonify({"error": f"Invalid BRAND: '{brand_param}' is not available in the database"}), status.HTTP_400_BAD_REQUEST
         
-        # Build query with WHERE clause
+        if market_param and market_upper not in valid_market_set:
+            return jsonify({"error": f"Invalid MARKET: '{market_param}' is not available in the database"}), status.HTTP_400_BAD_REQUEST
+        
+        # Build query with optional WHERE clause based on parameters
         query = f"SELECT * FROM {INSIGHT_KEY_MSG_TABLE}"
         where_conditions = []
         
-        where_conditions.append(f"UPPER(TRIM(BRAND)) = '{_sq(brand_upper)}'")
-        where_conditions.append(f"UPPER(TRIM(MARKET)) = '{_sq(market_upper)}'")
+        if brand_param:
+            where_conditions.append(f"UPPER(TRIM(BRAND)) = '{_sq(brand_upper)}'")
         
-        query += " WHERE " + " AND ".join(where_conditions)
+        if market_param:
+            where_conditions.append(f"UPPER(TRIM(MARKET)) = '{_sq(market_upper)}'")
+        
+        if where_conditions:
+            query += " WHERE " + " AND ".join(where_conditions)
         
         print(f"Executing query: {query}")
         
@@ -359,33 +359,33 @@ def insight_key_obj_get_data():
         brand_param = _clean(body.get("BRAND", ""))
         market_param = _clean(body.get("MARKET", ""))
         
-        # Validate that BRAND and MARKET are provided
-        if not brand_param or not market_param:
-            return jsonify({"error": "Both BRAND and MARKET are required in request body"}), status.HTTP_400_BAD_REQUEST
-        
         # Validate BRAND and MARKET against master table
         valid_markets_brands = _get_valid_markets_brands(force_refresh=True)
         
-        brand_upper = brand_param.upper()
-        market_upper = market_param.upper()
+        brand_upper = brand_param.upper() if brand_param else ""
+        market_upper = market_param.upper() if market_param else ""
         
         valid_market_set = {m.upper() for m in valid_markets_brands.get("markets", [])}
         valid_brand_set = {b.upper() for b in valid_markets_brands.get("brands", [])}
         
-        if market_upper not in valid_market_set:
-            return jsonify({"error": f"Invalid MARKET: '{market_param}' is not available in the database"}), status.HTTP_400_BAD_REQUEST
-        
-        if brand_upper not in valid_brand_set:
+        if brand_param and brand_upper not in valid_brand_set:
             return jsonify({"error": f"Invalid BRAND: '{brand_param}' is not available in the database"}), status.HTTP_400_BAD_REQUEST
         
-        # Build query with WHERE clause
+        if market_param and market_upper not in valid_market_set:
+            return jsonify({"error": f"Invalid MARKET: '{market_param}' is not available in the database"}), status.HTTP_400_BAD_REQUEST
+        
+        # Build query with optional WHERE clause based on parameters
         query = f"SELECT * FROM {INSIGHT_KEY_OBJ_TABLE}"
         where_conditions = []
         
-        where_conditions.append(f"UPPER(TRIM(BRAND)) = '{_sq(brand_upper)}'")
-        where_conditions.append(f"UPPER(TRIM(MARKET)) = '{_sq(market_upper)}'")
+        if brand_param:
+            where_conditions.append(f"UPPER(TRIM(BRAND)) = '{_sq(brand_upper)}'")
         
-        query += " WHERE " + " AND ".join(where_conditions)
+        if market_param:
+            where_conditions.append(f"UPPER(TRIM(MARKET)) = '{_sq(market_upper)}'")
+        
+        if where_conditions:
+            query += " WHERE " + " AND ".join(where_conditions)
         
         print(f"Executing query: {query}")
         
