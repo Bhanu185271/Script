@@ -1,717 +1,214 @@
+-- =====================================================
+-- Stored Procedure: Update FFN Insight Config Main Table
+-- Purpose: Insert data from 5 intermediate tables into main table
+-- Frequency: Runs 2 times daily
+-- =====================================================
+
+CREATE OR REPLACE PROCEDURE hive_metastore.fieldforce_navigator_deployment.sp_update_ffn_insight_config()
+LANGUAGE SQL
+AS
+BEGIN
+  
+  DECLARE v_row_count INT DEFAULT 0;
+  DECLARE v_total_inserted INT DEFAULT 0;
+  DECLARE v_error_msg STRING DEFAULT '';
+  
+  -- Start transaction
+  BEGIN
+    
+    -- =====================================================
+    -- STEP 1: Insert from Intermediate Table 1 (Key Messages)
+    -- =====================================================
+    INSERT INTO hive_metastore.fieldforce_navigator_deployment.d_ffn_insight_config
+    (BRAND, MARKET, INSIGHT, TYPE, VALUE_1, VALUE_2, VALUE_3, VALUE_4, ADDED_BY, ENTRY_TIME)
+    SELECT 
+      t1.BRAND,
+      t1.MARKET,
+      'mkt-key-messages-categorization-insight' AS INSIGHT,
+      'Market_Intelligence' AS TYPE,
+      t1.MESSAGE AS VALUE_1,
+      NULL AS VALUE_2,
+      NULL AS VALUE_3,
+      NULL AS VALUE_4,
+      'SYSTEM' AS ADDED_BY,
+      t1.DATE_ADDED AS ENTRY_TIME
+    FROM hive_metastore.fieldforce_navigator_deployment.d_ffn_insight_key_msg_config t1
+    WHERE t1.DATE_ADDED = CURRENT_DATE()
+      AND NOT EXISTS (
+        SELECT 1 
+        FROM hive_metastore.fieldforce_navigator_deployment.d_ffn_insight_config main
+        WHERE main.MARKET = t1.MARKET
+          AND main.BRAND = t1.BRAND
+          AND main.VALUE_1 = t1.MESSAGE
+          AND main.INSIGHT = 'mkt-key-messages-categorization-insight'
+          AND main.ENTRY_TIME = t1.DATE_ADDED
+      );
+    
+    SET v_row_count = ROW_COUNT();
+    SET v_total_inserted = v_total_inserted + v_row_count;
+    SELECT CONCAT('Table 1 (Key Messages): ', v_row_count, ' rows inserted');
+    
+    
+    -- =====================================================
+    -- STEP 2: Insert from Intermediate Table 2 (Key Objections)
+    -- =====================================================
+    INSERT INTO hive_metastore.fieldforce_navigator_deployment.d_ffn_insight_config
+    (BRAND, MARKET, INSIGHT, TYPE, VALUE_1, VALUE_2, VALUE_3, VALUE_4, ADDED_BY, ENTRY_TIME)
+    SELECT 
+      t2.BRAND,
+      t2.MARKET,
+      'mkt-objections-categorization-insight' AS INSIGHT,
+      'Market_Intelligence' AS TYPE,
+      t2.OBJECTION AS VALUE_1,
+      NULL AS VALUE_2,
+      NULL AS VALUE_3,
+      NULL AS VALUE_4,
+      'SYSTEM' AS ADDED_BY,
+      t2.DATE_ADDED AS ENTRY_TIME
+    FROM hive_metastore.fieldforce_navigator_deployment.d_ffn_insight_key_obj_config t2
+    WHERE t2.DATE_ADDED = CURRENT_DATE()
+      AND NOT EXISTS (
+        SELECT 1 
+        FROM hive_metastore.fieldforce_navigator_deployment.d_ffn_insight_config main
+        WHERE main.MARKET = t2.MARKET
+          AND main.BRAND = t2.BRAND
+          AND main.VALUE_1 = t2.OBJECTION
+          AND main.INSIGHT = 'mkt-objections-categorization-insight'
+          AND main.ENTRY_TIME = t2.DATE_ADDED
+      );
+    
+    SET v_row_count = ROW_COUNT();
+    SET v_total_inserted = v_total_inserted + v_row_count;
+    SELECT CONCAT('Table 2 (Key Objections): ', v_row_count, ' rows inserted');
+    
+    
+    -- =====================================================
+    -- STEP 3: Insert from Intermediate Table 3 (Brand Studies)
+    -- =====================================================
+    INSERT INTO hive_metastore.fieldforce_navigator_deployment.d_ffn_insight_config
+    (BRAND, MARKET, INSIGHT, TYPE, VALUE_1, VALUE_2, VALUE_3, VALUE_4, ADDED_BY, ENTRY_TIME)
+    SELECT 
+      t3.BRAND,
+      t3.MARKET,
+      'medical-word-reassignment' AS INSIGHT,
+      'STUDY' AS TYPE,
+      t3.STUDY_NAME AS VALUE_1,
+      NULL AS VALUE_2,
+      NULL AS VALUE_3,
+      NULL AS VALUE_4,
+      'SYSTEM' AS ADDED_BY,
+      t3.DATE_ADDED AS ENTRY_TIME
+    FROM hive_metastore.fieldforce_navigator_deployment.d_ffn_insight_brand_studies_config t3
+    WHERE t3.DATE_ADDED = CURRENT_DATE()
+      AND NOT EXISTS (
+        SELECT 1 
+        FROM hive_metastore.fieldforce_navigator_deployment.d_ffn_insight_config main
+        WHERE main.MARKET = t3.MARKET
+          AND main.BRAND = t3.BRAND
+          AND main.VALUE_1 = t3.STUDY_NAME
+          AND main.INSIGHT = 'medical-word-reassignment'
+          AND main.TYPE = 'STUDY'
+          AND main.ENTRY_TIME = t3.DATE_ADDED
+      );
+    
+    SET v_row_count = ROW_COUNT();
+    SET v_total_inserted = v_total_inserted + v_row_count;
+    SELECT CONCAT('Table 3 (Brand Studies): ', v_row_count, ' rows inserted');
+    
+    
+    -- =====================================================
+    -- STEP 4: Insert from Intermediate Table 4 (Medical Terms)
+    -- =====================================================
+    INSERT INTO hive_metastore.fieldforce_navigator_deployment.d_ffn_insight_config
+    (BRAND, MARKET, INSIGHT, TYPE, VALUE_1, VALUE_2, VALUE_3, VALUE_4, ADDED_BY, ENTRY_TIME)
+    SELECT 
+      t4.BRAND,
+      t4.MARKET,
+      'medical-word-reassignment' AS INSIGHT,
+      'TERM' AS TYPE,
+      t4.TERM AS VALUE_1,
+      NULL AS VALUE_2,
+      NULL AS VALUE_3,
+      NULL AS VALUE_4,
+      'SYSTEM' AS ADDED_BY,
+      t4.DATE_ADDED AS ENTRY_TIME
+    FROM hive_metastore.fieldforce_navigator_deployment.d_ffn_insight_medical_term_config t4
+    WHERE t4.DATE_ADDED = CURRENT_DATE()
+      AND NOT EXISTS (
+        SELECT 1 
+        FROM hive_metastore.fieldforce_navigator_deployment.d_ffn_insight_config main
+        WHERE main.MARKET = t4.MARKET
+          AND main.BRAND = t4.BRAND
+          AND main.VALUE_1 = t4.TERM
+          AND main.INSIGHT = 'medical-word-reassignment'
+          AND main.TYPE = 'TERM'
+          AND main.ENTRY_TIME = t4.DATE_ADDED
+      );
+    
+    SET v_row_count = ROW_COUNT();
+    SET v_total_inserted = v_total_inserted + v_row_count;
+    SELECT CONCAT('Table 4 (Medical Terms): ', v_row_count, ' rows inserted');
+    
+    
+    -- =====================================================
+    -- STEP 5: Insert from Intermediate Table 5 (Brand Abbreviations)
+    -- With JSON formatted concatenation
+    -- =====================================================
+    INSERT INTO hive_metastore.fieldforce_navigator_deployment.d_ffn_insight_config
+    (BRAND, MARKET, INSIGHT, TYPE, VALUE_1, VALUE_2, VALUE_3, VALUE_4, ADDED_BY, ENTRY_TIME)
+    SELECT 
+      t5.BRAND,
+      t5.MARKET,
+      'medical-word-reassignment' AS INSIGHT,
+      'ABBRV' AS TYPE,
       CONCAT('{"term":"', t5.TERM, '","definition":"', t5.DEFINITION, '"}') AS VALUE_1,
-
-
-
-###############################################
-# INSIGHT CONFIG - Key Messages (Updated & Optimized)
-###############################################
-
-INSIGHT_KEY_MSG_TABLE = "hive_metastore.fieldforce_navigator_deployment.d_ffn_insight_key_msg_config"
-MARKET_BRAND_TABLE = "hive_metastore.fieldforce_navigator_deployment.audio_market_brand_config"
-
-EXCEL_TO_DB_MAPPING_KEY_MSG = {
-    "Market": "MARKET",
-    "Brand": "BRAND",
-    "SOB (If Applicable)": "SOB",
-    "Message Group": "MESSAGE_GROUP",
-    "Specialty": "SPECIALTY",
-    "Message": "MESSAGE"
-}
-
-TARGET_SHEET_NAME_KEY_MSG = "Brand - Key Messages"
-
-# Optimized batch size for queries
-QUERY_BATCH_SIZE = 100
-MAX_RECORDS_PER_QUERY = 500
-
-def _process_template_excel_key_msg(file_obj):
-    try:
-        excel_file = pd.ExcelFile(file_obj, engine="openpyxl")
-        
-        if TARGET_SHEET_NAME_KEY_MSG not in excel_file.sheet_names:
-            raise ValueError(f"Sheet '{TARGET_SHEET_NAME_KEY_MSG}' not found")
-        
-        df = pd.read_excel(file_obj, sheet_name=TARGET_SHEET_NAME_KEY_MSG, header=HEADER_ROW_INDEX, engine="openpyxl")
-        
-        if len(df.columns) > 0:
-            df = df.iloc[:, 1:]
-        
-        df.columns = [str(c).strip() for c in df.columns]
-        df = df.replace({pd.NA: "", None: ""}).fillna("")
-        
-        df['_excel_row_num'] = range(4, 4 + len(df))
-        df = df[df.drop('_excel_row_num', axis=1).astype(str).apply(lambda x: x.str.strip().str.len().sum(), axis=1) > 0]
-        
-        mandatory_cols = ["Market", "Brand", "Message"]
-        missing = [col for col in mandatory_cols if col not in df.columns]
-        
-        if missing:
-            raise ValueError(f"Missing columns: {', '.join(missing)}")
-        
-        mapped_data = []
-        
-        for idx, row in df.iterrows():
-            excel_row_num = int(row['_excel_row_num'])
-            mapped_row = {}
-            
-            for excel_col, db_col in EXCEL_TO_DB_MAPPING_KEY_MSG.items():
-                if excel_col in df.columns:
-                    mapped_row[db_col] = _clean(row.get(excel_col, ""))
-                else:
-                    mapped_row[db_col] = ""
-            
-            if mapped_row.get("MARKET") and mapped_row.get("BRAND") and mapped_row.get("MESSAGE"):
-                mapped_data.append((excel_row_num, mapped_row))
-        
-        return mapped_data, None
-        
-    except Exception as e:
-        raise Exception(f"Error processing Excel: {str(e)}")
-
-
-def _chunk_list(lst, chunk_size):
-    """Helper function to split list into chunks"""
-    for i in range(0, len(lst), chunk_size):
-        yield lst[i:i + chunk_size]
-
-
-@app.route("/d_ffn_insight_config_key_msg/get_data", methods=["POST"])
-@cross_origin()
-def insight_key_msg_get_data():
-    try:
-        # Get parameters from POST request body
-        body = request.get_json(force=True, silent=True) or {}
-        brand_param = _clean(body.get("BRAND", ""))
-        market_param = _clean(body.get("MARKET", ""))
-        
-        # Pagination parameters
-        page = int(body.get("page", 1))
-        limit = int(body.get("limit", 100))
-        offset = (page - 1) * limit
-        
-        # Validate BRAND and MARKET against master table
-        valid_markets_brands = _get_valid_markets_brands(force_refresh=True)
-        
-        brand_upper = brand_param.upper() if brand_param else ""
-        market_upper = market_param.upper() if market_param else ""
-        
-        valid_market_set = {m.upper() for m in valid_markets_brands.get("markets", [])}
-        valid_brand_set = {b.upper() for b in valid_markets_brands.get("brands", [])}
-        
-        if brand_param and brand_upper not in valid_brand_set:
-            return jsonify({"error": f"Invalid BRAND: '{brand_param}' is not available in the database"}), status.HTTP_400_BAD_REQUEST
-        
-        if market_param and market_upper not in valid_market_set:
-            return jsonify({"error": f"Invalid MARKET: '{market_param}' is not available in the database"}), status.HTTP_400_BAD_REQUEST
-        
-        # Build count query first to get total records
-        count_query = f"SELECT COUNT(*) as total FROM {INSIGHT_KEY_MSG_TABLE}"
-        where_conditions = []
-        
-        if brand_param:
-            where_conditions.append(f"UPPER(TRIM(BRAND)) = '{_sq(brand_upper)}'")
-        
-        if market_param:
-            where_conditions.append(f"UPPER(TRIM(MARKET)) = '{_sq(market_upper)}'")
-        
-        if where_conditions:
-            count_query += " WHERE " + " AND ".join(where_conditions)
-        
-        # Get total count
-        count_df = dc.execute_query(count_query)
-        total_records = int(count_df.iloc[0]['total']) if count_df is not None and not count_df.empty else 0
-        
-        if total_records == 0:
-            return jsonify({
-                "data": [],
-                "pagination": {
-                    "page": page,
-                    "limit": limit,
-                    "total_records": 0,
-                    "total_pages": 0
-                }
-            }), status.HTTP_200_OK
-        
-        # Calculate total pages
-        total_pages = math.ceil(total_records / limit)
-        
-        # Build paginated query
-        query = f"SELECT * FROM {INSIGHT_KEY_MSG_TABLE}"
-        if where_conditions:
-            query += " WHERE " + " AND ".join(where_conditions)
-        query += f" LIMIT {limit} OFFSET {offset}"
-        
-        print(f"Executing query: {query}")
-        
-        # Execute paginated query
-        sample_df = dc.execute_query(query)
-        
-        # Initialize result array
-        result = []
-        
-        # If data exists, convert each row to JSON with id
-        if sample_df is not None and not sample_df.empty:
-            for idx, row in sample_df.iterrows():
-                # Create row object with id as first field using OrderedDict
-                from collections import OrderedDict
-                row_obj = OrderedDict()
-                row_obj["id"] = str(offset + idx + 1)
-                
-                # Add all columns from the table
-                for col in sample_df.columns:
-                    value = row[col]
-                    # Convert NaN, None, or "null" to empty string
-                    if pd.isna(value) or value == "" or str(value).strip().lower() == "null":
-                        row_obj[col] = ""
-                    else:
-                        row_obj[col] = str(value)
-                
-                result.append(row_obj)
-        
-        response = {
-            "data": result,
-            "pagination": {
-                "page": page,
-                "limit": limit,
-                "total_records": total_records,
-                "total_pages": total_pages,
-                "has_next": page < total_pages,
-                "has_prev": page > 1
-            }
-        }
-        
-        return jsonify(response), status.HTTP_200_OK
-        
-    except Exception as e:
-        import traceback
-        print("ERROR:", traceback.format_exc())
-        return jsonify({"error": f"Internal error: {str(e)}"}), status.HTTP_500_INTERNAL_SERVER_ERROR
-
-
-@app.route("/d_ffn_insight_config_key_msg", methods=["POST"])
-@cross_origin()
-def insight_key_msg_post():
-    try:
-        added_by = _clean(request.headers.get("Username", "") or "")
-        if not added_by:
-            return jsonify({"error": "Missing Username"}), status.HTTP_400_BAD_REQUEST
-
-        page = int(request.args.get("page", 1))
-        limit = int(request.args.get("limit", 50))
-        offset = (page - 1) * limit
-
-        valid_markets_brands = _get_valid_markets_brands(force_refresh=True)
-
-        rows = []
-        is_excel_mode = False
-
-        if "file" in request.files:
-            is_excel_mode = True
-            f = request.files["file"]
-            
-            if not (f.filename or "").lower().endswith(".xlsx"):
-                return jsonify({"error": "Only .xlsx files"}), status.HTTP_400_BAD_REQUEST
-
-            try:
-                rows, _ = _process_template_excel_key_msg(f)
-            except Exception as e:
-                return jsonify({"error": str(e)}), status.HTTP_400_BAD_REQUEST
-        else:
-            body = request.get_json(force=True, silent=True) or {}
-            items = body if isinstance(body, list) else [body]
-
-            for i, rec in enumerate(items, start=1):
-                market = _clean(rec.get("MARKET", ""))
-                brand = _clean(rec.get("BRAND", ""))
-                message = _clean(rec.get("MESSAGE", ""))
-
-                if not market or not brand or not message:
-                    return jsonify({"error": f"Item {i}: Missing required fields (MARKET, BRAND, MESSAGE)"}), status.HTTP_400_BAD_REQUEST
-
-                rows.append((i, {
-                    "MARKET": market,
-                    "BRAND": brand,
-                    "SOB": _clean(rec.get("SOB", "")),
-                    "MESSAGE_GROUP": _clean(rec.get("MESSAGE_GROUP", "")),
-                    "SPECIALTY": _clean(rec.get("SPECIALTY", "")),
-                    "MESSAGE": message
-                }))
-
-        if not rows:
-            return jsonify({"error": "No rows"}), status.HTTP_400_BAD_REQUEST
-
-        # vectorized validation
-        all_markets = {r[1]["MARKET"].upper() for r in rows}
-        all_brands = {r[1]["BRAND"].upper() for r in rows}
-
-        valid_market_set = {m.upper() for m in valid_markets_brands.get("markets", [])}
-        valid_brand_set = {b.upper() for b in valid_markets_brands.get("brands", [])}
-
-        invalid_mkts = [{"MARKET": m, "reason": "Invalid MARKET"} for m in all_markets if m not in valid_market_set]
-        invalid_brnds = [{"BRAND": b, "reason": "Invalid BRAND"} for b in all_brands if b not in valid_brand_set]
-
-        if invalid_mkts or invalid_brnds:
-            return jsonify({"status": "error", "invalid_markets": invalid_mkts, "invalid_brands": invalid_brnds}), status.HTTP_400_BAD_REQUEST
-
-        # Optimized batch duplicate check with chunking
-        inserted_rows, duplicates, errors = [], [], []
-        existing_set = set()
-        
-        # Process in chunks to avoid timeout
-        for chunk in _chunk_list(rows, QUERY_BATCH_SIZE):
-            check_vals = []
-            for r in chunk:
-                row_data = r[1]
-                check_vals.append(
-                    f"(UPPER(TRIM(MARKET)) = '{_sq(row_data['MARKET'].upper())}' AND "
-                    f"UPPER(TRIM(BRAND)) = '{_sq(row_data['BRAND'].upper())}' AND "
-                    f"TRIM(MESSAGE) = '{_sq(row_data['MESSAGE'])}')"
-                )
-
-            check_query = f"""
-                SELECT UPPER(TRIM(MARKET)) as MARKET, UPPER(TRIM(BRAND)) as BRAND,
-                       TRIM(MESSAGE) as MESSAGE
-                FROM {INSIGHT_KEY_MSG_TABLE}
-                WHERE {' OR '.join(check_vals)}
-            """
-            
-            existing = dc.execute_query(check_query)
-            if existing is not None and not existing.empty:
-                for _, row in existing.iterrows():
-                    existing_set.add((row['MARKET'], row['BRAND'], row['MESSAGE']))
-
-        # Process inserts in batches
-        batch_inserts = []
-        batch_counter = 0
-
-        for r in rows:
-            try:
-                row_num, row_data = r
-                market = row_data["MARKET"].upper()
-                brand = row_data["BRAND"].upper()
-                
-                key = (market, brand, row_data["MESSAGE"])
-
-                if key in existing_set:
-                    duplicates.append({"excel_row": row_num, "MARKET": market, "BRAND": brand})
-                    continue
-
-                sob_val = "NULL" if not row_data.get("SOB") else f"'{_sq(row_data['SOB'])}'"
-                msg_grp_val = "NULL" if not row_data.get("MESSAGE_GROUP") else f"'{_sq(row_data['MESSAGE_GROUP'])}'"
-                specialty_val = "NULL" if not row_data.get("SPECIALTY") else f"'{_sq(row_data['SPECIALTY'])}'"
-
-                batch_inserts.append(
-                    f"('{_sq(market)}', '{_sq(brand)}', {sob_val}, {msg_grp_val}, {specialty_val}, "
-                    f"'{_sq(row_data['MESSAGE'])}', CURRENT_TIMESTAMP())"
-                )
-
-                inserted_rows.append({"excel_row": row_num, "MARKET": market, "BRAND": brand})
-                batch_counter += 1
-
-                # Execute batch insert when reaching batch size
-                if batch_counter >= QUERY_BATCH_SIZE:
-                    insert_query = f"""
-                        INSERT INTO {INSIGHT_KEY_MSG_TABLE}
-                        (MARKET, BRAND, SOB, MESSAGE_GROUP, SPECIALTY, MESSAGE, DATE_ADDED)
-                        VALUES {','.join(batch_inserts)}
-                    """
-                    dc.execute_non_query(insert_query)
-                    batch_inserts = []
-                    batch_counter = 0
-
-            except Exception as e:
-                errors.append({"excel_row": row_num, "error": str(e)})
-
-        # Insert remaining records
-        if batch_inserts:
-            insert_query = f"""
-                INSERT INTO {INSIGHT_KEY_MSG_TABLE}
-                (MARKET, BRAND, SOB, MESSAGE_GROUP, SPECIALTY, MESSAGE, DATE_ADDED)
-                VALUES {','.join(batch_inserts)}
-            """
-            dc.execute_non_query(insert_query)
-
-        # pagination
-        total_rows = len(rows)
-        total_pages = math.ceil(total_rows / limit)
-        start, end = offset, min(offset + limit, total_rows)
-
-        response = {
-            "status": "success" if inserted_rows else "no-change",
-            "mode": "excel-template" if is_excel_mode else "json",
-            "page": page,
-            "limit": limit,
-            "total_rows": total_rows,
-            "total_pages": total_pages,
-            "inserted_count": len(inserted_rows),
-            "duplicate_count": len(duplicates),
-            "inserted_rows": inserted_rows[start:end],
-            "duplicates": duplicates[start:end],
-            "errors": errors[start:end]
-        }
-
-        response = {k: v for k, v in response.items() if v is not None and not (isinstance(v, list) and len(v) == 0)}
-
-        return jsonify(response), status.HTTP_201_CREATED if inserted_rows else status.HTTP_200_OK
-
-    except Exception as e:
-        import traceback
-        print("ERROR:", traceback.format_exc())
-        return jsonify({"error": f"Internal error: {str(e)}"}), status.HTTP_500_INTERNAL_SERVER_ERROR
-
-
-###############################################
-# ENDPOINT 2: KEY OBJECTIONS (Updated & Optimized)
-###############################################
-
-INSIGHT_KEY_OBJ_TABLE = "hive_metastore.fieldforce_navigator_deployment.d_ffn_insight_key_obj_config"
-
-EXCEL_TO_DB_MAPPING_KEY_OBJ = {
-    "Market": "MARKET",
-    "Brand": "BRAND",
-    "Objection Group": "OBJECTION_GROUP",
-    "Objection": "OBJECTION",
-    "Acknowledge": "ACKNOWLEDGE",
-    "Probe": "PROBE",
-    "Answer": "ANSWER",
-    "Confirmation": "CONFIRMATION",
-    "Transition": "TRANSITION"
-}
-
-TARGET_SHEET_NAME_KEY_OBJ = "Brand - Objections & Handlers"
-
-def _process_template_excel_key_obj(file_obj):
-    try:
-        excel_file = pd.ExcelFile(file_obj, engine="openpyxl")
-        
-        if TARGET_SHEET_NAME_KEY_OBJ not in excel_file.sheet_names:
-            raise ValueError(f"Sheet '{TARGET_SHEET_NAME_KEY_OBJ}' not found")
-        
-        df = pd.read_excel(file_obj, sheet_name=TARGET_SHEET_NAME_KEY_OBJ, header=HEADER_ROW_INDEX, engine="openpyxl")
-        
-        if len(df.columns) > 0:
-            df = df.iloc[:, 1:]
-        
-        df.columns = [str(c).strip() for c in df.columns]
-        df = df.replace({pd.NA: "", None: ""}).fillna("")
-        
-        df['_excel_row_num'] = range(4, 4 + len(df))
-        df = df[df.drop('_excel_row_num', axis=1).astype(str).apply(lambda x: x.str.strip().str.len().sum(), axis=1) > 0]
-        
-        mandatory_cols = ["Market", "Brand", "Objection"]
-        missing = [col for col in mandatory_cols if col not in df.columns]
-        
-        if missing:
-            raise ValueError(f"Missing columns: {', '.join(missing)}")
-        
-        mapped_data = []
-        
-        for idx, row in df.iterrows():
-            excel_row_num = int(row['_excel_row_num'])
-            mapped_row = {}
-            
-            for excel_col, db_col in EXCEL_TO_DB_MAPPING_KEY_OBJ.items():
-                if excel_col in df.columns:
-                    mapped_row[db_col] = _clean(row.get(excel_col, ""))
-                else:
-                    mapped_row[db_col] = ""
-            
-            if mapped_row.get("MARKET") and mapped_row.get("BRAND") and mapped_row.get("OBJECTION"):
-                mapped_data.append((excel_row_num, mapped_row))
-        
-        return mapped_data, None
-        
-    except Exception as e:
-        raise Exception(f"Error processing Excel: {str(e)}")
-
-
-@app.route("/d_ffn_insight_config_key_obj/get_data", methods=["POST"])
-@cross_origin()
-def insight_key_obj_get_data():
-    try:
-        # Get parameters from POST request body
-        body = request.get_json(force=True, silent=True) or {}
-        brand_param = _clean(body.get("BRAND", ""))
-        market_param = _clean(body.get("MARKET", ""))
-        
-        # Pagination parameters
-        page = int(body.get("page", 1))
-        limit = int(body.get("limit", 100))
-        offset = (page - 1) * limit
-        
-        # Validate BRAND and MARKET against master table
-        valid_markets_brands = _get_valid_markets_brands(force_refresh=True)
-        
-        brand_upper = brand_param.upper() if brand_param else ""
-        market_upper = market_param.upper() if market_param else ""
-        
-        valid_market_set = {m.upper() for m in valid_markets_brands.get("markets", [])}
-        valid_brand_set = {b.upper() for b in valid_markets_brands.get("brands", [])}
-        
-        if brand_param and brand_upper not in valid_brand_set:
-            return jsonify({"error": f"Invalid BRAND: '{brand_param}' is not available in the database"}), status.HTTP_400_BAD_REQUEST
-        
-        if market_param and market_upper not in valid_market_set:
-            return jsonify({"error": f"Invalid MARKET: '{market_param}' is not available in the database"}), status.HTTP_400_BAD_REQUEST
-        
-        # Build count query first to get total records
-        count_query = f"SELECT COUNT(*) as total FROM {INSIGHT_KEY_OBJ_TABLE}"
-        where_conditions = []
-        
-        if brand_param:
-            where_conditions.append(f"UPPER(TRIM(BRAND)) = '{_sq(brand_upper)}'")
-        
-        if market_param:
-            where_conditions.append(f"UPPER(TRIM(MARKET)) = '{_sq(market_upper)}'")
-        
-        if where_conditions:
-            count_query += " WHERE " + " AND ".join(where_conditions)
-        
-        # Get total count
-        count_df = dc.execute_query(count_query)
-        total_records = int(count_df.iloc[0]['total']) if count_df is not None and not count_df.empty else 0
-        
-        if total_records == 0:
-            return jsonify({
-                "data": [],
-                "pagination": {
-                    "page": page,
-                    "limit": limit,
-                    "total_records": 0,
-                    "total_pages": 0
-                }
-            }), status.HTTP_200_OK
-        
-        # Calculate total pages
-        total_pages = math.ceil(total_records / limit)
-        
-        # Build paginated query
-        query = f"SELECT * FROM {INSIGHT_KEY_OBJ_TABLE}"
-        if where_conditions:
-            query += " WHERE " + " AND ".join(where_conditions)
-        query += f" LIMIT {limit} OFFSET {offset}"
-        
-        print(f"Executing query: {query}")
-        
-        # Execute paginated query
-        sample_df = dc.execute_query(query)
-        
-        # Initialize result array
-        result = []
-        
-        # If data exists, convert each row to JSON with id
-        if sample_df is not None and not sample_df.empty:
-            for idx, row in sample_df.iterrows():
-                # Create row object with id as first field using OrderedDict
-                from collections import OrderedDict
-                row_obj = OrderedDict()
-                row_obj["id"] = str(offset + idx + 1)
-                
-                # Add all columns from the table
-                for col in sample_df.columns:
-                    value = row[col]
-                    # Convert NaN, None, or "null" to empty string
-                    if pd.isna(value) or value == "" or str(value).strip().lower() == "null":
-                        row_obj[col] = ""
-                    else:
-                        row_obj[col] = str(value)
-                
-                result.append(row_obj)
-        
-        response = {
-            "data": result,
-            "pagination": {
-                "page": page,
-                "limit": limit,
-                "total_records": total_records,
-                "total_pages": total_pages,
-                "has_next": page < total_pages,
-                "has_prev": page > 1
-            }
-        }
-        
-        return jsonify(response), status.HTTP_200_OK
-        
-    except Exception as e:
-        import traceback
-        print("ERROR:", traceback.format_exc())
-        return jsonify({"error": f"Internal error: {str(e)}"}), status.HTTP_500_INTERNAL_SERVER_ERROR
-
-
-@app.route("/d_ffn_insight_config_key_obj", methods=["POST"])
-@cross_origin()
-def insight_key_obj_post():
-    try:
-        added_by = _clean(request.headers.get("Username", "") or "")
-        if not added_by:
-            return jsonify({"error": "Missing Username"}), status.HTTP_400_BAD_REQUEST
-
-        page = int(request.args.get("page", 1))
-        limit = int(request.args.get("limit", 50))
-        offset = (page - 1) * limit
-
-        # Get valid markets and brands from master table
-        valid_markets_brands = _get_valid_markets_brands(force_refresh=True)
-
-        rows = []
-        is_excel_mode = False
-
-        if "file" in request.files:
-            is_excel_mode = True
-            f = request.files["file"]
-            
-            if not (f.filename or "").lower().endswith(".xlsx"):
-                return jsonify({"error": "Only .xlsx files"}), status.HTTP_400_BAD_REQUEST
-
-            try:
-                rows, _ = _process_template_excel_key_obj(f)
-            except Exception as e:
-                return jsonify({"error": str(e)}), status.HTTP_400_BAD_REQUEST
-        else:
-            body = request.get_json(force=True, silent=True) or {}
-            items = body if isinstance(body, list) else [body]
-
-            for i, rec in enumerate(items, start=1):
-                market = _clean(rec.get("MARKET", ""))
-                brand = _clean(rec.get("BRAND", ""))
-                objection = _clean(rec.get("OBJECTION", ""))
-
-                if not market or not brand or not objection:
-                    return jsonify({"error": f"Item {i}: Missing required fields (MARKET, BRAND, OBJECTION)"}), status.HTTP_400_BAD_REQUEST
-
-                rows.append((i, {
-                    "MARKET": market,
-                    "BRAND": brand,
-                    "OBJECTION_GROUP": _clean(rec.get("OBJECTION_GROUP", "")),
-                    "OBJECTION": objection,
-                    "ACKNOWLEDGE": _clean(rec.get("ACKNOWLEDGE", "")),
-                    "PROBE": _clean(rec.get("PROBE", "")),
-                    "ANSWER": _clean(rec.get("ANSWER", "")),
-                    "CONFIRMATION": _clean(rec.get("CONFIRMATION", "")),
-                    "TRANSITION": _clean(rec.get("TRANSITION", ""))
-                }))
-
-        if not rows:
-            return jsonify({"error": "No rows"}), status.HTTP_400_BAD_REQUEST
-
-        # Vectorized validation against master table
-        all_markets = {r[1]["MARKET"].upper() for r in rows}
-        all_brands = {r[1]["BRAND"].upper() for r in rows}
-
-        valid_market_set = {m.upper() for m in valid_markets_brands.get("markets", [])}
-        valid_brand_set = {b.upper() for b in valid_markets_brands.get("brands", [])}
-
-        invalid_mkts = [{"MARKET": m, "reason": "Invalid MARKET"} for m in all_markets if m not in valid_market_set]
-        invalid_brnds = [{"BRAND": b, "reason": "Invalid BRAND"} for b in all_brands if b not in valid_brand_set]
-
-        if invalid_mkts or invalid_brnds:
-            return jsonify({"status": "error", "invalid_markets": invalid_mkts, "invalid_brands": invalid_brnds}), status.HTTP_400_BAD_REQUEST
-
-        # Optimized batch duplicate check with chunking
-        inserted_rows, duplicates, errors = [], [], []
-        existing_set = set()
-        
-        # Process in chunks to avoid timeout
-        for chunk in _chunk_list(rows, QUERY_BATCH_SIZE):
-            check_vals = []
-            for r in chunk:
-                row_data = r[1]
-                check_vals.append(
-                    f"(UPPER(TRIM(MARKET)) = '{_sq(row_data['MARKET'].upper())}' AND "
-                    f"UPPER(TRIM(BRAND)) = '{_sq(row_data['BRAND'].upper())}' AND "
-                    f"TRIM(OBJECTION) = '{_sq(row_data['OBJECTION'])}')"
-                )
-
-            check_query = f"""
-                SELECT UPPER(TRIM(MARKET)) as MARKET, UPPER(TRIM(BRAND)) as BRAND,
-                       TRIM(OBJECTION) as OBJECTION
-                FROM {INSIGHT_KEY_OBJ_TABLE}
-                WHERE {' OR '.join(check_vals)}
-            """
-            
-            existing = dc.execute_query(check_query)
-            if existing is not None and not existing.empty:
-                for _, row in existing.iterrows():
-                    existing_set.add((row['MARKET'], row['BRAND'], row['OBJECTION']))
-
-        # Process inserts in batches
-        batch_inserts = []
-        batch_counter = 0
-
-        for r in rows:
-            try:
-                row_num, row_data = r
-                market = row_data["MARKET"].upper()
-                brand = row_data["BRAND"].upper()
-                
-                key = (market, brand, row_data["OBJECTION"])
-
-                if key in existing_set:
-                    duplicates.append({"excel_row": row_num, "MARKET": market, "BRAND": brand})
-                    continue
-
-                obj_grp_val = "NULL" if not row_data.get("OBJECTION_GROUP") else f"'{_sq(row_data['OBJECTION_GROUP'])}'"
-                ack_val = "NULL" if not row_data.get("ACKNOWLEDGE") else f"'{_sq(row_data['ACKNOWLEDGE'])}'"
-                probe_val = "NULL" if not row_data.get("PROBE") else f"'{_sq(row_data['PROBE'])}'"
-                ans_val = "NULL" if not row_data.get("ANSWER") else f"'{_sq(row_data['ANSWER'])}'"
-                conf_val = "NULL" if not row_data.get("CONFIRMATION") else f"'{_sq(row_data['CONFIRMATION'])}'"
-                trans_val = "NULL" if not row_data.get("TRANSITION") else f"'{_sq(row_data['TRANSITION'])}'"
-
-                batch_inserts.append(
-                    f"('{_sq(market)}', '{_sq(brand)}', {obj_grp_val}, '{_sq(row_data['OBJECTION'])}', "
-                    f"{ack_val}, {probe_val}, {ans_val}, {conf_val}, {trans_val}, CURRENT_TIMESTAMP())"
-                )
-
-                inserted_rows.append({"excel_row": row_num, "MARKET": market, "BRAND": brand})
-                batch_counter += 1
-
-                # Execute batch insert when reaching batch size
-                if batch_counter >= QUERY_BATCH_SIZE:
-                    insert_query = f"""
-                        INSERT INTO {INSIGHT_KEY_OBJ_TABLE}
-                        (MARKET, BRAND, OBJECTION_GROUP, OBJECTION, ACKNOWLEDGE, PROBE, ANSWER, CONFIRMATION, TRANSITION, DATE_ADDED)
-                        VALUES {','.join(batch_inserts)}
-                    """
-                    dc.execute_non_query(insert_query)
-                    batch_inserts = []
-                    batch_counter = 0
-
-            except Exception as e:
-                errors.append({"excel_row": row_num, "error": str(e)})
-
-        # Insert remaining records
-        if batch_inserts:
-            insert_query = f"""
-                INSERT INTO {INSIGHT_KEY_OBJ_TABLE}
-                (MARKET, BRAND, OBJECTION_GROUP, OBJECTION, ACKNOWLEDGE, PROBE, ANSWER, CONFIRMATION, TRANSITION, DATE_ADDED)
-                VALUES {','.join(batch_inserts)}
-            """
-            dc.execute_non_query(insert_query)
-
-        # pagination
-        total_rows = len(rows)
-        total_pages = math.ceil(total_rows / limit)
-        start, end = offset, min(offset + limit, total_rows)
-
-        response = {
-            "status": "success" if inserted_rows else "no-change",
-            "mode": "excel-template" if is_excel_mode else "json",
-            "page": page,
-            "limit": limit,
-            "total_rows": total_rows,
-            "total_pages": total_pages,
-            "inserted_count": len(inserted_rows),
-            "duplicate_count": len(duplicates),
-            "inserted_rows": inserted_rows[start:end],
-            "duplicates": duplicates[start:end],
-            "errors": errors[start:end]
-        }
-
-        response = {k: v for k, v in response.items() if v is not None and not (isinstance(v, list) and len(v) == 0)}
-
-        return jsonify(response), status.HTTP_201_CREATED if inserted_rows else status.HTTP_200_OK
-
-    except Exception as e:
-        import traceback
-        print("ERROR:", traceback.format_exc())
-        return jsonify({"error": f"Internal error: {str(e)}"}), status.HTTP_500_INTERNAL_SERVER_ERROR
+      NULL AS VALUE_2,
+      NULL AS VALUE_3,
+      NULL AS VALUE_4,
+      'SYSTEM' AS ADDED_BY,
+      t5.DATE_ADDED AS ENTRY_TIME
+    FROM hive_metastore.fieldforce_navigator_deployment.d_ffn_insight_brand_abbrv_config t5
+    WHERE t5.DATE_ADDED = CURRENT_DATE()
+      AND NOT EXISTS (
+        SELECT 1 
+        FROM hive_metastore.fieldforce_navigator_deployment.d_ffn_insight_config main
+        WHERE main.MARKET = t5.MARKET
+          AND main.BRAND = t5.BRAND
+          AND main.VALUE_1 = CONCAT('{"term":"', t5.TERM, '","definition":"', t5.DEFINITION, '"}')
+          AND main.INSIGHT = 'medical-word-reassignment'
+          AND main.TYPE = 'ABBRV'
+          AND main.ENTRY_TIME = t5.DATE_ADDED
+      );
+    
+    SET v_row_count = ROW_COUNT();
+    SET v_total_inserted = v_total_inserted + v_row_count;
+    SELECT CONCAT('Table 5 (Brand Abbreviations): ', v_row_count, ' rows inserted');
+    
+    
+    -- =====================================================
+    -- Summary
+    -- =====================================================
+    SELECT CONCAT('Total rows inserted across all tables: ', v_total_inserted) AS Summary;
+    
+    
+  EXCEPTION
+    WHEN OTHERS THEN
+      SET v_error_msg = CONCAT('Error occurred: ', SQLERRM());
+      SELECT v_error_msg AS Error_Message;
+      RAISE;
+  END;
+  
+END;
+
+
+-- =====================================================
+-- How to Execute the Procedure
+-- =====================================================
+-- CALL hive_metastore.fieldforce_navigator_deployment.sp_update_ffn_insight_config();
+
+
+-- =====================================================
+-- Optional: Create a Job to Schedule this procedure
+-- =====================================================
+-- You can schedule this using Databricks Jobs to run 2 times daily
+-- Example schedule: "0 9,17 * * *" (runs at 9 AM and 5 PM daily)
