@@ -1,4 +1,3 @@
-
 # Competitor Config – Individual Endpoint (Updated)
 
 COMP_TABLE = "hive_metastore.fieldforce_navigator_deployment.d_ffn_competitor_config"
@@ -271,7 +270,6 @@ def competitor_get_data():
 # Purpose: Add new competitor records to the database
 # Method: POST
 # URL: /d_ffn_competitor_config
-# (THIS ENDPOINT REMAINS UNCHANGED)
 ###############################################
 @app.route("/d_ffn_competitor_config", methods=["POST"])
 @cross_origin()
@@ -289,10 +287,13 @@ def competitor_post():
         offset = (page - 1) * limit
 
         valid_markets_brands = _get_valid_markets_brands(force_refresh=True)
+        valid_market_set = {m.upper() for m in valid_markets_brands.get("markets", [])}
+        valid_brand_set = {b.upper() for b in valid_markets_brands.get("brands", [])}
 
         rows = []
         is_excel_mode = False
         missing_columns_warning = None
+        validation_errors = []
 
         if "file" in request.files:
             is_excel_mode = True
@@ -356,27 +357,48 @@ def competitor_post():
         if not rows:
             return jsonify({"error": "No valid rows to process."}), status.HTTP_400_BAD_REQUEST
 
-        # vectorized validation - all markets/brands at once
-        all_markets = {r[1]["MARKET"].strip().upper() if isinstance(r, tuple) else r["MARKET"].strip().upper() for r in rows}
-        all_brands = {r[1]["BRAND"].strip().upper() if isinstance(r, tuple) else r["BRAND"].strip().upper() for r in rows}
+        # Row-by-row validation - don't break execution
+        validated_rows = []
+        for r in rows:
+            row_num, row_data = r
+            market_upper = row_data["MARKET"].upper()
+            brand_upper = row_data["BRAND"].upper()
+            
+            # Check if market is valid
+            if market_upper not in valid_market_set:
+                validation_errors.append({
+                    "excel_row": row_num,
+                    "MARKET": row_data["MARKET"],
+                    "BRAND": row_data["BRAND"],
+                    "reason": f"Invalid MARKET: '{row_data['MARKET']}'"
+                })
+                continue
+            
+            # Check if brand is valid
+            if brand_upper not in valid_brand_set:
+                validation_errors.append({
+                    "excel_row": row_num,
+                    "MARKET": row_data["MARKET"],
+                    "BRAND": row_data["BRAND"],
+                    "reason": f"Invalid BRAND: '{row_data['BRAND']}'"
+                })
+                continue
+            
+            # If validation passed, add to validated rows
+            validated_rows.append((row_num, row_data))
 
-        valid_market_set = {m.upper() for m in valid_markets_brands.get("markets", [])}
-        valid_brand_set = {b.upper() for b in valid_markets_brands.get("brands", [])}
-
-        invalid_markets_list = [{"MARKET": m, "reason": "Invalid MARKET"} for m in all_markets if m not in valid_market_set]
-        invalid_brands_list = [{"BRAND": b, "reason": "Invalid BRAND"} for b in all_brands if b not in valid_brand_set]
-
-        if invalid_markets_list or invalid_brands_list:
+        # If no valid rows after validation, return error
+        if not validated_rows:
             return jsonify({
                 "status": "error",
-                "invalid_markets": invalid_markets_list,
-                "invalid_brands": invalid_brands_list
+                "message": "No valid rows to process after validation",
+                "validation_errors": validation_errors
             }), status.HTTP_400_BAD_REQUEST
 
-        # batch duplicate check - single query
+        # batch duplicate check - single query for validated rows only
         check_values = []
-        for r in rows:
-            row_data = r[1] if isinstance(r, tuple) else r
+        for r in validated_rows:
+            row_data = r[1]
             mol = row_data.get("MOLECULE", "")
             disease = row_data.get("DISEASE_STATE", "")
             
@@ -424,13 +446,9 @@ def competitor_post():
         inserted_rows, duplicates, errors = [], [], []
         batch_inserts = []
 
-        for r in rows:
+        for r in validated_rows:
             try:
-                if isinstance(r, tuple):
-                    row_num, row_data = r
-                else:
-                    row_num = 1
-                    row_data = r
+                row_num, row_data = r
                 
                 market = row_data["MARKET"].upper()
                 brand = row_data["BRAND"].upper()
@@ -468,7 +486,7 @@ def competitor_post():
                 inserted_rows.append({"excel_row": row_num, "MARKET": market, "BRAND": brand})
 
             except Exception as e:
-                errors.append({"excel_row": row_num if isinstance(r, tuple) else 1, "error": str(e)})
+                errors.append({"excel_row": row_num, "error": str(e)})
 
         # batch insert - single query
         if batch_inserts:
@@ -486,7 +504,7 @@ def competitor_post():
         start, end = offset, min(offset + limit, total_rows)
 
         response = {
-            "status": "success" if inserted_rows else ("partial" if errors else "no-change"),
+            "status": "success" if inserted_rows else "partial" if (duplicates or validation_errors) else "no-change",
             "mode": "excel-template" if is_excel_mode else "json",
             "page": page,
             "limit": limit,
@@ -495,9 +513,10 @@ def competitor_post():
             "processed_rows": end - start,
             "inserted_count": len(inserted_rows),
             "duplicate_count": len(duplicates),
-            "validation_errors_count": len(invalid_markets_list) + len(invalid_brands_list),
+            "validation_errors_count": len(validation_errors),
             "inserted_rows": inserted_rows[start:end],
             "duplicates": duplicates[start:end],
+            "validation_errors": validation_errors[start:end],
             "errors": errors[start:end]
         }
 
@@ -517,6 +536,8 @@ def competitor_post():
         import traceback
         print("ERROR:", traceback.format_exc())
         return jsonify({"error": f"Internal server error: {str(e)}"}), status.HTTP_500_INTERNAL_SERVER_ERROR
+
+
 
 ###############################################
 # INSIGHT CONFIG - Key Messages (Updated)
@@ -1171,6 +1192,8 @@ def insight_key_obj_post():
         print("ERROR:", traceback.format_exc())
         return jsonify({"error": f"Internal error: {str(e)}"}), status.HTTP_500_INTERNAL_SERVER_ERROR
 
+
+
 ###############################################
 # INSIGHT CONFIG - Brand Studies (Updated)
 ###############################################
@@ -1334,7 +1357,7 @@ def insight_brand_study_get_data():
 
 
 ###############################################
-# ENDPOINT 2: INSERT/UPLOAD DATA
+# ENDPOINT 2: INSERT/UPLOAD DATA - BRAND STUDIES
 # Method: POST
 # URL: /d_ffn_insight_config_brand_study
 # Payload: JSON object(s) with MARKET, BRAND, STUDY_NAME (all required)
@@ -1377,9 +1400,12 @@ def insight_brand_study_post():
         offset = (page - 1) * limit
 
         valid_markets_brands = _get_valid_markets_brands(force_refresh=True)
+        valid_market_set = {m.upper() for m in valid_markets_brands.get("markets", [])}
+        valid_brand_set = {b.upper() for b in valid_markets_brands.get("brands", [])}
 
         rows = []
         is_excel_mode = False
+        validation_errors = []
 
         # Check if file upload (Excel) or JSON body
         if "file" in request.files:
@@ -1416,22 +1442,47 @@ def insight_brand_study_post():
         if not rows:
             return jsonify({"error": "No rows"}), status.HTTP_400_BAD_REQUEST
 
-        # Vectorized validation
-        all_markets = {r[1]["MARKET"].upper() for r in rows}
-        all_brands = {r[1]["BRAND"].upper() for r in rows}
-
-        valid_market_set = {m.upper() for m in valid_markets_brands.get("markets", [])}
-        valid_brand_set = {b.upper() for b in valid_markets_brands.get("brands", [])}
-
-        invalid_mkts = [{"MARKET": m, "reason": "Invalid MARKET"} for m in all_markets if m not in valid_market_set]
-        invalid_brnds = [{"BRAND": b, "reason": "Invalid BRAND"} for b in all_brands if b not in valid_brand_set]
-
-        if invalid_mkts or invalid_brnds:
-            return jsonify({"status": "error", "invalid_markets": invalid_mkts, "invalid_brands": invalid_brnds}), status.HTTP_400_BAD_REQUEST
-
-        # Batch duplicate check
-        check_vals = []
+        # Row-by-row validation - don't break execution
+        validated_rows = []
         for r in rows:
+            row_num, row_data = r
+            market_upper = row_data["MARKET"].upper()
+            brand_upper = row_data["BRAND"].upper()
+            
+            # Check if market is valid
+            if market_upper not in valid_market_set:
+                validation_errors.append({
+                    "excel_row": row_num,
+                    "MARKET": row_data["MARKET"],
+                    "BRAND": row_data["BRAND"],
+                    "reason": f"Invalid MARKET: '{row_data['MARKET']}'"
+                })
+                continue
+            
+            # Check if brand is valid
+            if brand_upper not in valid_brand_set:
+                validation_errors.append({
+                    "excel_row": row_num,
+                    "MARKET": row_data["MARKET"],
+                    "BRAND": row_data["BRAND"],
+                    "reason": f"Invalid BRAND: '{row_data['BRAND']}'"
+                })
+                continue
+            
+            # If validation passed, add to validated rows
+            validated_rows.append((row_num, row_data))
+
+        # If no valid rows after validation, return error
+        if not validated_rows:
+            return jsonify({
+                "status": "error",
+                "message": "No valid rows to process after validation",
+                "validation_errors": validation_errors
+            }), status.HTTP_400_BAD_REQUEST
+
+        # Batch duplicate check for validated rows only
+        check_vals = []
+        for r in validated_rows:
             row_data = r[1]
             check_vals.append(
                 f"(UPPER(TRIM(MARKET)) = '{_sq(row_data['MARKET'].upper())}' AND "
@@ -1455,7 +1506,7 @@ def insight_brand_study_post():
         inserted_rows, duplicates, errors = [], [], []
         batch_inserts = []
 
-        for r in rows:
+        for r in validated_rows:
             try:
                 row_num, row_data = r
                 market = row_data["MARKET"].upper()
@@ -1464,12 +1515,17 @@ def insight_brand_study_post():
                 key = (market, brand, row_data["STUDY_NAME"])
 
                 if key in existing_set:
-                    duplicates.append({"excel_row": row_num, "MARKET": market, "BRAND": brand})
+                    duplicates.append({
+                        "excel_row": row_num,
+                        "MARKET": market,
+                        "BRAND": brand,
+                        "reason": "Duplicate entry"
+                    })
                     continue
 
-                # Build insert values - only MARKET, BRAND, STUDY_NAME, and DATE_ADDED
+                # Build insert values
                 batch_inserts.append(
-                    f"('{_sq(market)}', '{_sq(brand)}', '{_sq(row_data['STUDY_NAME'])}', '{_sq(added_by)}',  CURRENT_TIMESTAMP())"
+                    f"('{_sq(market)}', '{_sq(brand)}', '{_sq(row_data['STUDY_NAME'])}', '{_sq(added_by)}', CURRENT_TIMESTAMP())"
                 )
 
                 inserted_rows.append({"excel_row": row_num, "MARKET": market, "BRAND": brand})
@@ -1479,7 +1535,6 @@ def insight_brand_study_post():
 
         # Batch insert
         if batch_inserts:
-            # Updated insert query with new table and columns
             insert_query = f"""
                 INSERT INTO {INSIGHT_BRAND_STUDY_TABLE}
                 (MARKET, BRAND, STUDY_NAME, ADDED_BY, DATE_ADDED)
@@ -1493,7 +1548,7 @@ def insight_brand_study_post():
         start, end = offset, min(offset + limit, total_rows)
 
         response = {
-            "status": "success" if inserted_rows else "no-change",
+            "status": "success" if inserted_rows else "partial" if (duplicates or validation_errors) else "no-change",
             "mode": "excel-template" if is_excel_mode else "json",
             "page": page,
             "limit": limit,
@@ -1501,8 +1556,10 @@ def insight_brand_study_post():
             "total_pages": total_pages,
             "inserted_count": len(inserted_rows),
             "duplicate_count": len(duplicates),
+            "validation_errors_count": len(validation_errors),
             "inserted_rows": inserted_rows[start:end],
             "duplicates": duplicates[start:end],
+            "validation_errors": validation_errors[start:end],
             "errors": errors[start:end]
         }
 
@@ -1516,20 +1573,18 @@ def insight_brand_study_post():
         return jsonify({"error": f"Internal error: {str(e)}"}), status.HTTP_500_INTERNAL_SERVER_ERROR
 
 
-        
 ###############################################
-# INSIGHT CONFIG - Medical Terms (Updated)
+# INSIGHT CONFIG - Medical Terms
 ###############################################
 
 # NEW TABLE for Medical Terms
-INSIGHT_MEDICAL_TERM_TABLE = "hive_metastore.fieldforce_navigator_deployment.d_ffn_insight_medical_term_config"
-MARKET_BRAND_TABLE = "hive_metastore.fieldforce_navigator_deployment.audio_market_brand_config"
+INSIGHT_MEDICAL_TERM_TABLE = "hive_metastore.fieldforce_navigator_deployment.d_ffn_insight_medical_terms_config"
 
 # UPDATED MAPPING - Only 3 columns now
 EXCEL_TO_DB_MAPPING_MEDICAL_TERM = {
-    "MARKET": "MARKET",
-    "BRAND": "BRAND",
-    "Term": "TERM"
+    "Market": "MARKET",
+    "Brand": "BRAND",
+    "Medical Term": "TERM"
 }
 
 TARGET_SHEET_NAME_MEDICAL_TERM = "Brand - Medical Terms"
@@ -1553,7 +1608,7 @@ def _process_template_excel_medical_term(file_obj):
         df = df[df.drop('_excel_row_num', axis=1).astype(str).apply(lambda x: x.str.strip().str.len().sum(), axis=1) > 0]
         
         # Updated mandatory columns as per new mapping
-        mandatory_cols = ["MARKET", "BRAND", "Term"]
+        mandatory_cols = ["Market", "Brand", "Medical Term"]
         missing = [col for col in mandatory_cols if col not in df.columns]
         
         if missing:
@@ -1582,11 +1637,11 @@ def _process_template_excel_medical_term(file_obj):
 
 
 ###############################################
-# ENDPOINT 1: RETRIEVE DATA 
+# ENDPOINT 1: RETRIEVE DATA (GET-like using POST)
 # Purpose: Fetch existing medical term records filtered by MARKET and BRAND
 # Method: POST
 # URL: /d_ffn_insight_config_medical_term/get_data
-# Payload: {"MARKET": "...", "BRAND": "..."}  
+# Payload: {"MARKET": "...", "BRAND": "..."}  (both optional)
 ###############################################
 @app.route("/d_ffn_insight_config_medical_term/get_data", methods=["POST"])
 @cross_origin()
@@ -1597,7 +1652,7 @@ def insight_medical_term_get_data():
     
     Example POST body:
     {
-        "MARKET": "US",
+        "MARKET": "GBR",
         "BRAND": "AREXVY"
     }
     
@@ -1680,7 +1735,7 @@ def insight_medical_term_get_data():
 
 
 ###############################################
-# ENDPOINT 2: INSERT/UPLOAD DATA
+# ENDPOINT 2: INSERT/UPLOAD DATA - MEDICAL TERMS
 # Purpose: Add new medical term records to the database
 # Method: POST
 # URL: /d_ffn_insight_config_medical_term
@@ -1724,9 +1779,12 @@ def insight_medical_term_post():
         offset = (page - 1) * limit
 
         valid_markets_brands = _get_valid_markets_brands(force_refresh=True)
+        valid_market_set = {m.upper() for m in valid_markets_brands.get("markets", [])}
+        valid_brand_set = {b.upper() for b in valid_markets_brands.get("brands", [])}
 
         rows = []
         is_excel_mode = False
+        validation_errors = []
 
         # Check if file upload (Excel) or JSON body
         if "file" in request.files:
@@ -1763,22 +1821,47 @@ def insight_medical_term_post():
         if not rows:
             return jsonify({"error": "No rows"}), status.HTTP_400_BAD_REQUEST
 
-        # Vectorized validation
-        all_markets = {r[1]["MARKET"].upper() for r in rows}
-        all_brands = {r[1]["BRAND"].upper() for r in rows}
-
-        valid_market_set = {m.upper() for m in valid_markets_brands.get("markets", [])}
-        valid_brand_set = {b.upper() for b in valid_markets_brands.get("brands", [])}
-
-        invalid_mkts = [{"MARKET": m, "reason": "Invalid MARKET"} for m in all_markets if m not in valid_market_set]
-        invalid_brnds = [{"BRAND": b, "reason": "Invalid BRAND"} for b in all_brands if b not in valid_brand_set]
-
-        if invalid_mkts or invalid_brnds:
-            return jsonify({"status": "error", "invalid_markets": invalid_mkts, "invalid_brands": invalid_brnds}), status.HTTP_400_BAD_REQUEST
-
-        # Batch duplicate check
-        check_vals = []
+        # Row-by-row validation - don't break execution
+        validated_rows = []
         for r in rows:
+            row_num, row_data = r
+            market_upper = row_data["MARKET"].upper()
+            brand_upper = row_data["BRAND"].upper()
+            
+            # Check if market is valid
+            if market_upper not in valid_market_set:
+                validation_errors.append({
+                    "excel_row": row_num,
+                    "MARKET": row_data["MARKET"],
+                    "BRAND": row_data["BRAND"],
+                    "reason": f"Invalid MARKET: '{row_data['MARKET']}'"
+                })
+                continue
+            
+            # Check if brand is valid
+            if brand_upper not in valid_brand_set:
+                validation_errors.append({
+                    "excel_row": row_num,
+                    "MARKET": row_data["MARKET"],
+                    "BRAND": row_data["BRAND"],
+                    "reason": f"Invalid BRAND: '{row_data['BRAND']}'"
+                })
+                continue
+            
+            # If validation passed, add to validated rows
+            validated_rows.append((row_num, row_data))
+
+        # If no valid rows after validation, return error
+        if not validated_rows:
+            return jsonify({
+                "status": "error",
+                "message": "No valid rows to process after validation",
+                "validation_errors": validation_errors
+            }), status.HTTP_400_BAD_REQUEST
+
+        # Batch duplicate check for validated rows only
+        check_vals = []
+        for r in validated_rows:
             row_data = r[1]
             check_vals.append(
                 f"(UPPER(TRIM(MARKET)) = '{_sq(row_data['MARKET'].upper())}' AND "
@@ -1802,7 +1885,7 @@ def insight_medical_term_post():
         inserted_rows, duplicates, errors = [], [], []
         batch_inserts = []
 
-        for r in rows:
+        for r in validated_rows:
             try:
                 row_num, row_data = r
                 market = row_data["MARKET"].upper()
@@ -1811,7 +1894,12 @@ def insight_medical_term_post():
                 key = (market, brand, row_data["TERM"])
 
                 if key in existing_set:
-                    duplicates.append({"excel_row": row_num, "MARKET": market, "BRAND": brand})
+                    duplicates.append({
+                        "excel_row": row_num,
+                        "MARKET": market,
+                        "BRAND": brand,
+                        "reason": "Duplicate entry"
+                    })
                     continue
 
                 # Build insert values - only MARKET, BRAND, TERM, and DATE_ADDED
@@ -1840,7 +1928,7 @@ def insight_medical_term_post():
         start, end = offset, min(offset + limit, total_rows)
 
         response = {
-            "status": "success" if inserted_rows else "no-change",
+            "status": "success" if inserted_rows else "partial" if (duplicates or validation_errors) else "no-change",
             "mode": "excel-template" if is_excel_mode else "json",
             "page": page,
             "limit": limit,
@@ -1848,8 +1936,10 @@ def insight_medical_term_post():
             "total_pages": total_pages,
             "inserted_count": len(inserted_rows),
             "duplicate_count": len(duplicates),
+            "validation_errors_count": len(validation_errors),
             "inserted_rows": inserted_rows[start:end],
             "duplicates": duplicates[start:end],
+            "validation_errors": validation_errors[start:end],
             "errors": errors[start:end]
         }
 
@@ -1861,8 +1951,8 @@ def insight_medical_term_post():
         import traceback
         print("ERROR:", traceback.format_exc())
         return jsonify({"error": f"Internal error: {str(e)}"}), status.HTTP_500_INTERNAL_SERVER_ERROR
-	
-
+		
+		
 ###############################################
 # INSIGHT CONFIG - Brand Abbreviations (Updated)
 ###############################################
@@ -2028,7 +2118,7 @@ def insight_abbrv_get_data():
 
 
 ###############################################
-# ENDPOINT 2: INSERT/UPLOAD DATA
+# ENDPOINT 2: INSERT/UPLOAD DATA - BRAND ABBREVIATIONS
 # Purpose: Add new brand abbreviation records to the database
 # Method: POST
 # URL: /d_ffn_insight_config_abbrv
@@ -2052,13 +2142,13 @@ def insight_abbrv_post():
     Or array of records:
     [
         {
-            "MARKET": "GBR",
+            "MARKET": "US",
             "BRAND": "AREXVY",
             "TERM": "RSV",
             "DEFINITION": "Respiratory Syncytial Virus"
         },
         {
-            "MARKET": "GBR",
+            "MARKET": "EU",
             "BRAND": "SHINGRIX",
             "TERM": "VZV",
             "DEFINITION": "Varicella Zoster Virus"
@@ -2075,9 +2165,12 @@ def insight_abbrv_post():
         offset = (page - 1) * limit
 
         valid_markets_brands = _get_valid_markets_brands(force_refresh=True)
+        valid_market_set = {m.upper() for m in valid_markets_brands.get("markets", [])}
+        valid_brand_set = {b.upper() for b in valid_markets_brands.get("brands", [])}
 
         rows = []
         is_excel_mode = False
+        validation_errors = []
 
         # Check if file upload (Excel) or JSON body
         if "file" in request.files:
@@ -2092,7 +2185,7 @@ def insight_abbrv_post():
             except Exception as e:
                 return jsonify({"error": str(e)}), status.HTTP_400_BAD_REQUEST
         else:
-            # JSON body mode - Requires MARKET, BRAND, TERM, and DEFINITION
+            # JSON body mode
             body = request.get_json(force=True, silent=True) or {}
             items = body if isinstance(body, list) else [body]
 
@@ -2102,7 +2195,6 @@ def insight_abbrv_post():
                 term = _clean(rec.get("TERM", ""))
                 definition = _clean(rec.get("DEFINITION", ""))
 
-                # Validate all four required fields
                 if not market or not brand or not term or not definition:
                     return jsonify({"error": f"Item {i}: Missing required fields (MARKET, BRAND, TERM, DEFINITION)"}), status.HTTP_400_BAD_REQUEST
 
@@ -2116,33 +2208,57 @@ def insight_abbrv_post():
         if not rows:
             return jsonify({"error": "No rows"}), status.HTTP_400_BAD_REQUEST
 
-        # Vectorized validation
-        all_markets = {r[1]["MARKET"].upper() for r in rows}
-        all_brands = {r[1]["BRAND"].upper() for r in rows}
-
-        valid_market_set = {m.upper() for m in valid_markets_brands.get("markets", [])}
-        valid_brand_set = {b.upper() for b in valid_markets_brands.get("brands", [])}
-
-        invalid_mkts = [{"MARKET": m, "reason": "Invalid MARKET"} for m in all_markets if m not in valid_market_set]
-        invalid_brnds = [{"BRAND": b, "reason": "Invalid BRAND"} for b in all_brands if b not in valid_brand_set]
-
-        if invalid_mkts or invalid_brnds:
-            return jsonify({"status": "error", "invalid_markets": invalid_mkts, "invalid_brands": invalid_brnds}), status.HTTP_400_BAD_REQUEST
-
-        # Batch duplicate check
-        check_vals = []
+        # Row-by-row validation - don't break execution
+        validated_rows = []
         for r in rows:
+            row_num, row_data = r
+            market_upper = row_data["MARKET"].upper()
+            brand_upper = row_data["BRAND"].upper()
+            
+            # Check if market is valid
+            if market_upper not in valid_market_set:
+                validation_errors.append({
+                    "excel_row": row_num,
+                    "MARKET": row_data["MARKET"],
+                    "BRAND": row_data["BRAND"],
+                    "reason": f"Invalid MARKET: '{row_data['MARKET']}'"
+                })
+                continue
+            
+            # Check if brand is valid
+            if brand_upper not in valid_brand_set:
+                validation_errors.append({
+                    "excel_row": row_num,
+                    "MARKET": row_data["MARKET"],
+                    "BRAND": row_data["BRAND"],
+                    "reason": f"Invalid BRAND: '{row_data['BRAND']}'"
+                })
+                continue
+            
+            # If validation passed, add to validated rows
+            validated_rows.append((row_num, row_data))
+
+        # If no valid rows after validation, return error
+        if not validated_rows:
+            return jsonify({
+                "status": "error",
+                "message": "No valid rows to process after validation",
+                "validation_errors": validation_errors
+            }), status.HTTP_400_BAD_REQUEST
+
+        # Batch duplicate check for validated rows only
+        check_vals = []
+        for r in validated_rows:
             row_data = r[1]
             check_vals.append(
                 f"(UPPER(TRIM(MARKET)) = '{_sq(row_data['MARKET'].upper())}' AND "
                 f"UPPER(TRIM(BRAND)) = '{_sq(row_data['BRAND'].upper())}' AND "
-                f"TRIM(TERM) = '{_sq(row_data['TERM'])}' AND "
-                f"TRIM(DEFINITION) = '{_sq(row_data['DEFINITION'])}')"
+                f"TRIM(TERM) = '{_sq(row_data['TERM'])}')"
             )
 
         check_query = f"""
             SELECT UPPER(TRIM(MARKET)) as MARKET, UPPER(TRIM(BRAND)) as BRAND,
-                   TRIM(TERM) as TERM, TRIM(DEFINITION) as DEFINITION
+                   TRIM(TERM) as TERM
             FROM {INSIGHT_BRAND_ABBRV_TABLE}
             WHERE {' OR '.join(check_vals)}
         """
@@ -2151,24 +2267,28 @@ def insight_abbrv_post():
         existing_set = set()
         if existing is not None and not existing.empty:
             for _, row in existing.iterrows():
-                existing_set.add((row['MARKET'], row['BRAND'], row['TERM'], row['DEFINITION']))
+                existing_set.add((row['MARKET'], row['BRAND'], row['TERM']))
 
         inserted_rows, duplicates, errors = [], [], []
         batch_inserts = []
 
-        for r in rows:
+        for r in validated_rows:
             try:
                 row_num, row_data = r
                 market = row_data["MARKET"].upper()
                 brand = row_data["BRAND"].upper()
                 
-                key = (market, brand, row_data["TERM"], row_data["DEFINITION"])
+                key = (market, brand, row_data["TERM"])
 
                 if key in existing_set:
-                    duplicates.append({"excel_row": row_num, "MARKET": market, "BRAND": brand})
+                    duplicates.append({
+                        "excel_row": row_num,
+                        "MARKET": market,
+                        "BRAND": brand,
+                        "reason": "Duplicate entry"
+                    })
                     continue
 
-                # Build insert values - MARKET, BRAND, TERM, DEFINITION, and DATE_ADDED
                 batch_inserts.append(
                     f"('{_sq(market)}', '{_sq(brand)}', '{_sq(row_data['TERM'])}', "
                     f"'{_sq(row_data['DEFINITION'])}', '{_sq(added_by)}', CURRENT_TIMESTAMP())"
@@ -2181,7 +2301,6 @@ def insight_abbrv_post():
 
         # Batch insert
         if batch_inserts:
-            # Updated insert query with new table and columns
             insert_query = f"""
                 INSERT INTO {INSIGHT_BRAND_ABBRV_TABLE}
                 (MARKET, BRAND, TERM, DEFINITION, ADDED_BY, DATE_ADDED)
@@ -2195,7 +2314,7 @@ def insight_abbrv_post():
         start, end = offset, min(offset + limit, total_rows)
 
         response = {
-            "status": "success" if inserted_rows else "no-change",
+            "status": "success" if inserted_rows else "partial" if (duplicates or validation_errors) else "no-change",
             "mode": "excel-template" if is_excel_mode else "json",
             "page": page,
             "limit": limit,
@@ -2203,8 +2322,10 @@ def insight_abbrv_post():
             "total_pages": total_pages,
             "inserted_count": len(inserted_rows),
             "duplicate_count": len(duplicates),
+            "validation_errors_count": len(validation_errors),
             "inserted_rows": inserted_rows[start:end],
             "duplicates": duplicates[start:end],
+            "validation_errors": validation_errors[start:end],
             "errors": errors[start:end]
         }
 
@@ -2215,4 +2336,4 @@ def insight_abbrv_post():
     except Exception as e:
         import traceback
         print("ERROR:", traceback.format_exc())
-        return jsonify({"error": f"Internal error: {str(e)}"}), status.HTTP_500_INTERNAL_SERVER_ERROR  
+        return jsonify({"error": f"Internal error: {str(e)}"}), status.HTTP_500_INTERNAL_SERVER_ERROR		
