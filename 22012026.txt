@@ -1,9 +1,3 @@
-{
-    "error": "Internal error: [DATATYPE_MISMATCH.DATA_DIFF_TYPES] Cannot resolve \"(HASH_KEY IN (5bf7e9cc2313f8401c5fa9cfcbe6c278408d6e0d96c3f159563bdf748cf16dae))\" due to data type mismatch: Input to `in` should all be the same type, but it's [\"BINARY\", \"STRING\"]. SQLSTATE: 42K09; line 4 pos 27"
-}
-
-
-
 ###############################################
 # INSIGHT CONFIG - Key Objections (Updated)
 ###############################################
@@ -31,6 +25,7 @@ def _generate_hash_key(brand, market, objection):
     """
     Generate unique hash key based on BRAND, MARKET, and OBJECTION
     This creates a deterministic key so same combination always produces same hash
+    Returns binary hash for database storage
     """
     # Normalize inputs to uppercase and strip whitespace
     normalized_brand = str(brand).strip().upper()
@@ -40,11 +35,15 @@ def _generate_hash_key(brand, market, objection):
     # Combine the values
     combined = f"{normalized_brand}|{normalized_market}|{normalized_objection}"
     
-    # Generate SHA256 hash
+    # Generate SHA256 hash as bytes
     hash_object = hashlib.sha256(combined.encode('utf-8'))
-    hash_key = hash_object.hexdigest()
+    hash_bytes = hash_object.digest()
     
-    return hash_key
+    return hash_bytes
+
+def _hash_to_hex(hash_bytes):
+    """Convert hash bytes to hex string for display"""
+    return hash_bytes.hex()
 
 def _process_template_excel_key_obj(file_obj):
     try:
@@ -143,8 +142,12 @@ def insight_key_obj_get_data():
                 row_obj = OrderedDict()
                 row_obj["id"] = str(idx + 1)
                 
-                # Add all columns from the table
+                # Add all columns from the table except HASH_KEY
                 for col in sample_df.columns:
+                    # Skip HASH_KEY column
+                    if col.upper() == 'HASH_KEY':
+                        continue
+                        
                     value = row[col]
                     # Convert NaN, None, or "null" to empty string
                     if pd.isna(value) or value == "" or str(value).strip().lower() == "null":
@@ -264,12 +267,13 @@ def insight_key_obj_post():
         for r in validated_rows:
             row_num, row_data = r
             hash_key = _generate_hash_key(row_data['BRAND'], row_data['MARKET'], row_data['OBJECTION'])
-            hash_keys_to_check.append(f"'{_sq(hash_key)}'")
-            hash_key_mapping[hash_key] = (row_num, row_data)
+            hash_key_hex = _hash_to_hex(hash_key)
+            hash_keys_to_check.append(f"X'{hash_key_hex}'")
+            hash_key_mapping[hash_key_hex] = (row_num, row_data, hash_key)
 
         # Check which hash keys already exist
         check_query = f"""
-            SELECT HASH_KEY
+            SELECT HEX(HASH_KEY) as HASH_KEY_HEX
             FROM {INSIGHT_KEY_OBJ_TABLE}
             WHERE HASH_KEY IN ({','.join(hash_keys_to_check)})
         """
@@ -278,7 +282,7 @@ def insight_key_obj_post():
         existing_hash_keys = set()
         if existing is not None and not existing.empty:
             for _, row in existing.iterrows():
-                existing_hash_keys.add(row['HASH_KEY'])
+                existing_hash_keys.add(row['HASH_KEY_HEX'].lower())
 
         inserted_rows = []
         updated_rows = []
@@ -286,7 +290,7 @@ def insight_key_obj_post():
         batch_inserts = []
         batch_updates = []
 
-        for hash_key, (row_num, row_data) in hash_key_mapping.items():
+        for hash_key_hex, (row_num, row_data, hash_key) in hash_key_mapping.items():
             try:
                 market = row_data["MARKET"].upper()
                 brand = row_data["BRAND"].upper()
@@ -298,10 +302,10 @@ def insight_key_obj_post():
                 conf_val = "NULL" if not row_data.get("CONFIRMATION") else f"'{_sq(row_data['CONFIRMATION'])}'"
                 trans_val = "NULL" if not row_data.get("TRANSITION") else f"'{_sq(row_data['TRANSITION'])}'"
 
-                if hash_key in existing_hash_keys:
+                if hash_key_hex.lower() in existing_hash_keys:
                     # UPDATE existing record
                     batch_updates.append({
-                        "HASH_KEY": hash_key,
+                        "HASH_KEY_HEX": hash_key_hex,
                         "MARKET": market,
                         "BRAND": brand,
                         "OBJECTION": row_data["OBJECTION"],
@@ -313,14 +317,14 @@ def insight_key_obj_post():
                         "TRANSITION": trans_val,
                         "ADDED_BY": added_by
                     })
-                    updated_rows.append({"excel_row": row_num, "MARKET": market, "BRAND": brand, "HASH_KEY": hash_key})
+                    updated_rows.append({"excel_row": row_num, "MARKET": market, "BRAND": brand})
                 else:
                     # INSERT new record
                     batch_inserts.append(
-                        f"('{_sq(hash_key)}', '{_sq(market)}', '{_sq(brand)}', {obj_grp_val}, '{_sq(row_data['OBJECTION'])}', "
+                        f"(X'{hash_key_hex}', '{_sq(market)}', '{_sq(brand)}', {obj_grp_val}, '{_sq(row_data['OBJECTION'])}', "
                         f"{ack_val}, {probe_val}, {ans_val}, {conf_val}, {trans_val}, '{_sq(added_by)}', CURRENT_TIMESTAMP())"
                     )
-                    inserted_rows.append({"excel_row": row_num, "MARKET": market, "BRAND": brand, "HASH_KEY": hash_key})
+                    inserted_rows.append({"excel_row": row_num, "MARKET": market, "BRAND": brand})
 
             except Exception as e:
                 errors.append({"excel_row": row_num, "error": str(e)})
@@ -350,7 +354,7 @@ def insight_key_obj_post():
                         TRANSITION = {update_data['TRANSITION']},
                         ADDED_BY = '{_sq(update_data['ADDED_BY'])}',
                         DATE_ADDED = CURRENT_TIMESTAMP()
-                    WHERE HASH_KEY = '{_sq(update_data['HASH_KEY'])}'
+                    WHERE HASH_KEY = X'{update_data['HASH_KEY_HEX']}'
                 """
                 dc.execute_non_query(update_query)
 
