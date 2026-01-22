@@ -1,3 +1,9 @@
+{
+    "error": "Internal error: [DATATYPE_MISMATCH.DATA_DIFF_TYPES] Cannot resolve \"(HASH_KEY IN (5bf7e9cc2313f8401c5fa9cfcbe6c278408d6e0d96c3f159563bdf748cf16dae))\" due to data type mismatch: Input to `in` should all be the same type, but it's [\"BINARY\", \"STRING\"]. SQLSTATE: 42K09; line 4 pos 27"
+}
+
+
+
 ###############################################
 # INSIGHT CONFIG - Key Objections (Updated)
 ###############################################
