@@ -1,3 +1,13 @@
+Overview: 
+Automate the deployment of Databricks Genie Spaces across multiple workspaces using the Databricks Genie API
+
+Scope :
+
+- Authenticate to Databricks workspaces using Service Principal
+- list all Genie Spaces from a given workspace, including Space ID, Title, and Warehouse ID
+- As part of deployment activity, fetch the latest changes from one (source) workspace and sync those changes to all other workspaces.
+
+
 """
 Fetch All Genie Spaces from a Databricks Workspace
 ====================================================
