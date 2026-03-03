@@ -1,0 +1,82 @@
+"""
+Fetch all Genie Spaces from a Databricks Workspace
+====================================================
+Simple script to list every Genie space and print the total count.
+
+Requirements:
+    pip install requests
+
+Usage:
+    Set your DATABRICKS_HOST and DATABRICKS_TOKEN below (or via env vars),
+    then run:  python get_genie_spaces.py
+"""
+
+import os
+import requests
+
+# ─── Configuration ────────────────────────────────────────────────────────────
+
+DATABRICKS_HOST  = os.getenv("DATABRICKS_HOST",  "https://adb-xxxxxxxxxxxx.x.azuredatabricks.net")
+DATABRICKS_TOKEN = os.getenv("DATABRICKS_TOKEN",  "dapi_your_token_here")
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def get_all_genie_spaces(host: str, token: str) -> list[dict]:
+    """
+    Fetch ALL Genie spaces from the workspace, handling pagination automatically.
+    Returns a flat list of space dicts.
+    """
+    url     = f"{host.rstrip('/')}/api/2.0/genie/spaces"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type":  "application/json",
+    }
+
+    all_spaces = []
+    next_page_token = None
+
+    while True:
+        params = {}
+        if next_page_token:
+            params["page_token"] = next_page_token
+
+        response = requests.get(url, headers=headers, params=params)
+        response.raise_for_status()
+        data = response.json()
+
+        spaces = data.get("genie_spaces", [])
+        all_spaces.extend(spaces)
+
+        # Stop if there are no more pages
+        next_page_token = data.get("next_page_token")
+        if not next_page_token:
+            break
+
+    return all_spaces
+
+
+def main():
+    print(f"\nConnecting to: {DATABRICKS_HOST}")
+    print("-" * 60)
+
+    spaces = get_all_genie_spaces(DATABRICKS_HOST, DATABRICKS_TOKEN)
+
+    if not spaces:
+        print("No Genie spaces found in this workspace.")
+        return
+
+    # Print each space
+    print(f"{'#':<5} {'Space ID':<40} {'Title'}")
+    print("-" * 60)
+    for i, space in enumerate(spaces, start=1):
+        space_id = space.get("space_id", "N/A")
+        title    = space.get("title",    "Untitled")
+        print(f"{i:<5} {space_id:<40} {title}")
+
+    print("-" * 60)
+    print(f"\n✅ Total Genie spaces found: {len(spaces)}\n")
+
+
+if __name__ == "__main__":
+    main()
