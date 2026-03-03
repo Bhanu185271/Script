@@ -1,81 +1,77 @@
 """
-Fetch all Genie Spaces from a Databricks Workspace
+Fetch All Genie Spaces from a Databricks Workspace
 ====================================================
-Simple script to list every Genie space and print the total count.
+Uses a Personal Access Token (PAT) to authenticate.
+
+What you need:
+  - Workspace name   e.g.  my-company
+  - Domain           e.g.  azuredatabricks.net
+  - Token            e.g.  dapi_xxxxxxxxxxxx
+
+Full host = https://<workspace_name>.<domain>
 
 Requirements:
     pip install requests
-
-Usage:
-    Set your DATABRICKS_HOST and DATABRICKS_TOKEN below (or via env vars),
-    then run:  python get_genie_spaces.py
 """
 
-import os
 import requests
 
-# ─── Configuration ────────────────────────────────────────────────────────────
+# ─── Fill these in ─────────────────────────────────────────────────────────────
 
-DATABRICKS_HOST  = os.getenv("DATABRICKS_HOST",  "https://adb-xxxxxxxxxxxx.x.azuredatabricks.net")
-DATABRICKS_TOKEN = os.getenv("DATABRICKS_TOKEN",  "dapi_your_token_here")
+WORKSPACE_NAME = "my-company"               # e.g. "adb-123456789"
+DOMAIN         = "azuredatabricks.net"      # e.g. "azuredatabricks.net" or "cloud.databricks.com"
+TOKEN          = "dapi_your_token_here"
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ───────────────────────────────────────────────────────────────────────────────
+
+HOST    = f"https://{WORKSPACE_NAME}.{DOMAIN}"
+HEADERS = {"Authorization": f"Bearer {TOKEN}"}
 
 
-def get_all_genie_spaces(host: str, token: str) -> list[dict]:
-    """
-    Fetch ALL Genie spaces from the workspace, handling pagination automatically.
-    Returns a flat list of space dicts.
-    """
-    url     = f"{host.rstrip('/')}/api/2.0/genie/spaces"
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type":  "application/json",
-    }
-
+def fetch_all_genie_spaces() -> list[dict]:
+    """Fetch all Genie spaces, handling pagination automatically."""
+    url        = f"{HOST}/api/2.0/genie/spaces"
     all_spaces = []
-    next_page_token = None
+    params     = {}
 
     while True:
-        params = {}
-        if next_page_token:
-            params["page_token"] = next_page_token
-
-        response = requests.get(url, headers=headers, params=params)
+        response = requests.get(url, headers=HEADERS, params=params)
         response.raise_for_status()
         data = response.json()
 
-        spaces = data.get("genie_spaces", [])
-        all_spaces.extend(spaces)
+        all_spaces.extend(data.get("genie_spaces", []))
 
-        # Stop if there are no more pages
-        next_page_token = data.get("next_page_token")
-        if not next_page_token:
+        # Handle pagination
+        next_page = data.get("next_page_token")
+        if not next_page:
             break
+        params["page_token"] = next_page
 
     return all_spaces
 
 
 def main():
-    print(f"\nConnecting to: {DATABRICKS_HOST}")
-    print("-" * 60)
+    print(f"\nWorkspace : {HOST}")
+    print(f"Fetching Genie spaces...\n")
 
-    spaces = get_all_genie_spaces(DATABRICKS_HOST, DATABRICKS_TOKEN)
+    spaces = fetch_all_genie_spaces()
 
     if not spaces:
-        print("No Genie spaces found in this workspace.")
+        print("No Genie spaces found.")
+        print("Make sure your token has CAN VIEW permission on at least one Genie space.")
         return
 
-    # Print each space
-    print(f"{'#':<5} {'Space ID':<40} {'Title'}")
-    print("-" * 60)
+    # Print table
+    print(f"{'#':<5} {'Space ID':<36} {'Warehouse ID':<24} {'Title'}")
+    print("─" * 90)
     for i, space in enumerate(spaces, start=1):
-        space_id = space.get("space_id", "N/A")
-        title    = space.get("title",    "Untitled")
-        print(f"{i:<5} {space_id:<40} {title}")
+        space_id     = space.get("space_id",     "N/A")
+        warehouse_id = space.get("warehouse_id", "N/A")
+        title        = space.get("title",        "Untitled")
+        print(f"{i:<5} {space_id:<36} {warehouse_id:<24} {title}")
 
-    print("-" * 60)
-    print(f"\n✅ Total Genie spaces found: {len(spaces)}\n")
+    print("─" * 90)
+    print(f"\nTotal Genie spaces: {len(spaces)}\n")
 
 
 if __name__ == "__main__":
