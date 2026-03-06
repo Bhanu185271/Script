@@ -1,88 +1,104 @@
-Overview: 
-Automate the deployment of Databricks Genie Spaces across multiple workspaces using the Databricks Genie API
-
-Scope :
-
-- Authenticate to Databricks workspaces using Service Principal
-- list all Genie Spaces from a given workspace, including Space ID, Title, and Warehouse ID
-- As part of deployment activity, fetch the latest changes from one (source) workspace and sync those changes to all other workspaces.
+Import :
 
 
-"""
-Fetch All Genie Spaces from a Databricks Workspace
-====================================================
-Uses a Personal Access Token (PAT) to authenticate.
+# COMMAND ----------
 
-What you need:
-  - Workspace name   e.g.  my-company
-  - Domain           e.g.  azuredatabricks.net
-  - Token            e.g.  dapi_xxxxxxxxxxxx
-
-Full host = https://<workspace_name>.<domain>
-
-Requirements:
-    pip install requests
-"""
+###Import API
 
 import requests
+import json
+##import dbutils
 
-# ─── Fill these in ─────────────────────────────────────────────────────────────
+domain = dbutils.secrets.get(scope="corxinnvus6kvdevtest001", key="inavi-domainurl")
+token = dbutils.secrets.get(scope="corxinnvus6kvdevtest001", key="DATABRICKS-API-TOKEN-AIML-THROUGH-SP") # Replace with your actual token
 
-WORKSPACE_NAME = "my-company"               # e.g. "adb-123456789"
-DOMAIN         = "azuredatabricks.net"      # e.g. "azuredatabricks.net" or "cloud.databricks.com"
-TOKEN          = "dapi_your_token_here"
+# Read the serialized space from the file saved earlier
+file_path = '/Workspace/Shared/iNavi_Metadata/genie/output_file_sales_05_Mar.json'
 
-# ───────────────────────────────────────────────────────────────────────────────
+with open(file_path, 'r') as f:
+    serialized_data = json.load(f)
 
-HOST    = f"https://{WORKSPACE_NAME}.{DOMAIN}"
-HEADERS = {"Authorization": f"Bearer {TOKEN}"}
+# URL for the API to create a new Genie space
+url = f"{domain}/api/2.0/genie/spaces"
+
+# Headers for the request
+headers = {
+    "Authorization": f"Bearer {token}",
+    "Content-Type": "application/json"
+}
+
+# Prepare the data for the POST request
+data = {
+    "warehouse_id": dbutils.secrets.get(scope="corxinnvus6kvdevtest001", key="inavi-warehouse-id"), 
+    "parent_path": "/Shared/iNavi_Metadata/genie/post_request_import_api", 
+    "serialized_space": serialized_data.get("serialized_space", ""),
+    "title": "[iNavi] - Sales Deployment ",
+    "description": "Genie space created for Insights Navigator application including ATLAS ,ES Affinities and ACE Segments"
+}
+
+# Send the POST request to create the space
+response = requests.post(url, headers=headers, data=json.dumps(data))
+
+# Check if the request was successful
+if response.status_code == 200:
+    print("Space created successfully!")
+    print("Response:", response.json())
+else:
+    # Handle failure case
+    print(f"Request failed with status code: {response.status_code}")
+    print("Response Headers:", response.headers)
+    print("Response Text:", response.text)
 
 
-def fetch_all_genie_spaces() -> list[dict]:
-    """Fetch all Genie spaces, handling pagination automatically."""
-    url        = f"{HOST}/api/2.0/genie/spaces"
-    all_spaces = []
-    params     = {}
 
-    while True:
-        response = requests.get(url, headers=HEADERS, params=params)
-        response.raise_for_status()
+
+
+
+
+
+
+Export :
+
+
+###Export API
+
+import requests
+import json
+##import dbutils
+
+space_id =  "01f10e19b66c15e5b677d5d9374d0cca"   ##dbutils.secrets.get(scope="corxinnvus6kvdevtest001", key="inavi-genie-cci-space-id") ## Replace with actual space id as per theme
+domain = dbutils.secrets.get(scope="corxinnvus6kvdevtest001", key="inavi-domainurl")
+token = dbutils.secrets.get(scope="corxinnvus6kvdevtest001", key="DATABRICKS-API-TOKEN-AIML-THROUGH-SP") # Provide the Token
+
+url = f"{domain}/api/2.0/genie/spaces/{space_id}?include_serialized_space=true"
+headers = {"Authorization": f"Bearer {token}"}
+
+response = requests.get(url, headers=headers)
+
+# Define the file path in your Databricks workspace
+file_path = '/Workspace/Shared/iNavi_Metadata/genie/output_file_patient_pre_prod_v1.3.json'
+
+if response.status_code == 200:
+    try:
+        # Parse the JSON response
         data = response.json()
 
-        all_spaces.extend(data.get("genie_spaces", []))
+        # Write the JSON data to a file in the specified workspace directory
+        with open(file_path, 'w') as f:
+            json.dump(data, f, indent=4)  # Write with indentation for readability
+        print(f"Output successfully written to: {file_path}")
+    except ValueError as e:
+        print(f"Error parsing JSON: {e}")
+        # Write the raw response content to the file if JSON parsing fails
+        with open(file_path, 'w') as f:
+            f.write(response.text)
+        print("Raw response content written to the file.")
+else:
+    # Write the error response to the file
+    with open(file_path, 'w') as f:
+        error_message = f"Request failed with status code: {response.status_code}\n"
+        error_message += f"Response Headers: {response.headers}\n"
+        error_message += f"Response Text: {response.text}\n"
+        f.write(error_message)
+    print(f"Request failed. Error details written to: {file_path}")
 
-        # Handle pagination
-        next_page = data.get("next_page_token")
-        if not next_page:
-            break
-        params["page_token"] = next_page
-
-    return all_spaces
-
-
-def main():
-    print(f"\nWorkspace : {HOST}")
-    print(f"Fetching Genie spaces...\n")
-
-    spaces = fetch_all_genie_spaces()
-
-    if not spaces:
-        print("No Genie spaces found.")
-        print("Make sure your token has CAN VIEW permission on at least one Genie space.")
-        return
-
-    # Print table
-    print(f"{'#':<5} {'Space ID':<36} {'Warehouse ID':<24} {'Title'}")
-    print("─" * 90)
-    for i, space in enumerate(spaces, start=1):
-        space_id     = space.get("space_id",     "N/A")
-        warehouse_id = space.get("warehouse_id", "N/A")
-        title        = space.get("title",        "Untitled")
-        print(f"{i:<5} {space_id:<36} {warehouse_id:<24} {title}")
-
-    print("─" * 90)
-    print(f"\nTotal Genie spaces: {len(spaces)}\n")
-
-
-if __name__ == "__main__":
-    main()
