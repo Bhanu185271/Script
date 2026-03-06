@@ -102,3 +102,147 @@ else:
         f.write(error_message)
     print(f"Request failed. Error details written to: {file_path}")
 
+
+
+
+
+### ============================================================
+###  Multi-Workspace Genie Space Deployment
+###  Deploys a Genie Space to multiple Databricks workspaces
+###  in a single run.
+### ============================================================
+
+import requests
+import json
+
+# ─────────────────────────────────────────────
+# 1.  SOURCE FILE  (the exported Genie Space)
+# ─────────────────────────────────────────────
+FILE_PATH = '/Workspace/Shared/iNavi_Metadata/genie/output_file_sales_05_Mar.json'
+
+with open(FILE_PATH, 'r') as f:
+    serialized_data = json.load(f)
+
+SERIALIZED_SPACE = serialized_data.get("serialized_space", "")
+
+# ─────────────────────────────────────────────
+# 2.  GENIE SPACE METADATA  (shared across all workspaces)
+# ─────────────────────────────────────────────
+GENIE_TITLE       = "[iNavi] - Sales Deployment"
+GENIE_DESCRIPTION = (
+    "Genie space created for Insights Navigator application "
+    "including ATLAS, ES Affinities and ACE Segments"
+)
+PARENT_PATH = "/Shared/iNavi_Metadata/genie/post_request_import_api"
+
+# ─────────────────────────────────────────────
+# 3.  WORKSPACE DEFINITIONS
+#     Add / remove workspaces here as needed.
+#     Each entry needs:
+#       - name        : human-friendly label (for logs)
+#       - domain      : full workspace URL
+#       - token       : Bearer token (use dbutils.secrets in prod)
+#       - warehouse_id: SQL warehouse to attach the Genie Space to
+# ─────────────────────────────────────────────
+WORKSPACES = [
+    {
+        "name"        : "Workspace 1 – Dev",
+        "domain"      : dbutils.secrets.get(scope="corxinnvus6kvdevtest001", key="inavi-domainurl-ws1"),
+        "token"       : dbutils.secrets.get(scope="corxinnvus6kvdevtest001", key="DATABRICKS-API-TOKEN-WS1"),
+        "warehouse_id": dbutils.secrets.get(scope="corxinnvus6kvdevtest001", key="inavi-warehouse-id-ws1"),
+    },
+    {
+        "name"        : "Workspace 2 – QA",
+        "domain"      : dbutils.secrets.get(scope="corxinnvus6kvdevtest001", key="inavi-domainurl-ws2"),
+        "token"       : dbutils.secrets.get(scope="corxinnvus6kvdevtest001", key="DATABRICKS-API-TOKEN-WS2"),
+        "warehouse_id": dbutils.secrets.get(scope="corxinnvus6kvdevtest001", key="inavi-warehouse-id-ws2"),
+    },
+    {
+        "name"        : "Workspace 3 – Prod",
+        "domain"      : dbutils.secrets.get(scope="corxinnvus6kvdevtest001", key="inavi-domainurl-ws3"),
+        "token"       : dbutils.secrets.get(scope="corxinnvus6kvdevtest001", key="DATABRICKS-API-TOKEN-WS3"),
+        "warehouse_id": dbutils.secrets.get(scope="corxinnvus6kvdevtest001", key="inavi-warehouse-id-ws3"),
+    },
+    # ➕ Add more workspaces here by copying the block above
+]
+
+# ─────────────────────────────────────────────
+# 4.  DEPLOYMENT FUNCTION
+# ─────────────────────────────────────────────
+def deploy_to_workspace(ws: dict) -> dict:
+    """
+    Deploy the Genie Space to a single workspace.
+    Returns a result dict with status info.
+    """
+    url     = f"{ws['domain']}/api/2.0/genie/spaces"
+    headers = {
+        "Authorization" : f"Bearer {ws['token']}",
+        "Content-Type"  : "application/json",
+    }
+    payload = {
+        "warehouse_id"    : ws["warehouse_id"],
+        "parent_path"     : PARENT_PATH,
+        "serialized_space": SERIALIZED_SPACE,
+        "title"           : GENIE_TITLE,
+        "description"     : GENIE_DESCRIPTION,
+    }
+
+    try:
+        response = requests.post(url, headers=headers, data=json.dumps(payload), timeout=60)
+
+        if response.status_code == 200:
+            return {
+                "workspace" : ws["name"],
+                "status"    : "SUCCESS ✅",
+                "details"   : response.json(),
+            }
+        else:
+            return {
+                "workspace" : ws["name"],
+                "status"    : f"FAILED ❌ (HTTP {response.status_code})",
+                "details"   : response.text,
+            }
+
+    except Exception as e:
+        return {
+            "workspace" : ws["name"],
+            "status"    : f"ERROR ❌ (Exception)",
+            "details"   : str(e),
+        }
+
+
+# ─────────────────────────────────────────────
+# 5.  RUN DEPLOYMENT ACROSS ALL WORKSPACES
+# ─────────────────────────────────────────────
+print("=" * 60)
+print(f"  Deploying: {GENIE_TITLE}")
+print(f"  Total workspaces: {len(WORKSPACES)}")
+print("=" * 60)
+
+results = []
+
+for ws in WORKSPACES:
+    print(f"\n🚀 Deploying to: {ws['name']} ...")
+    result = deploy_to_workspace(ws)
+    results.append(result)
+    print(f"   Status  : {result['status']}")
+    print(f"   Details : {result['details']}")
+
+# ─────────────────────────────────────────────
+# 6.  SUMMARY REPORT
+# ─────────────────────────────────────────────
+print("\n" + "=" * 60)
+print("  DEPLOYMENT SUMMARY")
+print("=" * 60)
+
+success_count = sum(1 for r in results if "SUCCESS" in r["status"])
+fail_count    = len(results) - success_count
+
+for r in results:
+    print(f"  {r['status']}  →  {r['workspace']}")
+
+print("-" * 60)
+print(f"  ✅ Succeeded : {success_count}")
+print(f"  ❌ Failed    : {fail_count}")
+print(f"  📦 Total     : {len(results)}")
+print("=" * 60)
