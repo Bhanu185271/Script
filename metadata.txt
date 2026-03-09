@@ -1,0 +1,646 @@
+import uuid
+from pyspark.sql import functions as F
+from pyspark.sql.types import IntegerType, FloatType, DoubleType, DecimalType, LongType, StringType, DateType, TimestampType, BooleanType
+import pandas as pd
+
+
+excel_path = "/Workspace/Shared/iNavi_Metadata/metadata/source/Normal Search Metadata UAT.xlsx"
+sheet_name = "Table_List"
+
+# Assume the sheet has columns: "table_name" and "description"
+df_descriptions = pd.read_excel(excel_path, sheet_name=sheet_name)
+
+TABLE_DESCRIPTIONS = dict(zip(df_descriptions["Table_Name"], df_descriptions["Table Description"]))
+BUSINESS_DOMAINS = dict(zip(df_descriptions["Table_Name"], df_descriptions.get("business_domain", "")))
+PERSONA_NAME = dict(zip(df_descriptions["Table_Name"], df_descriptions["persona_name"]))
+
+import pandas as pd
+import uuid
+from pyspark.sql import functions as F
+from pyspark.sql.types import (
+    StringType, IntegerType, FloatType, DoubleType, DecimalType,
+    BooleanType, DateType, TimestampType, LongType
+)
+from datetime import datetime
+
+# -------------------------------------------------------------------
+# Step 1: Read Excel file and extract column-level metadata
+# -------------------------------------------------------------------
+excel_path = "/Workspace/Shared/iNavi_Metadata/metadata/source/Normal Search Metadata UAT.xlsx"
+
+# Load Excel workbook
+xls = pd.ExcelFile(excel_path)
+
+# Skip instruction/config sheets
+sheet_names_to_read = [s for s in xls.sheet_names if s not in ["General Instructions", "Table_List", "bootstrap_QA"]]
+
+# Dictionary to store {table_name: {column_name: {"description": ..., "isRequired": ...}}}
+TABLE_COLUMN_DESCRIPTIONS = {}
+
+for sheet_name in sheet_names_to_read:
+    df = pd.read_excel(xls, sheet_name=sheet_name, header=1)
+    df.columns = df.columns.str.strip().str.lower()
+
+    # Handle missing columns gracefully
+    required_cols = ["column name", "description"]
+    for col in required_cols:
+        if col not in df.columns:
+            raise ValueError(f"Missing required column '{col}' in sheet '{sheet_name}'")
+
+    # Add `isrequired` column if not present
+    if "isrequired" not in df.columns:
+        df["isrequired"] = "Y"  # default if column missing
+
+    # Normalize and clean data
+    df["isrequired"] = df["isrequired"].fillna("Y").astype(str).str.upper().str.strip()
+
+    col_info_dict = {
+        row["column name"]: {
+            "description": row["description"],
+            "isRequired": row["isrequired"] if row["isrequired"] in ["Y", "N"] else "Y"
+        }
+        for _, row in df.iterrows()
+    }
+
+    TABLE_COLUMN_DESCRIPTIONS[sheet_name.lower()] = col_info_dict
+
+print("Loaded column descriptions for tables:", list(TABLE_COLUMN_DESCRIPTIONS.keys()))
+
+
+
+from pyspark.sql import functions as F
+from pyspark.sql.types import (
+    StringType, IntegerType, FloatType, DoubleType, DecimalType,
+    BooleanType, DateType, TimestampType, LongType
+)
+from datetime import datetime
+
+TABLE_COLUMN_DESCRIPTIONS_CI = {
+    table.lower(): {col.lower(): val for col, val in cols.items()}
+    for table, cols in TABLE_COLUMN_DESCRIPTIONS.items()
+}
+
+def try_parse_date(val):
+    """Try parsing various month/year formats."""
+    if val is None:
+        return None
+    val = str(val).strip()
+    fmts = ["%m%Y", "%m-%Y", "%Y-%m", "%b-%Y", "%b%Y", "%Y%b", "%Y%m"]
+    for fmt in fmts:
+        try:
+            return datetime.strptime(val, fmt).date()
+        except Exception:
+            continue
+    return None
+
+def profile_column(df, col, dtype, comment=None, total_count=0, table_name=None, partition_cols=None, primary_key_cols=None):
+    col_lower = col.lower()
+    table_lower = table_name.lower() if table_name else None
+
+    # Default values
+    col_comment = comment or ""
+    is_required = "Y"
+
+    # Lookup Excel metadata if available
+    if table_lower and table_lower in TABLE_COLUMN_DESCRIPTIONS_CI:
+        col_info = TABLE_COLUMN_DESCRIPTIONS_CI[table_lower].get(col_lower, {})
+        if not isinstance(col_info, dict):
+            col_info = {}
+        col_comment = str(col_info.get("description", col_comment) or "")
+        is_required = str(col_info.get("isRequired", "Y") or "Y").upper()
+
+    # Base result structure with None for all except required fields
+    result = {
+        "column_name": col,
+        "data_type": str(dtype),
+        "description": col_comment,
+        "is_partition_column": None,
+        "fill_rate": None,
+        "isRequired": is_required,
+        "type_category": None,
+        "column_metrics": {
+            "numeric_measure": {
+                "min_value": None,
+                "max_value": None,
+                "mean_value": None,
+                "median_value": None,
+                "std_deviation": None,
+                "percentile_25": None,
+                "percentile_75": None,
+                "contains_negative": None,
+                "decimal_places": None,
+                "common_aggregations": None,
+                "unit_of_measure": None
+            },
+            "categorical/text": {
+                "distinct_count": None,
+                "value_distribution": None,
+                "has_null_category": None,
+                "default_value": None,
+                "avg_length": None,
+                "min_length": None,
+                "max_length": None,
+                "contains_special_chars": None,
+                "contains_numbers": None,
+                "sample_values": None
+            },
+            "datetime": {
+                "min_date": None,
+                "max_date": None,
+                "date_format": None,
+                "granularity": None,
+                "timezone": None,
+                "contains_future_dates": None,
+                "common_date_parts_used": None
+            },
+            "boolean": {
+                "true_count": None,
+                "false_count": None,
+                "null_count": None,
+                "true_percentage": None,
+                "representation": None
+            }
+        }
+    }
+
+    excluded_columns = ['default_consent_text_vod__c', 'disclaimer_text_vod__c', 'signature_vod__c', 'filepath']
+
+    # ---------- String profiling ----------
+    if isinstance(dtype, StringType):
+        sample_values = [r[col] for r in df.select(col).distinct().limit(5).collect()]
+        if col_lower in ["id", "url"] or col_lower in [c.lower() for c in excluded_columns]:
+            sample_values = []
+        result["type_category"] = "categorical/text"
+        result["column_metrics"]["categorical/text"]["sample_values"] = sample_values
+
+    # ---------- Date/Time profiling ----------
+    elif isinstance(dtype, (DateType, TimestampType)):
+        distinct_dates = df.select(col).distinct().limit(5).collect()
+        date_formats = [d[col].strftime("%m-%Y") for d in distinct_dates if d[col] is not None]
+        result["type_category"] = "datetime"
+        result["column_metrics"]["datetime"]["date_format"] = date_formats
+
+    # ---------- For all other types ----------
+    else:
+        result["type_category"] = str(dtype)  # keep type info, metrics remain None
+
+    return result
+
+
+import uuid
+from pyspark.sql import functions as F
+
+# Case-insensitive mappings
+TABLE_DESCRIPTIONS_CI = {k.lower(): v for k, v in TABLE_DESCRIPTIONS.items()}
+BUSINESS_DOMAINS_CI = {k.lower(): v for k, v in BUSINESS_DOMAINS.items()}
+PERSONA_NAME_CI = {k.lower(): v for k, v in PERSONA_NAME.items()}
+
+def split_to_list(val):
+    """
+    Convert a semicolon-delimited string to a clean list of values.
+    Handles None, list, or single string inputs gracefully.
+    """
+    if isinstance(val, list):
+        return [x.strip() for x in val if x and isinstance(x, str)]
+    elif isinstance(val, str):
+        separators = ";" if ";" in val else ","
+        parts = [x.strip() for x in val.split(separators) if x.strip()]
+        return parts
+    else:
+        return []
+
+def profile_table(spark, catalog, schema, table):
+    table_fqn = f"{catalog}.{schema}.{table}"
+    df = spark.table(table_fqn)
+
+    # Lookups
+    table_description = TABLE_DESCRIPTIONS_CI.get(table.lower(), None)
+    business_domain = BUSINESS_DOMAINS_CI.get(table.lower(), None)
+    persona_name = PERSONA_NAME_CI.get(table.lower(), None)
+
+    # Ensure these are lists
+    business_domain_list = split_to_list(business_domain)
+    persona_name_list = split_to_list(persona_name)
+
+    content = f"{table}; {table_description}" if table_description else f"{table};"
+
+    # Base metadata, only required fields populated
+    metadata = {
+        "id": str(uuid.uuid4()),
+        "content": content,
+        "persona_name": persona_name_list,
+        "table_name": table,
+        "catalog": catalog,
+        "schema": schema,
+        "row_count": None,
+        "size_mb": None,
+        "last_updated_timestamp": None,
+        "update_frequency": None,
+        "data_retention_period": None,
+        "table_description": table_description,
+        "business_domain": business_domain_list,
+        "is_view": None,
+        "columns": []
+    }
+
+    # Profile columns using the modified profile_column function
+    for col in df.schema.fields:
+        col_profile = profile_column(
+            df=df,
+            col=col.name,
+            dtype=col.dataType,
+            comment=None,
+            total_count=None,  # not needed since metrics are None
+            table_name=table,
+            partition_cols=None,
+            primary_key_cols=None
+        )
+        metadata["columns"].append(col_profile)
+
+    return metadata
+	
+	
+
+
+from pyspark.sql import functions as F
+
+# Read the CSV file into a DataFrame and filter for active_flag == 'Y'
+# tables_config = (
+#     spark.read.format('csv')
+#     .option('header', 'true')
+#     .load('/Workspace/Shared/iNavi_Metadata/metadata/config_files/table_metadata_config.csv')
+#     .filter(F.col("active_flag") == 'Y')
+# )
+
+# # Collect configs into a list of dicts
+# configs = tables_config.select("unity_catalog", "schema", "table_name").collect()
+
+# Temporary configs for testing
+configs = [
+    {"unity_catalog": "rx_g_digital_fuel_commercial_prod001", "schema": "unified_dashboard", "table_name": "ce_veeva_email"},
+    {"unity_catalog": "rx_g_digital_fuel_commercial_prod001", "schema": "unified_dashboard", "table_name": "ce_veeva_calls"},
+    {"unity_catalog": "rx_g_digital_fuel_commercial_prod001", "schema": "unified_dashboard", "table_name": "f_user_journey"},
+    {"unity_catalog": "rx_g_digital_fuel_commercial_prod001", "schema": "unified_dashboard", "table_name": "ce_mass_email_kpi"},
+    {"unity_catalog": "rx_g_digital_fuel_commercial_prod001", "schema": "unified_dashboard", "table_name": "ce_portal_kpi"},
+    {"unity_catalog": "rx_g_digital_fuel_commercial_prod001", "schema": "unified_dashboard", "table_name": "ce_mass_email"},
+    {"unity_catalog": "rx_g_adv_analytics_commercial_devtest001", "schema": "inavi", "table_name": "vw_veeva_presentation_slides"},
+    {"unity_catalog": "rx_g_digital_fuel_commercial_prod001", "schema": "unified_dashboard", "table_name": "ce_portal"},
+    {"unity_catalog": "rx_g_adv_analytics_commercial_devtest001", "schema": "inavi", "table_name": "vw_hcp_atlas_segments"},
+    {"unity_catalog": "rx_g_digital_fuel_commercial_prod001", "schema": "cdm", "table_name": "stg_veeva_mccp"},
+    {"unity_catalog": "rx_g_adv_analytics_commercial_devtest001", "schema": "inavi", "table_name": "vw_email_consents"},
+    {"unity_catalog": "rx_g_adv_analytics_commercial_devtest001", "schema": "inavi", "table_name": "vw_mccp_universe"},
+    {"unity_catalog": "rx_g_cda_prod001", "schema": "cephub", "table_name": "vw_f_insight_external_data"},
+    {"unity_catalog": "rx_g_digital_fuel_commercial_prod001", "schema": "unified_dashboard", "table_name": "ce_instant_message"},
+    {"unity_catalog": "rx_g_adv_analytics_commercial_devtest001", "schema": "inavi", "table_name": "vw_uj_effective_score_benchmark"},
+    {"unity_catalog": "rx_g_digital_fuel_commercial_prod001", "schema": "unified_dashboard", "table_name": "f_call_mapping_data"},
+    {"unity_catalog": "rx_g_adv_analytics_commercial_devtest001", "schema": "inavi", "table_name": "vw_ocm_customer_journey"},
+    {"unity_catalog": "rx_g_digital_fuel_commercial_prod001", "schema": "unified_dashboard", "table_name": "ce_webinar_kpi"},
+    {"unity_catalog": "rx_g_adv_analytics_commercial_devtest001", "schema": "inavi", "table_name": "vw_f_channel_dynmcs_mthly"},
+    {"unity_catalog": "rx_g_adv_analytics_commercial_devtest001", "schema": "inavi", "table_name": "vw_f_channel_dynamics_qtrly"},
+    {"unity_catalog": "rx_g_adv_analytics_commercial_devtest001", "schema": "inavi", "table_name": "vw_hcp_atlas_ace_es_segments"}
+]
+
+# Example usage
+
+for config in configs:
+    print(config["unity_catalog"], config["schema"], config["table_name"])
+
+
+# List to store all table metadata
+table_metadata = []
+
+# Loop through all tables in config
+for row in configs:
+    catalog = row["unity_catalog"]
+    schema = row["schema"]
+    table_name = row["table_name"]
+
+    try:
+        metadata_dict = profile_table(spark, catalog, schema, table_name)
+        table_metadata.append(metadata_dict)
+        print(f"Profiled table: {catalog}.{schema}.{table_name}")
+    except Exception as e:
+        print(f"Failed to profile {catalog}.{schema}.{table_name}: {e}")
+
+
+from datetime import datetime
+from delta.tables import DeltaTable
+import uuid
+
+target_table = "rx_g_adv_analytics_commercial_devtest001.inavi.table_metadata_entity"
+audit_table  = "rx_g_adv_analytics_commercial_devtest001.inavi.table_metadata_entity_audit"
+run_changes_table = "rx_g_adv_analytics_commercial_devtest001.inavi.table_metadata_entity_run_changes"
+
+spark.sql(f"""
+CREATE TABLE IF NOT EXISTS {target_table} (
+    entity_id           STRING,
+    catalog             STRING,
+    schema              STRING,
+    table_name          STRING,
+    column_name         STRING,
+    data_type           STRING,
+    column_description  STRING,
+    is_required         STRING,
+    business_domain     ARRAY<STRING>,
+    persona_name        ARRAY<STRING>,
+    run_id              STRING,
+    is_current          BOOLEAN,
+    created_ts          TIMESTAMP,
+    updated_ts          TIMESTAMP
+) USING delta
+""")
+
+spark.sql(f"""
+CREATE TABLE IF NOT EXISTS {audit_table} (
+    audit_id            STRING,
+    entity_id           STRING,
+    catalog             STRING,
+    schema              STRING,
+    table_name          STRING,
+    column_name         STRING,
+    data_type           STRING,
+    column_description  STRING,
+    is_required         STRING,
+    business_domain     ARRAY<STRING>,
+    persona_name        ARRAY<STRING>,
+    run_id              STRING,
+    audit_ts            TIMESTAMP
+) USING delta
+""")
+
+spark.sql(f"""
+CREATE TABLE IF NOT EXISTS {run_changes_table} (
+    run_id              STRING,
+    catalog             STRING,
+    schema              STRING,
+    table_name          STRING,
+    column_name         STRING,
+    old_description     STRING,
+    new_description     STRING,
+    old_is_required     STRING,
+    new_is_required     STRING,
+    old_data_type       STRING,
+    new_data_type       STRING,
+    change_ts           TIMESTAMP
+) USING delta
+""")
+
+run_id = str(uuid.uuid4())
+run_ts = datetime.utcnow()
+
+entity_records = []
+
+for meta in table_metadata:
+    for col in meta["columns"]:
+        entity_records.append({
+            "entity_id": str(uuid.uuid4()),
+            "catalog": meta["catalog"],
+            "schema": meta["schema"],
+            "table_name": meta["table_name"],
+            "column_name": col["column_name"].lower(),
+            "data_type": col["data_type"],
+            "column_description": col["description"],
+            "is_required": col["isRequired"],
+            "business_domain": meta["business_domain"],
+            "persona_name": meta["persona_name"],
+            "run_id": run_id,
+            "is_current": True,
+            "created_ts": run_ts,
+            "updated_ts": run_ts
+        })
+
+entity_df = spark.createDataFrame(entity_records)
+
+
+if spark.catalog.tableExists(target_table):
+    tgt = DeltaTable.forName(spark, target_table)
+
+    tgt.alias("t") \
+      .merge(
+          entity_df.alias("s"),
+          """
+          t.catalog = s.catalog AND
+          t.schema = s.schema AND
+          t.table_name = s.table_name AND
+          t.column_name = s.column_name AND
+          t.is_current = true
+          """
+      ) \
+      .whenMatchedUpdate(
+          condition="""
+          t.column_description <> s.column_description OR
+          t.is_required <> s.is_required OR
+          t.data_type <> s.data_type
+          """,
+          set={
+              "is_current": "false",
+              "updated_ts": "current_timestamp()"
+          }
+      ) \
+      .whenNotMatchedInsertAll() \
+      .execute()
+else:
+    entity_df.write.format("delta").saveAsTable(target_table)
+
+current_df = spark.table(target_table).filter("is_current = true")
+
+new_current_df = (
+    entity_df.alias("n")
+    .join(
+        current_df.alias("c"),
+        ["catalog", "schema", "table_name", "column_name"],
+        "left"
+    )
+    .filter(F.col("c.column_name").isNull())
+    .select("n.*")  # Select only columns from entity_df to avoid duplicates
+)
+
+new_current_df.write \
+    .format("delta") \
+    .mode("append") \
+    .saveAsTable(target_table)
+
+
+# audit_df = (
+#     entity_df
+#     .withColumn("audit_id", F.lit(str(uuid.uuid4())))
+#     .withColumn("audit_ts", F.current_timestamp())
+# )
+
+# audit_df.write \
+#     .format("delta") \
+#     .mode("append") \
+#     .saveAsTable(audit_table)
+
+audit_df = (
+    entity_df
+    .select(
+        "entity_id",
+        "catalog",
+        "schema",
+        "table_name",
+        "column_name",
+        "data_type",
+        "column_description",
+        "is_required",
+        "business_domain",
+        "persona_name",
+        "run_id"
+    )
+    .withColumn("audit_id", F.lit(str(uuid.uuid4())))
+    .withColumn("audit_ts", F.current_timestamp())
+)
+
+audit_df.write \
+    .format("delta") \
+    .mode("append") \
+    .saveAsTable(audit_table)
+
+
+if spark.catalog.tableExists(target_table):
+    previous_df = (
+        spark.table(target_table)
+        .filter(F.col("is_current") == True)
+        .select(
+            "catalog", "schema", "table_name", "column_name",
+            "column_description", "is_required", "data_type"
+        )
+    )
+
+    changes_df = (
+        entity_df.alias("new")
+        .join(
+            previous_df.alias("old"),
+            ["catalog", "schema", "table_name", "column_name"],
+            "left"
+        )
+        .filter(
+            (F.col("old.column_description").isNull()) |
+            (F.col("new.column_description") != F.col("old.column_description")) |
+            (F.col("new.is_required") != F.col("old.is_required")) |
+            (F.col("new.data_type") != F.col("old.data_type"))
+        )
+        .select(
+            F.lit(run_id).alias("run_id"),
+            F.col("catalog"),
+            F.col("schema"),
+            F.col("table_name"),
+            F.col("column_name"),
+            F.col("old.column_description").alias("old_description"),
+            F.col("new.column_description").alias("new_description"),
+            F.col("old.is_required").alias("old_is_required"),
+            F.col("new.is_required").alias("new_is_required"),
+            F.col("old.data_type").alias("old_data_type"),
+            F.col("new.data_type").alias("new_data_type"),
+            F.current_timestamp().alias("change_ts")
+        )
+    )
+
+    changes_df.write \
+        .format("delta") \
+        .mode("append") \
+        .saveAsTable(run_changes_table)
+
+
+
+
+import re
+import json
+import uuid
+from datetime import datetime, date, timezone
+from decimal import Decimal
+
+# Regex for datetime detection
+DATETIME_RE = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(\.\d+)?$")
+
+def clean_datetime(val):
+    """Convert datetime or date objects/strings -> ISO 8601 UTC string"""
+    if isinstance(val, datetime):
+        return val.replace(tzinfo=timezone.utc).isoformat()
+    elif isinstance(val, date):
+        # Convert date to datetime at midnight UTC
+        return datetime(val.year, val.month, val.day, tzinfo=timezone.utc).isoformat()
+    elif isinstance(val, str):
+        try:
+            dt = datetime.strptime(val, "%Y-%m-%d %H:%M:%S.%f")
+        except ValueError:
+            try:
+                dt = datetime.strptime(val, "%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                return val  # Not a datetime string
+        return dt.replace(tzinfo=timezone.utc).isoformat()
+    return val
+
+def remove_nulls_and_fix(obj):
+    """
+    Recursively clean objects:
+    - Remove keys with None values from dicts.
+    - Remove "partition_summary" key.
+    - Convert UUID -> str
+    - Convert datetime/date -> ISO8601 UTC string
+    - Convert Decimal -> float
+    - Replace all occurrences of "categorical/text" -> "categorical_text"
+    - Remove None from lists
+    """
+    if isinstance(obj, dict):
+        cleaned = {}
+        for k, v in obj.items():
+            if v is not None and k != "partition_summary":
+                new_key = "categorical_text" if k == "categorical/text" else k
+                cleaned[new_key] = remove_nulls_and_fix(v)
+        return cleaned
+    elif isinstance(obj, list):
+        return [remove_nulls_and_fix(x) for x in obj if x is not None]
+    elif isinstance(obj, str):
+        if obj == "categorical/text":
+            return "categorical_text"
+        if DATETIME_RE.match(obj):
+            return clean_datetime(obj)
+        return obj
+    elif isinstance(obj, uuid.UUID):
+        return str(obj)
+    elif isinstance(obj, (datetime, date)):
+        return clean_datetime(obj)
+    elif isinstance(obj, Decimal):
+        return float(obj)
+    else:
+        return obj
+
+# Assuming table_metadata is defined somewhere above
+# Apply cleaning to entire table_metadata
+cleaned = [remove_nulls_and_fix(doc) for doc in table_metadata]
+
+# Wrap inside {"documents": [...]}
+output_json = {"documents": cleaned}
+
+# Dump to JSON file (pretty print)
+with open("table_metadata.json", "w", encoding="utf-8") as f:
+    json.dump(output_json, f, indent=2, ensure_ascii=False)
+
+
+import json
+
+# Path in ADLS
+output_path = "/Workspace/Shared/iNavi_Metadata/metadata/payload/table_metadata/table_metadata_payload.json"
+
+# Convert to a JSON string (with UUIDs converted to strings if needed)
+json_data = json.dumps(output_json, indent=2, default=str)
+
+with open(output_path, 'w', encoding='utf-8') as f:
+    json.dump(output_json, f, indent=2, ensure_ascii=False)
+
+print(f"JSON file saved at: {output_path}")
+
+
+
+pip install --force-reinstall "/Workspace/Shared/iNavi_Metadata/metadata/wheel/inavi_genbi-0.1.0-py3-none-any.whl"	
+
+# Example
+from scripts import generate_embeddings
+
+!python -m scripts.generate_embeddings \
+    -i "/Workspace/Shared/iNavi_Metadata/metadata/payload/table_metadata/table_metadata_payload.json" \
+    --transform template \
+    --template "Table Name: {table_name}. Table Description: {table_description}." \
+    --field "vector_field" \
+    -o "/Workspace/Shared/iNavi_Metadata/metadata/embeddings/table_metadata/table_metadata_embd.json"
