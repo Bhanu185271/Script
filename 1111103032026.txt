@@ -1,6 +1,524 @@
 Import :
 
 
+"""
+=============================================================
+  Databricks Genie — UPDATE Framework (Update-Only)
+=============================================================
+
+  HOW GENIE UPDATES WORK (Read this first!):
+  ───────────────────────────────────────────
+  Genie does NOT have separate APIs for updating title,
+  table descriptions, joins, benchmarks, etc.
+
+  Instead, EVERYTHING lives inside one JSON blob called
+  "serialized_space". The update pattern is always:
+
+      STEP 1: GET the current space  →  extract serialized_space JSON
+      STEP 2: Modify the specific section you want
+      STEP 3: PUT the whole thing back via the Update API
+
+  This framework handles all of that for you. You just call
+  a simple function like:
+      updater.update_table_description("orders", "New description", changed_by="alice")
+
+  Supported updates:
+    ✅ Space title
+    ✅ Table description
+    ✅ Column description (per table, per column)
+    ✅ Join expressions (join_specs)
+    ✅ SQL expressions (measures, filters, expressions inside sql_snippets)
+    ✅ Benchmarks (sample_questions in config)
+
+=============================================================
+"""
+
+import json
+import logging
+import requests
+from copy import deepcopy
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Optional
+
+
+# ─────────────────────────────────────────────────────────────
+#  LOGGER — prints to terminal + writes to genie_updates.log
+# ─────────────────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler("genie_updates.log"),
+    ],
+)
+logger = logging.getLogger(__name__)
+
+AUDIT_LOG_FILE = "genie_audit_log.json"
+
+
+# ─────────────────────────────────────────────────────────────
+#  AUDIT LOG WRITER
+# ─────────────────────────────────────────────────────────────
+def _write_audit(
+    action: str,
+    changed_by: str,
+    space_id: str,
+    details: dict,
+    status: str = "SUCCESS",
+    error: Optional[str] = None,
+):
+    """Append one record to the audit log JSON file."""
+    entry = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "action": action,
+        "changed_by": changed_by,
+        "space_id": space_id,
+        "status": status,
+        "details": details,
+    }
+    if error:
+        entry["error"] = error
+
+    path = Path(AUDIT_LOG_FILE)
+    logs = json.loads(path.read_text()) if path.exists() else []
+    logs.append(entry)
+    path.write_text(json.dumps(logs, indent=2))
+
+    icon = "✅" if status == "SUCCESS" else "❌"
+    logger.info(f"{icon} [{action}] by={changed_by} space={space_id} → {status}")
+
+
+# ─────────────────────────────────────────────────────────────
+#  GENIE UPDATER — THE MAIN CLASS
+# ─────────────────────────────────────────────────────────────
+class GenieUpdater:
+    """
+    Update any part of a Databricks Genie space via REST API.
+
+    Usage:
+        updater = GenieUpdater(
+            host="https://your-workspace.azuredatabricks.net",
+            token="dapi_your_token",
+            space_id="3c409c00b54a44c79f79da06b82460e2",
+        )
+        updater.update_table_description("orders", "New description", changed_by="alice")
+    """
+
+    def __init__(self, host: str, token: str, space_id: str):
+        self.host = host.rstrip("/")
+        self.space_id = space_id
+        self.headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        }
+        self._base = f"{self.host}/api/2.0/genie/spaces/{space_id}"
+
+    # ═══════════════════════════════════════════════════════
+    #  INTERNAL HELPERS  (you don't need to call these)
+    # ═══════════════════════════════════════════════════════
+
+    def _get_space(self) -> dict:
+        """Fetch the full current Genie space (with serialized_space)."""
+        url = f"{self._base}?include_serialized_space=true"
+        resp = requests.get(url, headers=self.headers, timeout=30)
+        resp.raise_for_status()
+        return resp.json()
+
+    def _push_update(self, payload: dict) -> dict:
+        """
+        Send the updated payload back to Databricks.
+        payload must include title, warehouse_id, serialized_space (as a string).
+        """
+        resp = requests.put(self._base, headers=self.headers, json=payload, timeout=30)
+        if not resp.ok:
+            raise requests.HTTPError(f"API {resp.status_code}: {resp.text}", response=resp)
+        return resp.json()
+
+    def _load_serialized(self, space: dict) -> dict:
+        """
+        Parse the serialized_space string → Python dict so we can edit it.
+        serialized_space comes as an escaped JSON string inside the response.
+        """
+        raw = space.get("serialized_space", "{}")
+        return json.loads(raw) if isinstance(raw, str) else raw
+
+    def _run_update(
+        self,
+        action: str,
+        changed_by: str,
+        mutate_fn,          # a function that takes (config_dict) and mutates it
+        details: dict,
+    ):
+        """
+        Core engine used by every update method:
+          1. GET current space
+          2. Parse serialized_space JSON
+          3. Call mutate_fn to apply your change
+          4. PUT the updated space back
+          5. Write audit log
+        """
+        try:
+            space = self._get_space()
+            config = self._load_serialized(space)
+            before_snapshot = deepcopy(config)   # save before state for audit log
+
+            mutate_fn(config)                    # ← your change goes here
+
+            # Re-serialize and push back
+            payload = {
+                "title": space.get("title"),
+                "warehouse_id": space.get("warehouse_id"),
+                "serialized_space": json.dumps(config),
+            }
+            result = self._push_update(payload)
+
+            _write_audit(
+                action=action,
+                changed_by=changed_by,
+                space_id=self.space_id,
+                details={**details, "note": "before state captured in audit log"},
+            )
+            return result
+
+        except Exception as e:
+            _write_audit(
+                action=action,
+                changed_by=changed_by,
+                space_id=self.space_id,
+                details=details,
+                status="FAILURE",
+                error=str(e),
+            )
+            raise
+
+    # ═══════════════════════════════════════════════════════
+    #  1. UPDATE SPACE TITLE
+    # ═══════════════════════════════════════════════════════
+    def update_title(self, new_title: str, changed_by: str) -> dict:
+        """
+        Rename the Genie space.
+
+        Args:
+            new_title   : The new display name for the space
+            changed_by  : Your email/name for the audit log
+        """
+        space = self._get_space()
+        old_title = space.get("title")
+
+        try:
+            result = self._push_update({
+                "title": new_title,
+                "warehouse_id": space.get("warehouse_id"),
+                "serialized_space": space.get("serialized_space"),
+            })
+            _write_audit(
+                action="UPDATE_TITLE",
+                changed_by=changed_by,
+                space_id=self.space_id,
+                details={"old_title": old_title, "new_title": new_title},
+            )
+            return result
+        except Exception as e:
+            _write_audit("UPDATE_TITLE", changed_by, self.space_id,
+                         {"new_title": new_title}, "FAILURE", str(e))
+            raise
+
+    # ═══════════════════════════════════════════════════════
+    #  2. UPDATE TABLE DESCRIPTION
+    # ═══════════════════════════════════════════════════════
+    def update_table_description(
+        self,
+        table_identifier: str,      # e.g. "catalog.schema.orders"
+        new_description: str,
+        changed_by: str,
+    ) -> dict:
+        """
+        Update the description of a table inside the Genie space.
+
+        Args:
+            table_identifier : Full 3-level name e.g. "sales.analytics.orders"
+            new_description  : New description text for the table
+            changed_by       : Your email/name for the audit log
+
+        How it works:
+            Genie stores table info in serialized_space → data_sources → tables[].
+            We find the matching table by identifier and update its description.
+        """
+        def mutate(config: dict):
+            tables = config.get("data_sources", {}).get("tables", [])
+            for table in tables:
+                if table.get("identifier") == table_identifier:
+                    table["description"] = [new_description]   # Genie uses list format
+                    return
+            raise ValueError(
+                f"Table '{table_identifier}' not found in this Genie space. "
+                f"Available: {[t.get('identifier') for t in tables]}"
+            )
+
+        return self._run_update(
+            action="UPDATE_TABLE_DESCRIPTION",
+            changed_by=changed_by,
+            mutate_fn=mutate,
+            details={"table": table_identifier, "new_description": new_description},
+        )
+
+    # ═══════════════════════════════════════════════════════
+    #  3. UPDATE COLUMN DESCRIPTION
+    # ═══════════════════════════════════════════════════════
+    def update_column_description(
+        self,
+        table_identifier: str,      # e.g. "catalog.schema.orders"
+        column_name: str,           # e.g. "order_date"
+        new_description: str,
+        changed_by: str,
+    ) -> dict:
+        """
+        Update the description of a specific column inside a table.
+
+        Args:
+            table_identifier : Full 3-level table name e.g. "sales.analytics.orders"
+            column_name      : The column to update e.g. "order_date"
+            new_description  : New description for this column
+            changed_by       : Your email/name for the audit log
+
+        How it works:
+            Genie stores column info in data_sources → tables[] → column_configs[].
+            If the column doesn't have a config entry yet, we create one.
+        """
+        def mutate(config: dict):
+            tables = config.get("data_sources", {}).get("tables", [])
+            for table in tables:
+                if table.get("identifier") == table_identifier:
+                    cols = table.setdefault("column_configs", [])
+                    # Find existing column config or create new one
+                    col = next((c for c in cols if c.get("column_name") == column_name), None)
+                    if col:
+                        col["description"] = new_description
+                    else:
+                        # Column didn't have a config → add a new entry
+                        cols.append({
+                            "column_name": column_name,
+                            "description": new_description,
+                        })
+                    return
+            raise ValueError(f"Table '{table_identifier}' not found in Genie space.")
+
+        return self._run_update(
+            action="UPDATE_COLUMN_DESCRIPTION",
+            changed_by=changed_by,
+            mutate_fn=mutate,
+            details={
+                "table": table_identifier,
+                "column": column_name,
+                "new_description": new_description,
+            },
+        )
+
+    # ═══════════════════════════════════════════════════════
+    #  4. UPDATE JOIN EXPRESSION
+    # ═══════════════════════════════════════════════════════
+    def update_join(
+        self,
+        join_id: str,               # the "id" field of the join_spec to update
+        new_sql: str,               # the new JOIN ON condition
+        changed_by: str,
+        left_alias: Optional[str] = None,    # optional: rename the left table alias
+        right_alias: Optional[str] = None,   # optional: rename the right table alias
+    ) -> dict:
+        """
+        Update an existing JOIN expression in the Genie space.
+
+        Args:
+            join_id     : The 32-char hex ID of the join_spec to update
+                          (find it by calling get_current_config())
+            new_sql     : The JOIN ON condition, e.g. "orders.customer_id = customers.id"
+            changed_by  : Your email/name
+            left_alias  : Optionally change the left table alias
+            right_alias : Optionally change the right table alias
+
+        How it works:
+            Joins live in serialized_space → instructions → join_specs[].
+            We find by ID and update the sql field (and optionally aliases).
+        """
+        def mutate(config: dict):
+            joins = config.get("instructions", {}).get("join_specs", [])
+            for join in joins:
+                if join.get("id") == join_id:
+                    join["sql"] = [new_sql]        # Genie uses list format for sql
+                    if left_alias:
+                        join.setdefault("left", {})["alias"] = left_alias
+                    if right_alias:
+                        join.setdefault("right", {})["alias"] = right_alias
+                    return
+            raise ValueError(
+                f"Join ID '{join_id}' not found. "
+                f"Available join IDs: {[j.get('id') for j in joins]}"
+            )
+
+        return self._run_update(
+            action="UPDATE_JOIN",
+            changed_by=changed_by,
+            mutate_fn=mutate,
+            details={"join_id": join_id, "new_sql": new_sql},
+        )
+
+    # ═══════════════════════════════════════════════════════
+    #  5. UPDATE BENCHMARK (sample question)
+    # ═══════════════════════════════════════════════════════
+    def update_benchmark(
+        self,
+        benchmark_id: str,          # 32-char hex ID of the sample_question
+        new_question: str,
+        changed_by: str,
+    ) -> dict:
+        """
+        Update a benchmark question (sample question) in the Genie space.
+
+        Benchmarks are the questions used to test Genie's accuracy.
+        They live in serialized_space → config → sample_questions[].
+
+        Args:
+            benchmark_id : The 32-char hex ID of the benchmark to update
+            new_question : The updated question text
+            changed_by   : Your email/name for the audit log
+        """
+        def mutate(config: dict):
+            benchmarks = config.get("config", {}).get("sample_questions", [])
+            for bm in benchmarks:
+                if bm.get("id") == benchmark_id:
+                    bm["question"] = [new_question]   # Genie uses list format
+                    return
+            raise ValueError(
+                f"Benchmark ID '{benchmark_id}' not found. "
+                f"Available IDs: {[b.get('id') for b in benchmarks]}"
+            )
+
+        return self._run_update(
+            action="UPDATE_BENCHMARK",
+            changed_by=changed_by,
+            mutate_fn=mutate,
+            details={"benchmark_id": benchmark_id, "new_question": new_question},
+        )
+
+    # ═══════════════════════════════════════════════════════
+    #  6. UPDATE SQL EXPRESSION (measure / filter / expression)
+    # ═══════════════════════════════════════════════════════
+    def update_sql_expression(
+        self,
+        expr_id: str,               # 32-char hex ID of the expression
+        expr_type: str,             # "measures", "filters", or "expressions"
+        new_sql: str,
+        changed_by: str,
+        new_display_name: Optional[str] = None,   # optionally rename it
+        new_synonyms: Optional[list] = None,       # optionally update synonyms
+    ) -> dict:
+        """
+        Update a SQL expression (measure, filter, or named expression).
+
+        These live in serialized_space → instructions → sql_snippets → {type}[].
+
+        Args:
+            expr_id          : The 32-char hex ID of the expression
+            expr_type        : One of "measures", "filters", "expressions"
+            new_sql          : The new SQL for this expression
+            changed_by       : Your email/name
+            new_display_name : Optionally rename the display name
+            new_synonyms     : Optionally update the list of synonym strings
+
+        Examples:
+            # Update a measure
+            updater.update_sql_expression(
+                expr_id="01f09972611f100000000000000000",
+                expr_type="measures",
+                new_sql="SUM(orders.net_amount)",
+                changed_by="alice",
+                new_display_name="net revenue",
+                new_synonyms=["net revenue", "revenue after discounts"],
+            )
+        """
+        VALID_TYPES = {"measures", "filters", "expressions"}
+        if expr_type not in VALID_TYPES:
+            raise ValueError(f"expr_type must be one of {VALID_TYPES}, got '{expr_type}'")
+
+        def mutate(config: dict):
+            snippets = config.get("instructions", {}).get("sql_snippets", {})
+            items = snippets.get(expr_type, [])
+            for item in items:
+                if item.get("id") == expr_id:
+                    item["sql"] = [new_sql]
+                    if new_display_name:
+                        item["display_name"] = new_display_name
+                    if new_synonyms is not None:
+                        item["synonyms"] = new_synonyms
+                    return
+            raise ValueError(
+                f"Expression ID '{expr_id}' not found in '{expr_type}'. "
+                f"Available IDs: {[i.get('id') for i in items]}"
+            )
+
+        return self._run_update(
+            action=f"UPDATE_SQL_{expr_type.upper()}",
+            changed_by=changed_by,
+            mutate_fn=mutate,
+            details={
+                "expr_id": expr_id,
+                "expr_type": expr_type,
+                "new_sql": new_sql,
+            },
+        )
+
+    # ═══════════════════════════════════════════════════════
+    #  UTILITY: View current config (helpful for finding IDs)
+    # ═══════════════════════════════════════════════════════
+    def get_current_config(self, pretty: bool = True) -> dict:
+        """
+        Fetch and print the current serialized_space config.
+        USE THIS to find IDs for joins, benchmarks, SQL expressions.
+
+        Args:
+            pretty : If True, prints formatted JSON to the terminal
+        """
+        space = self._get_space()
+        config = self._load_serialized(space)
+        if pretty:
+            print(json.dumps(config, indent=2))
+        return config
+
+    def print_audit_log(
+        self,
+        changed_by: Optional[str] = None,
+        action: Optional[str] = None,
+    ):
+        """Print a filtered view of the audit log."""
+        path = Path(AUDIT_LOG_FILE)
+        if not path.exists():
+            print("No audit log yet.")
+            return
+        entries = json.loads(path.read_text())
+        if changed_by:
+            entries = [e for e in entries if e.get("changed_by") == changed_by]
+        if action:
+            entries = [e for e in entries if e.get("action") == action]
+
+        print(f"\n{'─'*60}\n  AUDIT LOG — {len(entries)} entries\n{'─'*60}")
+        for e in entries:
+            icon = "✅" if e["status"] == "SUCCESS" else "❌"
+            print(f"{icon} [{e['timestamp']}]  {e['action']}")
+            print(f"   changed_by : {e['changed_by']}")
+            print(f"   space_id   : {e['space_id']}")
+            print(f"   details    : {e['details']}")
+            if e.get("error"):
+                print(f"   error      : {e['error']}")
+            print()
+
+
+
+
+
+
+5555566⁶666666666666
 # COMMAND ----------
 
 ###Import API
