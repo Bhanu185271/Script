@@ -1,0 +1,547 @@
+"""
+Genie Table-Level Patch Pipeline
+==================================
+Workflow:
+  1. FETCH   — GET full serialized_space from master workspace
+  2. EXTRACT — Pull out one table's config into a clean small JSON
+  3. EDIT    — Developer edits only that small JSON (table_patch.json)
+  4. MERGE   — Merge edited table back into full serialized_space
+  5. SYNC    — PATCH all 6 workspaces in parallel via API
+  6. AUDIT   — Log diff of what changed
+
+Usage (notebook widgets):
+  table_name  = "sales_fact"
+  action      = "extract"  |  "sync"
+"""
+
+import json
+import copy
+import logging
+import hashlib
+import concurrent.futures
+from datetime import datetime
+from typing import Optional
+from dataclasses import dataclass, field
+
+import requests
+
+# ─────────────────────────────────────────────
+# Logging
+# ─────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)-8s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+log = logging.getLogger("genie_patch")
+
+
+# ─────────────────────────────────────────────
+# Paths  (adjust to your workspace layout)
+# ─────────────────────────────────────────────
+FULL_SPACE_PATH  = "/Workspace/Shared/iNavi_Metadata/genie/full_space.json"
+TABLE_PATCH_PATH = "/Workspace/Shared/iNavi_Metadata/genie/table_patch.json"
+DIFF_LOG_PATH    = "/Workspace/Shared/iNavi_Metadata/genie/diff_log.json"
+
+
+# ─────────────────────────────────────────────
+# Data Models
+# ─────────────────────────────────────────────
+@dataclass
+class SyncResult:
+    workspace_name: str
+    workspace_id: str
+    success: bool
+    status_code: Optional[int] = None
+    message: str = ""
+    duration_ms: int = 0
+    timestamp: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+
+
+# ─────────────────────────────────────────────
+# Genie API Client
+# ─────────────────────────────────────────────
+class GenieClient:
+    _TIMEOUT = 30
+
+    def __init__(self, domain: str, token: str):
+        self.domain = domain.rstrip("/")
+        self._session = requests.Session()
+        self._session.headers.update({
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        })
+
+    def get_space(self, space_id: str) -> dict:
+        """GET full serialized_space from Genie API."""
+        url = f"{self.domain}/api/2.0/genie/spaces/{space_id}"
+        resp = self._session.get(url, timeout=self._TIMEOUT)
+        resp.raise_for_status()
+        return resp.json()
+
+    def patch_space(self, space_id: str, payload: dict) -> dict:
+        """PATCH updated serialized_space back to Genie API."""
+        url = f"{self.domain}/api/2.0/genie/spaces/{space_id}"
+        resp = self._session.patch(url, data=json.dumps(payload), timeout=self._TIMEOUT)
+        resp.raise_for_status()
+        return resp.json()
+
+
+# ─────────────────────────────────────────────
+# STEP 1 — FETCH
+# Pull the full space from master workspace and
+# save it locally so we always have the latest.
+# ─────────────────────────────────────────────
+def fetch_full_space(
+    domain: str,
+    token: str,
+    space_id: str,
+    save_path: str = FULL_SPACE_PATH,
+) -> dict:
+    """
+    GET the full serialized_space from the master workspace.
+    Saves to disk so subsequent steps can work offline.
+    Returns the full response dict.
+    """
+    log.info("FETCH → pulling space '%s' from %s", space_id, domain)
+    client = GenieClient(domain, token)
+    space_data = client.get_space(space_id)
+
+    with open(save_path, "w") as f:
+        json.dump(space_data, f, indent=2)
+
+    tables = space_data.get("serialized_space", {}).get("tables", [])
+    log.info("FETCH → done. Found %d table(s) in space.", len(tables))
+
+    # Print table names so the developer knows what's available
+    print("\n── Tables in this Genie space ──────────────────────")
+    for t in tables:
+        name = t.get("name") or t.get("table_name", "unknown")
+        desc = t.get("description", "")[:60] or "(no description)"
+        print(f"  • {name:<30}  {desc}")
+    print("────────────────────────────────────────────────────\n")
+
+    return space_data
+
+
+# ─────────────────────────────────────────────
+# STEP 2 — EXTRACT
+# Pull ONE table out of the full space JSON.
+# Developer only ever sees this small file.
+# ─────────────────────────────────────────────
+def extract_table(
+    table_name: str,
+    full_space_path: str = FULL_SPACE_PATH,
+    output_path: str = TABLE_PATCH_PATH,
+) -> dict:
+    """
+    Extract a single table's config from the full serialized_space.
+    Saves a clean, small JSON that the developer edits directly.
+
+    Output structure:
+    {
+      "_meta": {
+        "table_name": "sales_fact",
+        "extracted_at": "...",
+        "instructions": "Edit description and columns below. Do not change _meta."
+      },
+      "name": "sales_fact",
+      "description": "...",
+      "columns": [
+        { "name": "revenue",  "description": "..." },
+        { "name": "region",   "description": "..." }
+      ]
+    }
+    """
+    with open(full_space_path, "r") as f:
+        space_data = json.load(f)
+
+    tables = space_data.get("serialized_space", {}).get("tables", [])
+
+    # Find the target table (case-insensitive match)
+    target = next(
+        (t for t in tables
+         if (t.get("name") or t.get("table_name", "")).lower() == table_name.lower()),
+        None,
+    )
+
+    if target is None:
+        available = [t.get("name") or t.get("table_name") for t in tables]
+        raise ValueError(
+            f"Table '{table_name}' not found in space.\n"
+            f"Available tables: {available}"
+        )
+
+    # Build clean developer-facing patch file
+    patch = {
+        "_meta": {
+            "table_name":   table_name,
+            "extracted_at": datetime.utcnow().isoformat(),
+            "instructions": (
+                "Edit 'description' and any column 'description' fields below. "
+                "Do NOT rename columns or change _meta. "
+                "Save the file, then run action=sync."
+            ),
+        },
+        "name":        target.get("name") or target.get("table_name"),
+        "description": target.get("description", ""),
+        "columns": [
+            {
+                "name":        col.get("name", ""),
+                "description": col.get("description", ""),
+                # include synonyms if present
+                **({"synonyms": col["synonyms"]} if col.get("synonyms") else {}),
+            }
+            for col in target.get("columns", [])
+        ],
+    }
+
+    with open(output_path, "w") as f:
+        json.dump(patch, f, indent=2)
+
+    log.info(
+        "EXTRACT → '%s' extracted to %s  (%d column(s))",
+        table_name, output_path, len(patch["columns"]),
+    )
+    print(f"\n── Extracted: {table_name} ──────────────────────────")
+    print(f"  Description : {patch['description'] or '(empty)'}")
+    print(f"  Columns     : {len(patch['columns'])}")
+    for col in patch["columns"]:
+        print(f"    - {col['name']:<25} {col['description'] or '(no desc)'}")
+    print(f"\n  ✏  Edit file: {output_path}")
+    print(f"  ▶  Then run action=sync\n")
+
+    return patch
+
+
+# ─────────────────────────────────────────────
+# STEP 3 — DIFF (helper)
+# Show the developer exactly what changed
+# before pushing to 6 workspaces.
+# ─────────────────────────────────────────────
+def diff_table(
+    original: dict,
+    updated: dict,
+) -> dict:
+    """
+    Compare original vs updated table config.
+    Returns a diff dict for logging and display.
+    """
+    changes = {}
+
+    # Table description change
+    if original.get("description") != updated.get("description"):
+        changes["description"] = {
+            "before": original.get("description", ""),
+            "after":  updated.get("description", ""),
+        }
+
+    # Column description changes
+    orig_cols = {c["name"]: c for c in original.get("columns", [])}
+    upd_cols  = {c["name"]: c for c in updated.get("columns", [])}
+
+    col_changes = {}
+    for col_name, upd_col in upd_cols.items():
+        orig_col = orig_cols.get(col_name, {})
+        if orig_col.get("description") != upd_col.get("description"):
+            col_changes[col_name] = {
+                "before": orig_col.get("description", ""),
+                "after":  upd_col.get("description", ""),
+            }
+
+    if col_changes:
+        changes["columns"] = col_changes
+
+    return changes
+
+
+# ─────────────────────────────────────────────
+# STEP 4 — MERGE
+# Merge the edited table patch back into the
+# full serialized_space. Only touches the one
+# table — everything else is untouched.
+# ─────────────────────────────────────────────
+def merge_table_patch(
+    patch_path: str = TABLE_PATCH_PATH,
+    full_space_path: str = FULL_SPACE_PATH,
+) -> tuple[dict, dict]:
+    """
+    Reads the edited table_patch.json and merges it back
+    into the full serialized_space.
+
+    Returns:
+        merged_space  — full space dict ready for PATCH API
+        diff          — what changed (for audit log)
+    """
+    with open(full_space_path, "r") as f:
+        space_data = json.load(f)
+
+    with open(patch_path, "r") as f:
+        patch = json.load(f)
+
+    table_name = patch["_meta"]["table_name"]
+    serialized = space_data.get("serialized_space", {})
+    tables = serialized.get("tables", [])
+
+    # Find and replace only the target table
+    merged = copy.deepcopy(space_data)
+    merged_tables = merged["serialized_space"]["tables"]
+
+    diff = {}
+    found = False
+
+    for i, table in enumerate(merged_tables):
+        name = table.get("name") or table.get("table_name", "")
+        if name.lower() == table_name.lower():
+            found = True
+
+            # Capture diff before merge
+            diff = diff_table(original=table, updated=patch)
+
+            # Apply description change
+            merged_tables[i]["description"] = patch.get("description", "")
+
+            # Apply column description changes
+            patch_cols = {c["name"]: c for c in patch.get("columns", [])}
+            for col in merged_tables[i].get("columns", []):
+                col_name = col.get("name", "")
+                if col_name in patch_cols:
+                    col["description"] = patch_cols[col_name].get("description", "")
+                    if "synonyms" in patch_cols[col_name]:
+                        col["synonyms"] = patch_cols[col_name]["synonyms"]
+            break
+
+    if not found:
+        raise ValueError(f"Table '{table_name}' not found during merge.")
+
+    if not diff:
+        log.warning("MERGE → No changes detected in patch file. Nothing to sync.")
+    else:
+        log.info("MERGE → Changes detected in '%s': %s", table_name, list(diff.keys()))
+        print("\n── What changed ────────────────────────────────────")
+        if "description" in diff:
+            print(f"  Table description:")
+            print(f"    Before : {diff['description']['before']}")
+            print(f"    After  : {diff['description']['after']}")
+        if "columns" in diff:
+            for col, change in diff["columns"].items():
+                print(f"  Column '{col}':")
+                print(f"    Before : {change['before']}")
+                print(f"    After  : {change['after']}")
+        print("────────────────────────────────────────────────────\n")
+
+    return merged, diff
+
+
+# ─────────────────────────────────────────────
+# STEP 5 — SYNC
+# Fan out PATCH to all workspaces in parallel.
+# ─────────────────────────────────────────────
+def _patch_single_workspace(
+    workspace: dict,
+    merged_space: dict,
+    secrets,           # SecretResolver or dbutils.secrets wrapper
+) -> SyncResult:
+    t0 = datetime.utcnow()
+    name = workspace["workspace_name"]
+    wid  = workspace["workspace_id"]
+
+    try:
+        token      = secrets.get(workspace["secret_scope"], workspace["pat_secret_key"])
+        warehouse  = secrets.get(workspace["secret_scope"], workspace["warehouse_secret_key"])
+        domain     = workspace["domain_url"].rstrip("/")
+        space_id   = workspace["genie_space_id"]
+
+        client = GenieClient(domain=domain, token=token)
+
+        payload = {
+            "warehouse_id":     warehouse,
+            "parent_path":      merged_space.get("parent_path",
+                                "/Shared/iNavi_Metadata/genie/post_request_import_api"),
+            "serialized_space": merged_space["serialized_space"],
+            "title":            merged_space.get("title", ""),
+            "description":      merged_space.get("description", ""),
+        }
+
+        client.patch_space(space_id, payload)
+
+        ms = int((datetime.utcnow() - t0).total_seconds() * 1000)
+        log.info("✓ [%s] patched successfully (%dms)", name, ms)
+        return SyncResult(workspace_name=name, workspace_id=wid,
+                          success=True, status_code=200,
+                          message="OK", duration_ms=ms)
+
+    except requests.HTTPError as exc:
+        ms  = int((datetime.utcnow() - t0).total_seconds() * 1000)
+        msg = f"HTTP {exc.response.status_code}: {exc.response.text[:300]}"
+        log.error("✗ [%s] %s", name, msg)
+        return SyncResult(workspace_name=name, workspace_id=wid,
+                          success=False, status_code=exc.response.status_code,
+                          message=msg, duration_ms=ms)
+
+    except Exception as exc:
+        ms  = int((datetime.utcnow() - t0).total_seconds() * 1000)
+        log.error("✗ [%s] %s", name, str(exc), exc_info=True)
+        return SyncResult(workspace_name=name, workspace_id=wid,
+                          success=False, message=str(exc), duration_ms=ms)
+
+
+def sync_to_all_workspaces(
+    merged_space: dict,
+    workspaces: list[dict],
+    secrets,
+    max_workers: int = 6,
+) -> list[SyncResult]:
+    """Fan out PATCH to all workspaces in parallel."""
+    log.info("SYNC → pushing to %d workspace(s)...", len(workspaces))
+
+    results = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {
+            pool.submit(_patch_single_workspace, ws, merged_space, secrets): ws
+            for ws in workspaces
+        }
+        for future in concurrent.futures.as_completed(futures):
+            results.append(future.result())
+
+    passed = sum(1 for r in results if r.success)
+    failed = sum(1 for r in results if not r.success)
+    log.info("SYNC → complete. %d succeeded | %d failed", passed, failed)
+    return results
+
+
+# ─────────────────────────────────────────────
+# STEP 6 — AUDIT
+# Write diff + results to Delta audit table.
+# ─────────────────────────────────────────────
+def write_audit(spark, table_name: str, diff: dict, results: list[SyncResult]) -> None:
+    rows = [
+        {
+            "table_patched":  table_name,
+            "workspace_name": r.workspace_name,
+            "workspace_id":   r.workspace_id,
+            "success":        r.success,
+            "status_code":    r.status_code,
+            "message":        r.message,
+            "duration_ms":    r.duration_ms,
+            "diff_summary":   json.dumps(diff),
+            "synced_at":      r.timestamp,
+        }
+        for r in results
+    ]
+    (
+        spark.createDataFrame(rows)
+        .write.format("delta")
+        .mode("append")
+        .saveAsTable("catalog.schema.genie_sync_audit_log")
+    )
+    log.info("AUDIT → %d record(s) written.", len(rows))
+
+
+# ─────────────────────────────────────────────
+# Secret Resolver (thin dbutils wrapper)
+# ─────────────────────────────────────────────
+class SecretResolver:
+    def __init__(self, dbutils):
+        self._dbutils = dbutils
+        self._cache: dict[str, str] = {}
+
+    def get(self, scope: str, key: str) -> str:
+        k = f"{scope}/{key}"
+        if k not in self._cache:
+            self._cache[k] = self._dbutils.secrets.get(scope=scope, key=key)
+        return self._cache[k]
+
+
+# ─────────────────────────────────────────────
+# Notebook Entry Point
+# ─────────────────────────────────────────────
+if __name__ == "__main__":
+
+    # ── Widgets ───────────────────────────────────────────────
+    dbutils.widgets.dropdown(
+        "action", "extract",
+        ["fetch", "extract", "sync"],
+        "Action",
+    )
+    dbutils.widgets.text("table_name", "sales_fact", "Table Name")
+
+    action     = dbutils.widgets.get("action")
+    table_name = dbutils.widgets.get("table_name").strip()
+
+    # ── Master workspace credentials (DEV — source of truth) ──
+    MASTER_SCOPE     = "corxinnvus6kvdevtest001"
+    MASTER_DOMAIN    = dbutils.secrets.get(MASTER_SCOPE, "inavi-domainurl")
+    MASTER_TOKEN     = dbutils.secrets.get(MASTER_SCOPE, "DATABRICKS-API-TOKEN-AIML-THROUGH-SP")
+    MASTER_SPACE_ID  = dbutils.secrets.get(MASTER_SCOPE, "inavi-genie-cci-space-id")
+
+    # ── Target workspaces (loaded from registry Delta table) ──
+    from pyspark.sql import SparkSession
+    spark = SparkSession.builder.getOrCreate()
+    secrets = SecretResolver(dbutils)
+
+    workspaces = [
+        row.asDict()
+        for row in spark.table("catalog.schema.genie_workspace_registry")
+        .filter("is_active = true")
+        .collect()
+    ]
+
+    # ─────────────────────────────────────────
+    # ACTION: fetch
+    # Pull latest space from master, save full_space.json
+    # Run this whenever you want a fresh copy.
+    # ─────────────────────────────────────────
+    if action == "fetch":
+        fetch_full_space(
+            domain   = MASTER_DOMAIN,
+            token    = MASTER_TOKEN,
+            space_id = MASTER_SPACE_ID,
+        )
+
+    # ─────────────────────────────────────────
+    # ACTION: extract
+    # Pull one table out → save table_patch.json
+    # Developer edits table_patch.json, then runs sync.
+    # ─────────────────────────────────────────
+    elif action == "extract":
+        if not table_name:
+            raise ValueError("Please provide a table_name widget value.")
+
+        extract_table(table_name=table_name)
+
+    # ─────────────────────────────────────────
+    # ACTION: sync
+    # Merge edited patch → PATCH all 6 workspaces
+    # ─────────────────────────────────────────
+    elif action == "sync":
+        merged_space, diff = merge_table_patch()
+
+        if not diff:
+            print("⚠  No changes detected. Edit table_patch.json first, then re-run sync.")
+        else:
+            results = sync_to_all_workspaces(
+                merged_space = merged_space,
+                workspaces   = workspaces,
+                secrets      = secrets,
+            )
+
+            write_audit(
+                spark      = spark,
+                table_name = table_name,
+                diff       = diff,
+                results    = results,
+            )
+
+            # Display summary
+            summary = spark.createDataFrame([
+                {
+                    "workspace":   r.workspace_name,
+                    "success":     r.success,
+                    "status_code": r.status_code,
+                    "duration_ms": r.duration_ms,
+                    "message":     r.message,
+                }
+                for r in results
+            ])
+            display(summary)
