@@ -1,3 +1,83 @@
+# COMMAND ----------
+
+###Update API
+import requests
+import json
+import dbutils
+
+domain = dbutils.secrets.get(scope="corxinnvus6kvdevtest001", key="inavi-domainurl")
+token = dbutils.secrets.get(scope="corxinnvus6kvdevtest001", key="DATABRICKS-API-TOKEN-AIML-THROUGH-SP")
+
+# The ID of the space you want to update
+space_id = dbutils.secrets.get(scope="corxinnvus6kvdevtest001", key="inavi-genie-cci-space-id")  # Replace with the actual space ID    
+# URL for the API to update an existing Genie space
+url = f"{domain}/api/2.0/genie/spaces/{space_id}"
+
+# Headers for the request
+headers = {
+    "Authorization": f"Bearer {token}",
+    "Content-Type": "application/json"
+}
+
+# Read the serialized space from the file saved earlier (same as before)
+file_path = '/Workspace/Shared/iNavi_Metadata/genie/output_file.json'
+
+with open(file_path, 'r') as f:
+    serialized_data = json.load(f)
+
+# Prepare the data for the PATCH request (you can choose which fields you want to update)
+data = {
+    "warehouse_id": dbutils.secrets.get(scope="corxinnvus6kvdevtest001", key="inavi-warehouse-id"), 
+    "parent_path": "/Shared/iNavi_Metadata/genie/post_request_import_api", 
+    "serialized_space": serialized_data.get("serialized_space", ""),
+    "title": "Test",  # New title for the space 
+    "description": "Genie space created for Insights Navigator application"  # New description
+}
+
+# Send the PATCH request to update the space
+response = requests.patch(url, headers=headers, data=json.dumps(data))
+
+# Check if the request was successful
+if response.status_code == 200:
+    print("Space updated successfully!")
+    print("Response:", response.json())
+else:
+    # Handle failure case
+    print(f"Request failed with status code: {response.status_code}")
+    print("Response Headers:", response.headers)
+    print("Response Text:", response.text)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 Import :
 
 
