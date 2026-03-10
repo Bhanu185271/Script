@@ -1,3 +1,62 @@
+1.
+
+import json
+
+# ── Load the full space JSON ──────────────────────────
+file_path = '/Workspace/Shared/iNavi_Metadata/genie/output_file.json'
+
+with open(file_path, 'r') as f:
+    space_data = json.load(f)
+
+# ── Extract tables ────────────────────────────────────
+tables = space_data.get("serialized_space", {}).get("tables", [])
+
+print(f"Total tables found: {len(tables)}\n")
+print("─" * 60)
+
+for i, table in enumerate(tables):
+    # Genie can store table identity in different ways
+    # Try all common field combinations
+    name    = table.get("name", "")
+    catalog = table.get("catalog", "")
+    schema  = table.get("schema", "") or table.get("database", "")
+    table_n = table.get("table_name", "") or table.get("table", "")
+
+    # Build fully qualified name however it's stored
+    if catalog and schema and table_n:
+        fqn = f"{catalog}.{schema}.{table_n}"
+    elif name:
+        fqn = name
+    else:
+        fqn = "(unknown)"
+
+    desc = table.get("description", "(no description)")
+
+    print(f"[{i}] {fqn}")
+    print(f"     Description : {desc[:80]}")
+    print()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 """
 Genie Table-Level Patch Pipeline
 ==================================
