@@ -64,6 +64,73 @@ else:
 -- Space_id
 -- secret_access_token
 -- parent_path
+
+
+
+
+
+
+
+
+
+
+
+import json
+
+# ─────────────────────────────────────────────
+# STEP 1 — Configure your target table
+# ─────────────────────────────────────────────
+TARGET_CATALOG = "inavi_catalog"
+TARGET_SCHEMA  = "hub_order"
+TARGET_TABLE   = "order_id"
+
+# ─────────────────────────────────────────────
+# STEP 2 — Load the JSON file
+# ─────────────────────────────────────────────
+file_path = '/Workspace/Shared/iNavi_Metadata/genie/output_file.json'
+
+with open(file_path, 'r') as f:
+    space_data = json.load(f)
+
+# ─────────────────────────────────────────────
+# STEP 3 — Read all tables from the JSON
+# ─────────────────────────────────────────────
+tables = space_data.get("serialized_space", {}).get("tables", [])
+
+print(f"Total tables found: {len(tables)}")
+print("─" * 60)
+
+for i, table in enumerate(tables):
+    catalog = table.get("catalog", "")
+    schema  = table.get("schema", "")
+    name    = table.get("table_name", "")
+    print(f"[{i}]  {catalog}.{schema}.{name}")
+
+print("─" * 60)
+
+# ─────────────────────────────────────────────
+# STEP 4 — Find your specific table
+# ─────────────────────────────────────────────
+target_table = None
+
+for table in tables:
+    catalog = table.get("catalog", "")
+    schema  = table.get("schema", "")
+    name    = table.get("table_name", "")
+
+    if catalog == TARGET_CATALOG and schema == TARGET_SCHEMA and name == TARGET_TABLE:
+        target_table = table
+        break
+
+# ─────────────────────────────────────────────
+# STEP 5 — Show the result
+# ─────────────────────────────────────────────
+if target_table:
+    print(f"\n✅ Found: {TARGET_CATALOG}.{TARGET_SCHEMA}.{TARGET_TABLE}\n")
+    print(json.dumps(target_table, indent=2))
+else:
+    print(f"\n❌ Not found: {TARGET_CATALOG}.{TARGET_SCHEMA}.{TARGET_TABLE}")
+    print("Check if catalog / schema / table_name are correct above.")
 -- serialized_space
 -- title
 -- description
