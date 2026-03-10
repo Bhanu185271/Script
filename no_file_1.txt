@@ -47,3 +47,23 @@ else:
     print("Response Headers:", response.headers)
     print("Response Text:", response.text)
 
+
+
+
+
+
+-- Create a table 
+
+-- rx_g_adv_analytics_commercial_uat001.inavi.genie_updates_config
+
+-- Columns 
+
+
+-- databricks_workspace
+-- warehouse_id
+-- Space_id
+-- secret_access_token
+-- parent_path
+-- serialized_space
+-- title
+-- description
