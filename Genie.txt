@@ -1,0 +1,382 @@
+Genie Space Automation
+======================
+
+
+
+1. MULTI WORKSPACE DEPLOYMENT  
+-------------------------------------------------
+Approach 1 - List of Lists  (active)
+  - workspace_list defined directly in code
+  - Each entry contains [ workspace_label, secret_scope ]
+  - Credentials fetched from Databricks Secrets using the scope
+
+Approach 2 - Config Table  (currently disabled)
+  - Reads workspace_label and secret_scope from Delta table
+  - is_active flag to select list of workspace
+  - Uncomment to switch
+
+Execution Steps
+  1. Export Genie space from DEV  - output_file.json
+  2. Run genie_import.py
+  3. Pipeline loops all 6 workspaces, calls POST API per workspace
+  4. Returns new space_id per workspace
+
+
+2. MULTI WORKSPACE UPDATION  
+-----------------------------------------------
+Approach 1 - List of Lists  (active)
+  - workspace_list defined directly in code
+  - Each entry contains [ workspace_label, secret_scope ]
+  - Credentials fetched from Databricks Secrets using the scope
+
+Approach 2 - Config Table  (disabled)
+  - Reads workspace_label and secret_scope from Delta table
+  - is_active flag to select list of workspace
+  - Uncomment to switch
+
+Execution Steps
+  1. Make changes in DEV Genie space
+  2. Export updated space  ->  output_file.json
+  3. Run genie_update.py
+  4. Pipeline loops all 6 workspaces, calls PATCH API per workspace
+
+
+3. CODE STRUCTURE
+-----------------
+  CONFIG          ->  title, description, file path, secret key names
+  WORKSPACE LIST  ->  Approach 1 or Approach 2 
+  STEP 1          ->  load output_file.json, extract serialized_space
+  STEP 2          ->  loop workspaces, fetch secrets, call API, capture result
+  STEP 3          ->  print summary  (passed / failed per workspace)
+
+
+4. EXECUTION FLOW
+-----------------
+
+  DEV Genie Space
+       |
+       v
+  genie_export.py  ->  output_file.json
+       |
+       v
+  genie_import.py / genie_update.py
+       |
+       v
+  Loop workspace_list  (Approach 1 or 2)
+       |
+       v
+  Fetch secrets  ->  Build API endpoint  ->  POST or PATCH
+       |
+       v
+  Summary  (SUCCESS / FAILED per workspace)
+  
+  
+  
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+  
+# Genie Space - Multi Workspace deployment
+
+
+
+import requests
+import json
+from datetime import datetime
+
+
+# CONFIG
+
+GENIE_TITLE       = "iNavi - Sales Deployment"
+GENIE_DESCRIPTION = "Genie space created for Insights Navigator application"
+PARENT_PATH       = "/Shared/iNavi_Metadata/genie/post_request_import_api"
+JSON_FILE_PATH    = "/Workspace/Shared/iNavi_Metadata/genie/output_file.json"
+
+SECRET_KEY_DOMAIN       = "inavi-domainurl"
+SECRET_KEY_TOKEN        = "DATABRICKS-API-TOKEN-AIML-THROUGH-SP"
+SECRET_KEY_WAREHOUSE_ID = "inavi-warehouse-id"
+
+
+# APPROACH 1 - Workspace List  
+
+workspace_list = [
+    [ "DEV",      "corxinnvus6kvdevtest001" ],
+    [ "UAT",      "corxinnvus6kvuattest001" ],
+    [ "PRE-PROD", "corxinnvus6kvpreprod001" ],
+    [ "PROD1",   "corxinnvus6kvprod001"    ],
+    [ "PROD2",   "corxinnvus6kvprod002"    ],
+    [ "PROD3",   "corxinnvus6kvprod003"    ],
+]
+
+
+# APPROACH 2 - Using Config Table  
+# to switch to config table driven approach
+
+# from pyspark.sql import SparkSession
+# spark = SparkSession.builder.getOrCreate()
+#
+# config_rows = spark.sql("""
+#     SELECT workspace_label, secret_scope
+#     FROM rx_g_adv_analytics_commercial_uat001.inavi.genie_deployment_config
+#     WHERE is_active = true
+#     ORDER BY workspace_label
+# """).collect()
+#
+# workspace_list = [
+#     [ row["workspace_label"], row["secret_scope"] ]
+#     for row in config_rows
+# ]
+
+
+# STEP 1 - Load serialized_space
+
+with open(JSON_FILE_PATH, "r") as f:
+    serialized_data = json.load(f)
+
+serialized_space = serialized_data.get("serialized_space", "")
+
+if not serialized_space:
+    raise ValueError("serialized_space is empty. Re-export the Genie space and try again.")
+
+
+# STEP 2 - Deploy Genie space to all workspaces
+
+results = []
+
+for label, scope in workspace_list:
+
+    start_time = datetime.utcnow()
+
+    try:
+        domain       = dbutils.secrets.get(scope=scope, key=SECRET_KEY_DOMAIN)
+        token        = dbutils.secrets.get(scope=scope, key=SECRET_KEY_TOKEN)
+        warehouse_id = dbutils.secrets.get(scope=scope, key=SECRET_KEY_WAREHOUSE_ID)
+
+        # POST to /api/2.0/genie/spaces 
+        url = f"{domain}/api/2.0/genie/spaces"
+
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type":  "application/json"
+        }
+
+        payload = {
+            "warehouse_id":     warehouse_id,
+            "parent_path":      PARENT_PATH,
+            "serialized_space": serialized_space,
+            "title":            GENIE_TITLE,
+            "description":      GENIE_DESCRIPTION
+        }
+
+        response = requests.post(
+            url,
+            headers = headers,
+            data    = json.dumps(payload),
+            timeout = 30
+        )
+
+        duration_ms = int((datetime.utcnow() - start_time).total_seconds() * 1000)
+
+        if response.status_code == 200:
+            # Capture the new space_id created in this workspace
+            new_space_id = response.json().get("space_id", "N/A")
+            results.append({ "workspace": label, "status": "SUCCESS", "http_code": 200, "duration_ms": duration_ms, "message": f"Space created. space_id: {new_space_id}" })
+        else:
+            results.append({ "workspace": label, "status": "FAILED", "http_code": response.status_code, "duration_ms": duration_ms, "message": response.text[:300] })
+
+    except Exception as e:
+        duration_ms = int((datetime.utcnow() - start_time).total_seconds() * 1000)
+        results.append({ "workspace": label, "status": "ERROR", "http_code": None, "duration_ms": duration_ms, "message": str(e) })
+
+
+# STEP 3 - Status Summary
+
+passed = sum(1 for r in results if r["status"] == "SUCCESS")
+failed = sum(1 for r in results if r["status"] != "SUCCESS")
+
+for r in results:
+    print(f"{r['workspace']} - {r['status']} - {r['message']}")
+
+print(f"\nTotal : {len(results)}  Passed : {passed}  Failed : {failed}")
+
+
+
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+
+# Genie Space - Multi Workspace Update
+
+
+import requests
+import json
+from datetime import datetime
+
+
+# CONFIG
+
+GENIE_TITLE       = "iNavi - Sales Deployment"
+GENIE_DESCRIPTION = "Genie space created for Insights Navigator application"
+PARENT_PATH       = "/Shared/iNavi_Metadata/genie/post_request_import_api"
+JSON_FILE_PATH    = "/Workspace/Shared/iNavi_Metadata/genie/output_file.json"
+
+SECRET_KEY_DOMAIN       = "inavi-domainurl"
+SECRET_KEY_TOKEN        = "DATABRICKS-API-TOKEN-AIML-THROUGH-SP"
+SECRET_KEY_SPACE_ID     = "inavi-genie-space-id"
+SECRET_KEY_WAREHOUSE_ID = "inavi-warehouse-id"
+
+
+# WORKSPACE LIST  -  Approach 1 
+
+# Format : [ "label", "secret_scope" ]
+# Each scope holds domain, token, space_id, warehouse_id
+# as separate secret keys for that specific workspace (dev, uat, preprod etc.)
+
+
+workspace_list = [
+    [ "DEV",      "corxinnvus6kvdevtest001" ],
+    [ "UAT",      "corxinnvus6kvuattest001" ],
+    [ "PRE-PROD", "corxinnvus6kvpreprod001" ],
+    [ "PROD1",   "corxinnvus6kvprod001"    ],
+    [ "PROD2",   "corxinnvus6kvprod002"    ],
+    [ "PROD3",   "corxinnvus6kvprod003"    ],
+]
+
+
+# WORKSPACE LIST  -  Approach 2 - Using Config Table 
+
+# to switch to config table driven approach
+
+# from pyspark.sql import SparkSession
+# spark = SparkSession.builder.getOrCreate()
+#
+# config_rows = spark.sql("""
+#     SELECT
+#         workspace_label,
+#         secret_scope
+#     FROM rx_g_adv_analytics_commercial_uat001.inavi.genie_updates_config
+#     WHERE is_active = true
+#     ORDER BY workspace_label
+# """).collect()
+#
+# workspace_list = [
+#     [ row["workspace_label"], row["secret_scope"] ]
+#     for row in config_rows
+# ]
+
+
+# STEP 1 - Load serialized_space from output_file.json
+
+print(f"Loading : {JSON_FILE_PATH}")
+print("-" * 10)
+
+try:
+    with open(JSON_FILE_PATH, "r") as f:
+        serialized_data = json.load(f)
+except FileNotFoundError:
+    raise FileNotFoundError(
+        f"output_file.json not found at {JSON_FILE_PATH}. "
+        "Run the export script first to generate this file."
+    )
+
+serialized_space = serialized_data.get("serialized_space", "")
+
+if not serialized_space:
+    raise ValueError(
+        "serialized_space is empty in output_file.json. "
+        "Re-export the Genie space and try again."
+    )
+
+print(f"File loaded. Target workspaces : {len(workspace_list)}")
+print("-" * 10)
+
+
+# STEP 2 - Update Genie space in each workspace
+
+results = []
+
+for label, scope in workspace_list:
+
+    print(f"Workspace : {label}")
+    print(f"Scope     : {scope}")
+
+    start_time = datetime.utcnow()
+
+    try:
+        domain       = dbutils.secrets.get(scope=scope, key=SECRET_KEY_DOMAIN)
+        token        = dbutils.secrets.get(scope=scope, key=SECRET_KEY_TOKEN)
+        space_id     = dbutils.secrets.get(scope=scope, key=SECRET_KEY_SPACE_ID)
+        warehouse_id = dbutils.secrets.get(scope=scope, key=SECRET_KEY_WAREHOUSE_ID)
+
+        url = f"{domain}/api/2.0/genie/spaces/{space_id}"
+
+        print(f"Endpoint  : {url}")
+
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type":  "application/json"
+        }
+
+        payload = {
+            "warehouse_id":     warehouse_id,
+            "parent_path":      PARENT_PATH,
+            "serialized_space": serialized_space,
+            "title":            GENIE_TITLE,
+            "description":      GENIE_DESCRIPTION
+        }
+
+        response = requests.patch(
+            url,
+            headers = headers,
+            data    = json.dumps(payload),
+            timeout = 30
+        )
+
+        duration_ms = int((datetime.utcnow() - start_time).total_seconds() * 1000)
+
+        if response.status_code == 200:
+            print(f"Status    : SUCCESS ({duration_ms}ms)")
+            results.append({
+                "workspace":   label,
+                "status":      "SUCCESS",
+                "http_code":   200,
+                "duration_ms": duration_ms,
+                "message":     "Updated successfully"
+            })
+        else:
+            print(f"Status    : FAILED - HTTP {response.status_code}")
+            print(f"Detail    : {response.text[:300]}")
+            results.append({
+                "workspace":   label,
+                "status":      "FAILED",
+                "http_code":   response.status_code,
+                "duration_ms": duration_ms,
+                "message":     response.text[:300]
+            })
+
+    except Exception as e:
+        duration_ms = int((datetime.utcnow() - start_time).total_seconds() * 1000)
+        print(f"Status    : ERROR - {str(e)}")
+        results.append({
+            "workspace":   label,
+            "status":      "ERROR",
+            "http_code":   None,
+            "duration_ms": duration_ms,
+            "message":     str(e)
+        })
+
+    print("-" * 10)
+
+
+# STEP 3 - Status Summary
+
+
+passed = sum(1 for r in results if r["status"] == "SUCCESS")
+failed = sum(1 for r in results if r["status"] != "SUCCESS")
+
+for r in results:
+    print(f"{r['workspace']} - {r['status']} - {r['message']}")
+
+print(f"\nTotal : {len(results)}  Passed : {passed}  Failed : {failed}")
