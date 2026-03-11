@@ -1,0 +1,48 @@
+# COMMAND ----------
+
+###Import API
+
+import requests
+import json
+##import dbutils
+
+domain = dbutils.secrets.get(scope="corxinnvus6kvdevtest001", key="inavi-domainurl")
+token = dbutils.secrets.get(scope="corxinnvus6kvdevtest001", key="DATABRICKS-API-TOKEN-AIML-THROUGH-SP") # Replace with your actual token
+
+# Read the serialized space from the file saved earlier
+file_path = '/Workspace/Shared/iNavi_Metadata/genie/output_file_sales_05_Mar.json'
+
+with open(file_path, 'r') as f:
+    serialized_data = json.load(f)
+
+# URL for the API to create a new Genie space
+url = f"{domain}/api/2.0/genie/spaces"
+
+# Headers for the request
+headers = {
+    "Authorization": f"Bearer {token}",
+    "Content-Type": "application/json"
+}
+
+# Prepare the data for the POST request
+data = {
+    "warehouse_id": dbutils.secrets.get(scope="corxinnvus6kvdevtest001", key="inavi-warehouse-id"), 
+    "parent_path": "/Shared/iNavi_Metadata/genie/post_request_import_api", 
+    "serialized_space": serialized_data.get("serialized_space", ""),
+    "title": "[iNavi] - Sales Deployment ",
+    "description": "Genie space created for Insights Navigator application including ATLAS ,ES Affinities and ACE Segments"
+}
+
+# Send the POST request to create the space
+response = requests.post(url, headers=headers, data=json.dumps(data))
+
+# Check if the request was successful
+if response.status_code == 200:
+    print("Space created successfully!")
+    print("Response:", response.json())
+else:
+    # Handle failure case
+    print(f"Request failed with status code: {response.status_code}")
+    print("Response Headers:", response.headers)
+    print("Response Text:", response.text)
+
