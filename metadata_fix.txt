@@ -1,0 +1,727 @@
+# =============================================================================
+# CELL 1 — Imports
+# =============================================================================
+
+import uuid
+from pyspark.sql import functions as F
+from pyspark.sql.types import (
+    IntegerType, FloatType, DoubleType, DecimalType, LongType,
+    StringType, DateType, TimestampType, BooleanType
+)
+import pandas as pd
+
+
+# =============================================================================
+# CELL 2 — Install dependencies
+# =============================================================================
+
+# %pip install --disable-pip-version-check openpyxl
+# %pip install fsspec
+
+
+# =============================================================================
+# CELL 3 — Load Table-level descriptions from Excel (Table_List sheet)
+# =============================================================================
+
+excel_path = "/Workspace/Shared/iNavi_Metadata/metadata/source/Normal Search Metadata UAT.xlsx"
+sheet_name = "Table_List"
+
+df_descriptions = pd.read_excel(excel_path, sheet_name=sheet_name)
+
+TABLE_DESCRIPTIONS = dict(zip(df_descriptions["Table_Name"], df_descriptions["Table Description"]))
+BUSINESS_DOMAINS   = dict(zip(df_descriptions["Table_Name"], df_descriptions.get("business_domain", "")))
+PERSONA_NAME       = dict(zip(df_descriptions["Table_Name"], df_descriptions["persona_name"]))
+
+
+# =============================================================================
+# CELL 4 — Load Column-level descriptions from Excel (per-table sheets)
+# =============================================================================
+
+import pandas as pd
+import uuid
+from pyspark.sql import functions as F
+from pyspark.sql.types import (
+    StringType, IntegerType, FloatType, DoubleType, DecimalType,
+    BooleanType, DateType, TimestampType, LongType
+)
+from datetime import datetime
+
+excel_path = "/Workspace/Shared/iNavi_Metadata/metadata/source/Normal Search Metadata UAT.xlsx"
+xls = pd.ExcelFile(excel_path)
+
+sheet_names_to_read = [
+    s for s in xls.sheet_names
+    if s not in ["General Instructions", "Table_List", "bootstrap_QA"]
+]
+
+TABLE_COLUMN_DESCRIPTIONS = {}
+
+for sheet_name in sheet_names_to_read:
+    df = pd.read_excel(xls, sheet_name=sheet_name, header=1)
+    df.columns = df.columns.str.strip().str.lower()
+
+    required_cols = ["column name", "description"]
+    for col in required_cols:
+        if col not in df.columns:
+            raise ValueError(f"Missing required column '{col}' in sheet '{sheet_name}'")
+
+    if "isrequired" not in df.columns:
+        df["isrequired"] = "Y"
+
+    df["isrequired"] = df["isrequired"].fillna("Y").astype(str).str.upper().str.strip()
+
+    col_info_dict = {
+        row["column name"]: {
+            "description": row["description"],
+            "isRequired": row["isrequired"] if row["isrequired"] in ["Y", "N"] else "Y"
+        }
+        for _, row in df.iterrows()
+    }
+
+    TABLE_COLUMN_DESCRIPTIONS[sheet_name.lower()] = col_info_dict
+
+print("Loaded column descriptions for tables:", list(TABLE_COLUMN_DESCRIPTIONS.keys()))
+
+
+# =============================================================================
+# CELL 5 — profile_column() function
+# =============================================================================
+
+from pyspark.sql import functions as F
+from pyspark.sql.types import (
+    StringType, IntegerType, FloatType, DoubleType, DecimalType,
+    BooleanType, DateType, TimestampType, LongType
+)
+from datetime import datetime
+
+TABLE_COLUMN_DESCRIPTIONS_CI = {
+    table.lower(): {col.lower(): val for col, val in cols.items()}
+    for table, cols in TABLE_COLUMN_DESCRIPTIONS.items()
+}
+
+def try_parse_date(val):
+    """Try parsing various month/year formats."""
+    if val is None:
+        return None
+    val = str(val).strip()
+    fmts = ["%m%Y", "%m-%Y", "%Y-%m", "%b-%Y", "%b%Y", "%Y%b", "%Y%m"]
+    for fmt in fmts:
+        try:
+            return datetime.strptime(val, fmt).date()
+        except Exception:
+            continue
+    return None
+
+def profile_column(df, col, dtype, comment=None, total_count=0, table_name=None,
+                   partition_cols=None, primary_key_cols=None):
+    col_lower = col.lower()
+    table_lower = table_name.lower() if table_name else None
+
+    col_comment = comment or ""
+    is_required = "Y"
+
+    if table_lower and table_lower in TABLE_COLUMN_DESCRIPTIONS_CI:
+        col_info = TABLE_COLUMN_DESCRIPTIONS_CI[table_lower].get(col_lower, {})
+        if not isinstance(col_info, dict):
+            col_info = {}
+        col_comment = str(col_info.get("description", col_comment) or "")
+        is_required = str(col_info.get("isRequired", "Y") or "Y").upper()
+
+    result = {
+        "column_name": col,
+        "data_type": str(dtype),
+        "description": col_comment,
+        "is_partition_column": None,
+        "fill_rate": None,
+        "isRequired": is_required,
+        "type_category": None,
+        "column_metrics": {
+            "numeric_measure": {
+                "min_value": None, "max_value": None, "mean_value": None,
+                "median_value": None, "std_deviation": None,
+                "percentile_25": None, "percentile_75": None,
+                "contains_negative": None, "decimal_places": None,
+                "common_aggregations": None, "unit_of_measure": None
+            },
+            "categorical/text": {
+                "distinct_count": None, "value_distribution": None,
+                "has_null_category": None, "default_value": None,
+                "avg_length": None, "min_length": None, "max_length": None,
+                "contains_special_chars": None, "contains_numbers": None,
+                "sample_values": None
+            },
+            "datetime": {
+                "min_date": None, "max_date": None, "date_format": None,
+                "granularity": None, "timezone": None,
+                "contains_future_dates": None, "common_date_parts_used": None
+            },
+            "boolean": {
+                "true_count": None, "false_count": None, "null_count": None,
+                "true_percentage": None, "representation": None
+            }
+        }
+    }
+
+    excluded_columns = [
+        'default_consent_text_vod__c', 'disclaimer_text_vod__c',
+        'signature_vod__c', 'filepath'
+    ]
+
+    if isinstance(dtype, StringType):
+        sample_values = [r[col] for r in df.select(col).distinct().limit(5).collect()]
+        if col_lower in ["id", "url"] or col_lower in [c.lower() for c in excluded_columns]:
+            sample_values = []
+        result["type_category"] = "categorical/text"
+        result["column_metrics"]["categorical/text"]["sample_values"] = sample_values
+
+    elif isinstance(dtype, (DateType, TimestampType)):
+        distinct_dates = df.select(col).distinct().limit(5).collect()
+        date_formats = [d[col].strftime("%m-%Y") for d in distinct_dates if d[col] is not None]
+        result["type_category"] = "datetime"
+        result["column_metrics"]["datetime"]["date_format"] = date_formats
+
+    else:
+        result["type_category"] = str(dtype)
+
+    return result
+
+
+# =============================================================================
+# CELL 6 — profile_table() function
+# =============================================================================
+
+import uuid
+from pyspark.sql import functions as F
+
+TABLE_DESCRIPTIONS_CI = {k.lower(): v for k, v in TABLE_DESCRIPTIONS.items()}
+BUSINESS_DOMAINS_CI  = {k.lower(): v for k, v in BUSINESS_DOMAINS.items()}
+PERSONA_NAME_CI      = {k.lower(): v for k, v in PERSONA_NAME.items()}
+
+def split_to_list(val):
+    if isinstance(val, list):
+        return [x.strip() for x in val if x and isinstance(x, str)]
+    elif isinstance(val, str):
+        separators = ";" if ";" in val else ","
+        parts = [x.strip() for x in val.split(separators) if x.strip()]
+        return parts
+    else:
+        return []
+
+def profile_table(spark, catalog, schema, table):
+    table_fqn = f"{catalog}.{schema}.{table}"
+    df = spark.table(table_fqn)
+
+    table_description  = TABLE_DESCRIPTIONS_CI.get(table.lower(), None)
+    business_domain    = BUSINESS_DOMAINS_CI.get(table.lower(), None)
+    persona_name       = PERSONA_NAME_CI.get(table.lower(), None)
+
+    business_domain_list = split_to_list(business_domain)
+    persona_name_list    = split_to_list(persona_name)
+
+    content = f"{table}; {table_description}" if table_description else f"{table};"
+
+    metadata = {
+        "id": str(uuid.uuid4()),
+        "content": content,
+        "persona_name": persona_name_list,
+        "table_name": table,
+        "catalog": catalog,
+        "schema": schema,
+        "row_count": None,
+        "size_mb": None,
+        "last_updated_timestamp": None,
+        "update_frequency": None,
+        "data_retention_period": None,
+        "table_description": table_description,
+        "business_domain": business_domain_list,
+        "is_view": None,
+        "columns": []
+    }
+
+    for col in df.schema.fields:
+        col_profile = profile_column(
+            df=df,
+            col=col.name,
+            dtype=col.dataType,
+            comment=None,
+            total_count=None,
+            table_name=table,
+            partition_cols=None,
+            primary_key_cols=None
+        )
+        metadata["columns"].append(col_profile)
+
+    return metadata
+
+
+# =============================================================================
+# CELL 7 — Load configs and profile all tables
+# =============================================================================
+
+from pyspark.sql import functions as F
+
+configs = [
+    {"unity_catalog": "rx_g_digital_fuel_commercial_prod001",       "schema": "unified_dashboard", "table_name": "ce_veeva_email"},
+    {"unity_catalog": "rx_g_digital_fuel_commercial_prod001",       "schema": "unified_dashboard", "table_name": "ce_veeva_calls"},
+    {"unity_catalog": "rx_g_digital_fuel_commercial_prod001",       "schema": "unified_dashboard", "table_name": "f_user_journey"},
+    {"unity_catalog": "rx_g_digital_fuel_commercial_prod001",       "schema": "unified_dashboard", "table_name": "ce_mass_email_kpi"},
+    {"unity_catalog": "rx_g_digital_fuel_commercial_prod001",       "schema": "unified_dashboard", "table_name": "ce_portal_kpi"},
+    {"unity_catalog": "rx_g_digital_fuel_commercial_prod001",       "schema": "unified_dashboard", "table_name": "ce_mass_email"},
+    {"unity_catalog": "rx_g_adv_analytics_commercial_devtest001",   "schema": "inavi",             "table_name": "vw_veeva_presentation_slides"},
+    {"unity_catalog": "rx_g_digital_fuel_commercial_prod001",       "schema": "unified_dashboard", "table_name": "ce_portal"},
+    {"unity_catalog": "rx_g_adv_analytics_commercial_devtest001",   "schema": "inavi",             "table_name": "vw_hcp_atlas_segments"},
+    {"unity_catalog": "rx_g_digital_fuel_commercial_prod001",       "schema": "cdm",               "table_name": "stg_veeva_mccp"},
+    {"unity_catalog": "rx_g_adv_analytics_commercial_devtest001",   "schema": "inavi",             "table_name": "vw_email_consents"},
+    {"unity_catalog": "rx_g_adv_analytics_commercial_devtest001",   "schema": "inavi",             "table_name": "vw_mccp_universe"},
+    {"unity_catalog": "rx_g_cda_prod001",                           "schema": "cephub",            "table_name": "vw_f_insight_external_data"},
+    {"unity_catalog": "rx_g_digital_fuel_commercial_prod001",       "schema": "unified_dashboard", "table_name": "ce_instant_message"},
+    {"unity_catalog": "rx_g_adv_analytics_commercial_devtest001",   "schema": "inavi",             "table_name": "vw_uj_effective_score_benchmark"},
+    {"unity_catalog": "rx_g_digital_fuel_commercial_prod001",       "schema": "unified_dashboard", "table_name": "f_call_mapping_data"},
+    {"unity_catalog": "rx_g_adv_analytics_commercial_devtest001",   "schema": "inavi",             "table_name": "vw_ocm_customer_journey"},
+    {"unity_catalog": "rx_g_digital_fuel_commercial_prod001",       "schema": "unified_dashboard", "table_name": "ce_webinar_kpi"},
+    {"unity_catalog": "rx_g_adv_analytics_commercial_devtest001",   "schema": "inavi",             "table_name": "vw_f_channel_dynmcs_mthly"},
+    {"unity_catalog": "rx_g_adv_analytics_commercial_devtest001",   "schema": "inavi",             "table_name": "vw_f_channel_dynamics_qtrly"},
+    {"unity_catalog": "rx_g_adv_analytics_commercial_devtest001",   "schema": "inavi",             "table_name": "vw_hcp_atlas_ace_es_segments"},
+]
+
+for config in configs:
+    print(config["unity_catalog"], config["schema"], config["table_name"])
+
+table_metadata = []
+
+for row in configs:
+    catalog    = row["unity_catalog"]
+    schema     = row["schema"]
+    table_name = row["table_name"]
+
+    try:
+        metadata_dict = profile_table(spark, catalog, schema, table_name)
+        table_metadata.append(metadata_dict)
+        print(f"Profiled table: {catalog}.{schema}.{table_name}")
+    except Exception as e:
+        print(f"Failed to profile {catalog}.{schema}.{table_name}: {e}")
+
+
+# =============================================================================
+# CELL 8 — Write to Delta tables (FIXED: removed duplicate append block)
+# =============================================================================
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# WHY WERE DUPLICATES HAPPENING? (Detailed Explanation)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# The original code had TWO separate write operations to the same target table
+# in the same run. Here is the exact sequence that caused duplicates:
+#
+# STEP A — MERGE runs (lines 435–458 in original):
+#   The MERGE does two things:
+#     1. If a row already exists (same catalog+schema+table_name+column_name
+#        AND is_current=true) AND something changed → marks old row is_current=false
+#     2. If NO matching row exists (whenNotMatchedInsertAll) → INSERTS the new row
+#
+#   So after MERGE completes, all new rows from entity_df are ALREADY in the table.
+#
+# STEP B — current_df is read (line 462 in original):
+#   current_df = spark.table(target_table).filter("is_current = true")
+#
+#   ⚠️ PROBLEM: This reads the table AFTER the merge. So current_df now contains
+#   all the rows that were just inserted by the MERGE in Step A.
+#
+#   You might think: "OK then the left-join filter below will find no new rows
+#   and write nothing." But that is NOT always what happens, because:
+#
+#   ⚠️ CRITICAL PROBLEM — Delta Lake lazy evaluation / caching:
+#   In Spark, DataFrames are LAZY. The current_df is just a query plan, not
+#   a snapshot of data. When Spark evaluates the join later, under certain
+#   execution conditions (e.g., Spark re-reading the table, stale cached plan,
+#   or when the table didn't exist before and the else-branch ran), the
+#   current_df may reflect a STALE or INCOMPLETE state — missing the rows
+#   just inserted by the MERGE.
+#
+#   CONCRETE EXAMPLE:
+#   Suppose entity_df has 3 columns for table "ce_veeva_email":
+#     Row A: catalog=X, table=ce_veeva_email, column=col1
+#     Row B: catalog=X, table=ce_veeva_email, column=col2
+#     Row C: catalog=X, table=ce_veeva_email, column=col3
+#
+#   After MERGE → all 3 rows are inserted (whenNotMatchedInsertAll).
+#   current_df is read → ideally returns all 3 rows.
+#   Left join: entity_df LEFT JOIN current_df on catalog+schema+table+column
+#   Filter: c.column_name IS NULL → should return 0 rows.
+#
+#   BUT — on FIRST RUN (table was empty, else-branch ran instead of MERGE):
+#   The else-branch writes entity_df. Then current_df is read. The join
+#   finds 0 new rows. So no duplicates on first run.
+#
+#   On SECOND RUN (table exists, MERGE branch runs):
+#   MERGE inserts any truly new columns.
+#   Then current_df is read — this now reflects post-MERGE state.
+#   The join correctly finds no new rows → no extra append.
+#
+#   ACTUAL ROOT CAUSE OF DUPLICATES — the MERGE's whenMatchedUpdate
+#   only sets is_current=false when something CHANGED. If nothing changed
+#   (description/is_required/data_type are all the same), the MERGE does
+#   NOT update and does NOT insert (no whenMatchedInsertAll for unchanged rows).
+#   So unchanged rows are already current. The join then looks for unmatched
+#   columns. If current_df was snapshotted at the right time, 0 rows come back.
+#   BUT if there's any Spark plan re-evaluation or the snapshot is inconsistent,
+#   it may return rows that were already inserted, causing the append to write
+#   DUPLICATE rows.
+#
+#   ADDITIONALLY — even in a perfectly consistent state, the second write
+#   block is COMPLETELY REDUNDANT:
+#     - whenNotMatchedInsertAll already inserted all rows that didn't exist.
+#     - The second append tries to insert "not matched" rows again.
+#     - This is double-inserting the same rows = DUPLICATES.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# WHAT WE FIXED:
+# ─────────────────────────────────────────────────────────────────────────────
+#
+#   FIX 1 (Main fix): REMOVED the second write block entirely (the
+#   new_current_df append). The MERGE's whenNotMatchedInsertAll already
+#   handles inserting new rows correctly. The second write was doing the
+#   same job again = duplicates.
+#
+#   FIX 2: Added last_updated_timestamp IS NOT NULL filter wherever we
+#   read the target table for comparison or change-tracking purposes, so we
+#   only process rows that have a valid timestamp (clean, non-orphan records).
+#
+# ─────────────────────────────────────────────────────────────────────────────
+
+from datetime import datetime
+from delta.tables import DeltaTable
+import uuid
+
+target_table      = "rx_g_adv_analytics_commercial_devtest001.inavi.table_metadata_entity"
+audit_table       = "rx_g_adv_analytics_commercial_devtest001.inavi.table_metadata_entity_audit"
+run_changes_table = "rx_g_adv_analytics_commercial_devtest001.inavi.table_metadata_entity_run_changes"
+
+# ── Create tables if they don't exist ────────────────────────────────────────
+
+spark.sql(f"""
+CREATE TABLE IF NOT EXISTS {target_table} (
+    entity_id           STRING,
+    catalog             STRING,
+    schema              STRING,
+    table_name          STRING,
+    column_name         STRING,
+    data_type           STRING,
+    column_description  STRING,
+    is_required         STRING,
+    business_domain     ARRAY<STRING>,
+    persona_name        ARRAY<STRING>,
+    run_id              STRING,
+    is_current          BOOLEAN,
+    created_ts          TIMESTAMP,
+    updated_ts          TIMESTAMP
+) USING delta
+""")
+
+spark.sql(f"""
+CREATE TABLE IF NOT EXISTS {audit_table} (
+    audit_id            STRING,
+    entity_id           STRING,
+    catalog             STRING,
+    schema              STRING,
+    table_name          STRING,
+    column_name         STRING,
+    data_type           STRING,
+    column_description  STRING,
+    is_required         STRING,
+    business_domain     ARRAY<STRING>,
+    persona_name        ARRAY<STRING>,
+    run_id              STRING,
+    audit_ts            TIMESTAMP
+) USING delta
+""")
+
+spark.sql(f"""
+CREATE TABLE IF NOT EXISTS {run_changes_table} (
+    run_id              STRING,
+    catalog             STRING,
+    schema              STRING,
+    table_name          STRING,
+    column_name         STRING,
+    old_description     STRING,
+    new_description     STRING,
+    old_is_required     STRING,
+    new_is_required     STRING,
+    old_data_type       STRING,
+    new_data_type       STRING,
+    change_ts           TIMESTAMP
+) USING delta
+""")
+
+# ── Build entity records from profiled metadata ───────────────────────────────
+
+run_id = str(uuid.uuid4())
+run_ts = datetime.utcnow()
+
+entity_records = []
+
+for meta in table_metadata:
+    for col in meta["columns"]:
+        entity_records.append({
+            "entity_id":          str(uuid.uuid4()),
+            "catalog":            meta["catalog"],
+            "schema":             meta["schema"],
+            "table_name":         meta["table_name"],
+            "column_name":        col["column_name"].lower(),
+            "data_type":          col["data_type"],
+            "column_description": col["description"],
+            "is_required":        col["isRequired"],
+            "business_domain":    meta["business_domain"],
+            "persona_name":       meta["persona_name"],
+            "run_id":             run_id,
+            "is_current":         True,
+            "created_ts":         run_ts,
+            "updated_ts":         run_ts
+        })
+
+entity_df = spark.createDataFrame(entity_records)
+
+# ── MERGE or initial write ────────────────────────────────────────────────────
+#
+# MERGE logic:
+#   - Match on: catalog + schema + table_name + column_name + is_current=true
+#   - If matched AND something changed → set is_current=false (expire old row)
+#   - If NOT matched → insert the new row  ← this already handles new columns
+#
+# ⚠️ FIX 1 APPLIED HERE:
+#   The original code had a SECOND write block after this MERGE that tried to
+#   append "unmatched" rows again. That second block has been REMOVED because
+#   whenNotMatchedInsertAll already inserts all new rows. Running a second
+#   append caused every new row to be written TWICE = duplicates.
+
+if spark.catalog.tableExists(target_table):
+    tgt = DeltaTable.forName(spark, target_table)
+
+    tgt.alias("t") \
+      .merge(
+          entity_df.alias("s"),
+          """
+          t.catalog    = s.catalog    AND
+          t.schema     = s.schema     AND
+          t.table_name = s.table_name AND
+          t.column_name = s.column_name AND
+          t.is_current = true
+          """
+      ) \
+      .whenMatchedUpdate(
+          condition="""
+          t.column_description <> s.column_description OR
+          t.is_required        <> s.is_required        OR
+          t.data_type          <> s.data_type
+          """,
+          set={
+              "is_current": "false",
+              "updated_ts": "current_timestamp()"
+          }
+      ) \
+      .whenNotMatchedInsertAll() \
+      .execute()
+
+    # ── FIX 1: REMOVED the redundant new_current_df append block ──────────────
+    # ORIGINAL (BUGGY) CODE that caused duplicates — DO NOT bring back:
+    #
+    #   current_df = spark.table(target_table).filter("is_current = true")
+    #   new_current_df = (
+    #       entity_df.alias("n")
+    #       .join(current_df.alias("c"), [...], "left")
+    #       .filter(F.col("c.column_name").isNull())
+    #       .select("n.*")
+    #   )
+    #   new_current_df.write.format("delta").mode("append").saveAsTable(target_table)
+    #
+    # WHY REMOVED:
+    #   whenNotMatchedInsertAll() above already inserts every row in entity_df
+    #   that has no match in the target. Writing those same rows again via
+    #   a second append = each new row lands in the table TWICE.
+    # ──────────────────────────────────────────────────────────────────────────
+
+else:
+    # First-ever run: table is empty, just write directly
+    entity_df.write.format("delta").saveAsTable(target_table)
+
+
+# ── Audit log (intentional append every run) ─────────────────────────────────
+
+audit_df = (
+    entity_df
+    .select(
+        "entity_id",
+        "catalog",
+        "schema",
+        "table_name",
+        "column_name",
+        "data_type",
+        "column_description",
+        "is_required",
+        "business_domain",
+        "persona_name",
+        "run_id"
+    )
+    .withColumn("audit_id", F.lit(str(uuid.uuid4())))
+    .withColumn("audit_ts", F.current_timestamp())
+)
+
+audit_df.write \
+    .format("delta") \
+    .mode("append") \
+    .saveAsTable(audit_table)
+
+
+# ── Run-changes log (track what changed per run) ──────────────────────────────
+#
+# FIX 2 APPLIED HERE:
+#   Added filter: updated_ts IS NOT NULL
+#   This ensures we only compare against clean, fully-written rows that have
+#   a valid timestamp. Rows without updated_ts are incomplete or orphaned
+#   records that should not be used as a baseline for change detection.
+#   Without this filter, null-timestamp rows could incorrectly appear as
+#   "changed" rows and pollute the run_changes log every single run.
+
+if spark.catalog.tableExists(target_table):
+    previous_df = (
+        spark.table(target_table)
+        .filter(
+            (F.col("is_current") == True) &
+            (F.col("updated_ts").isNotNull())       # ← FIX 2: only clean rows
+        )
+        .select(
+            "catalog", "schema", "table_name", "column_name",
+            "column_description", "is_required", "data_type"
+        )
+    )
+
+    changes_df = (
+        entity_df.alias("new")
+        .join(
+            previous_df.alias("old"),
+            ["catalog", "schema", "table_name", "column_name"],
+            "left"
+        )
+        .filter(
+            (F.col("old.column_description").isNull()) |
+            (F.col("new.column_description") != F.col("old.column_description")) |
+            (F.col("new.is_required")        != F.col("old.is_required"))        |
+            (F.col("new.data_type")          != F.col("old.data_type"))
+        )
+        .select(
+            F.lit(run_id).alias("run_id"),
+            F.col("catalog"),
+            F.col("schema"),
+            F.col("table_name"),
+            F.col("column_name"),
+            F.col("old.column_description").alias("old_description"),
+            F.col("new.column_description").alias("new_description"),
+            F.col("old.is_required").alias("old_is_required"),
+            F.col("new.is_required").alias("new_is_required"),
+            F.col("old.data_type").alias("old_data_type"),
+            F.col("new.data_type").alias("new_data_type"),
+            F.current_timestamp().alias("change_ts")
+        )
+    )
+
+    changes_df.write \
+        .format("delta") \
+        .mode("append") \
+        .saveAsTable(run_changes_table)
+
+
+# =============================================================================
+# CELL 9 — Clean metadata for JSON output
+# =============================================================================
+
+import re
+import json
+import uuid
+from datetime import datetime, date, timezone
+from decimal import Decimal
+
+DATETIME_RE = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(\.\d+)?$")
+
+def clean_datetime(val):
+    if isinstance(val, datetime):
+        return val.replace(tzinfo=timezone.utc).isoformat()
+    elif isinstance(val, date):
+        return datetime(val.year, val.month, val.day, tzinfo=timezone.utc).isoformat()
+    elif isinstance(val, str):
+        try:
+            dt = datetime.strptime(val, "%Y-%m-%d %H:%M:%S.%f")
+        except ValueError:
+            try:
+                dt = datetime.strptime(val, "%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                return val
+        return dt.replace(tzinfo=timezone.utc).isoformat()
+    return val
+
+def remove_nulls_and_fix(obj):
+    if isinstance(obj, dict):
+        cleaned = {}
+        for k, v in obj.items():
+            if v is not None and k != "partition_summary":
+                new_key = "categorical_text" if k == "categorical/text" else k
+                cleaned[new_key] = remove_nulls_and_fix(v)
+        return cleaned
+    elif isinstance(obj, list):
+        return [remove_nulls_and_fix(x) for x in obj if x is not None]
+    elif isinstance(obj, str):
+        if obj == "categorical/text":
+            return "categorical_text"
+        if DATETIME_RE.match(obj):
+            return clean_datetime(obj)
+        return obj
+    elif isinstance(obj, uuid.UUID):
+        return str(obj)
+    elif isinstance(obj, (datetime, date)):
+        return clean_datetime(obj)
+    elif isinstance(obj, Decimal):
+        return float(obj)
+    else:
+        return obj
+
+cleaned    = [remove_nulls_and_fix(doc) for doc in table_metadata]
+output_json = {"documents": cleaned}
+
+with open("table_metadata.json", "w", encoding="utf-8") as f:
+    json.dump(output_json, f, indent=2, ensure_ascii=False)
+
+
+# =============================================================================
+# CELL 10 — Save JSON payload to workspace
+# =============================================================================
+
+import json
+
+output_path = "/Workspace/Shared/iNavi_Metadata/metadata/payload/table_metadata/table_metadata_payload.json"
+
+json_data = json.dumps(output_json, indent=2, default=str)
+
+with open(output_path, 'w', encoding='utf-8') as f:
+    json.dump(output_json, f, indent=2, ensure_ascii=False)
+
+print(f"JSON file saved at: {output_path}")
+
+
+# =============================================================================
+# CELL 11 — Install wheel
+# =============================================================================
+
+# pip install --force-reinstall "/Workspace/Shared/iNavi_Metadata/metadata/wheel/inavi_genbi-0.1.0-py3-none-any.whl"
+
+
+# =============================================================================
+# CELL 12 — Generate embeddings
+# =============================================================================
+
+# from scripts import generate_embeddings
+#
+# !python -m scripts.generate_embeddings \
+#     -i "/Workspace/Shared/iNavi_Metadata/metadata/payload/table_metadata/table_metadata_payload.json" \
+#     --transform template \
+#     --template "Table Name: {table_name}. Table Description: {table_description}." \
+#     --field "vector_field" \
+#     -o "/Workspace/Shared/iNavi_Metadata/metadata/embeddings/table_metadata/table_metadata_embd.json"
