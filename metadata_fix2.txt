@@ -1,0 +1,192 @@
+# Databricks notebook source
+
+# --------------------------------------------------------------
+# Genie Space - Add Table via API
+# --------------------------------------------------------------
+# Fetches table schema from Unity Catalog
+# Injects it into serialized_space
+# PATCHes to all workspaces
+# No UI interaction required
+# --------------------------------------------------------------
+
+import requests
+import json
+from pyspark.sql import SparkSession
+
+spark = SparkSession.builder.getOrCreate()
+
+
+# --------------------------------------------------------------
+# CONFIG
+# --------------------------------------------------------------
+
+GENIE_TITLE       = "iNavi - Sales Deployment"
+GENIE_DESCRIPTION = "Genie space created for Insights Navigator application"
+PARENT_PATH       = "/Shared/iNavi_Metadata/genie/post_request_import_api"
+JSON_FILE_PATH    = "/Workspace/Shared/iNavi_Metadata/genie/output_file.json"
+
+SECRET_KEY_DOMAIN       = "inavi-domainurl"
+SECRET_KEY_TOKEN        = "DATABRICKS-API-TOKEN-AIML-THROUGH-SP"
+SECRET_KEY_SPACE_ID     = "inavi-genie-cci-space-id"
+SECRET_KEY_WAREHOUSE_ID = "inavi-warehouse-id"
+
+# --------------------------------------------------------------
+# TABLE TO ADD
+# Define the table you want to add to Genie space
+# --------------------------------------------------------------
+
+NEW_TABLE = {
+    "catalog":     "inavi_catalog",
+    "schema":      "hub_order",
+    "table":       "order_fact",
+    "description": "Daily order transactions across all regions"
+}
+
+
+# --------------------------------------------------------------
+# WORKSPACE LIST
+# --------------------------------------------------------------
+
+workspace_list = [
+    [ "DEV",      "corxinnvus6kvdevtest001" ],
+    [ "UAT",      "corxinnvus6kvuattest001" ],
+    [ "PRE-PROD", "corxinnvus6kvpreprod001" ],
+    [ "PROD-1",   "corxinnvus6kvprod001"    ],
+    [ "PROD-2",   "corxinnvus6kvprod002"    ],
+    [ "PROD-3",   "corxinnvus6kvprod003"    ],
+]
+
+
+# --------------------------------------------------------------
+# STEP 1 - Fetch table schema from Unity Catalog
+# --------------------------------------------------------------
+# Reads actual column names and types from the table
+# Same way Genie UI does it internally
+# --------------------------------------------------------------
+
+fqn = f"{NEW_TABLE['catalog']}.{NEW_TABLE['schema']}.{NEW_TABLE['table']}"
+
+print(f"Fetching schema for : {fqn}")
+
+columns_df = spark.sql(f"DESCRIBE TABLE {fqn}")
+
+columns = [
+    {
+        "name":        row["col_name"],
+        "description": ""              # empty by default, add descriptions later
+    }
+    for row in columns_df.collect()
+    if row["col_name"] and not row["col_name"].startswith("#")
+]
+
+print(f"Columns found : {len(columns)}")
+
+# Build the table object exactly how Genie stores it
+table_to_add = {
+    "name":        NEW_TABLE["table"],
+    "catalog":     NEW_TABLE["catalog"],
+    "schema":      NEW_TABLE["schema"],
+    "description": NEW_TABLE["description"],
+    "columns":     columns
+}
+
+
+# --------------------------------------------------------------
+# STEP 2 - Load output_file.json and inject the new table
+# --------------------------------------------------------------
+
+with open(JSON_FILE_PATH, "r") as f:
+    serialized_data = json.load(f)
+
+serialized_space = serialized_data.get("serialized_space", {})
+
+if not serialized_space:
+    raise ValueError("serialized_space is empty. Re-export the Genie space and try again.")
+
+existing_tables = serialized_space.get("tables", [])
+
+# Check if table already exists in the space
+already_exists = any(
+    t.get("name") == NEW_TABLE["table"] and
+    t.get("catalog") == NEW_TABLE["catalog"] and
+    t.get("schema") == NEW_TABLE["schema"]
+    for t in existing_tables
+)
+
+if already_exists:
+    raise ValueError(f"Table {fqn} already exists in Genie space. Use update script to modify it.")
+
+# Inject the new table
+existing_tables.append(table_to_add)
+serialized_space["tables"] = existing_tables
+
+print(f"Table injected. Total tables in space : {len(existing_tables)}")
+
+
+# --------------------------------------------------------------
+# STEP 3 - PATCH to all workspaces
+# --------------------------------------------------------------
+
+results = []
+
+for label, scope in workspace_list:
+
+    try:
+        domain       = dbutils.secrets.get(scope=scope, key=SECRET_KEY_DOMAIN)
+        token        = dbutils.secrets.get(scope=scope, key=SECRET_KEY_TOKEN)
+        space_id     = dbutils.secrets.get(scope=scope, key=SECRET_KEY_SPACE_ID)
+        warehouse_id = dbutils.secrets.get(scope=scope, key=SECRET_KEY_WAREHOUSE_ID)
+
+        url = f"{domain}/api/2.0/genie/spaces/{space_id}"
+
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type":  "application/json"
+        }
+
+        payload = {
+            "warehouse_id":     warehouse_id,
+            "parent_path":      PARENT_PATH,
+            "serialized_space": serialized_space,
+            "title":            GENIE_TITLE,
+            "description":      GENIE_DESCRIPTION
+        }
+
+        response = requests.patch(
+            url,
+            headers = headers,
+            data    = json.dumps(payload),
+            timeout = 30
+        )
+
+        if response.status_code == 200:
+            results.append({ "workspace": label, "status": "SUCCESS", "message": f"Table {fqn} added successfully" })
+        else:
+            results.append({ "workspace": label, "status": "FAILED",  "message": response.text[:300] })
+
+    except Exception as e:
+        results.append({ "workspace": label, "status": "ERROR", "message": str(e) })
+
+
+# --------------------------------------------------------------
+# STEP 4 - Summary
+# --------------------------------------------------------------
+
+passed = sum(1 for r in results if r["status"] == "SUCCESS")
+failed = sum(1 for r in results if r["status"] != "SUCCESS")
+
+for r in results:
+    print(f"{r['workspace']} - {r['status']} - {r['message']}")
+
+print(f"\nTotal : {len(results)}  Passed : {passed}  Failed : {failed}")
+```
+
+---
+
+## How this is different from the Update script
+```
+Update script     ->  pushes existing serialized_space as-is to all workspaces
+This script       ->  reads schema from Unity Catalog
+                      builds table JSON
+                      injects into serialized_space
+                      then pushes to all workspaces
