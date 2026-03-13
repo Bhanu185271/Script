@@ -195,3 +195,245 @@ def upload_batch(batch):
 for i in range(0, len(documents), BATCH_SIZE):
     batch = documents[i:i+BATCH_SIZE]
     upload_batch(batch)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+------------------------------------------------------------------------------
+
+
+
+
+
+
+
+
+
+import uuid
+import json
+import requests
+import numpy as np
+from azure.identity import ClientSecretCredential
+from pyspark.sql import SparkSession, functions as F
+from pyspark.sql.types import ArrayType, StringType, DoubleType
+
+# --------------------------
+# Azure AD Authentication
+# --------------------------
+tenant_id = dbutils.secrets.get(scope="corxinnvus6kvdevtest001", key="tenant-id")
+client_id = dbutils.secrets.get(scope="corxinnvus6kvdevtest001", key="adls-client-id")
+client_secret = dbutils.secrets.get(scope="corxinnvus6kvdevtest001", key="adls-client-secret")
+
+credential = ClientSecretCredential(tenant_id, client_id, client_secret)
+token = credential.get_token("https://search.azure.com/.default").token
+headers = {"Content-Type": "application/json", "Authorization": f"Bearer {token}"}
+
+# --------------------------
+# Index & ADLS JSON path
+# --------------------------
+endpoint = "https://co-rx-us6-insightsnav-aisearch-dev-01.search.windows.net"
+index_name = "dev-table-metadata-index"
+json_path = "file:/Workspace/Shared/iNavi_Metadata/metadata/embeddings/table_metadata/table_metadata_embd.json"
+BATCH_SIZE = 50
+
+# --------------------------
+# Initialize Spark
+# --------------------------
+spark = SparkSession.builder.getOrCreate()
+
+# --------------------------
+# Read JSON from ADLS
+# --------------------------
+df = spark.read.option("multiline", True).json(json_path)
+
+# Flatten "documents" array if present
+if "documents" in df.columns:
+    df = df.select(F.explode(F.col("documents")).alias("doc")).select("doc.*")
+
+# --------------------------
+# Ensure critical fields exist
+# --------------------------
+base_fields = [
+    "id", "content", "persona_name", "table_name", "catalog", "schema",
+    "row_count", "size_mb", "last_updated_timestamp",
+    "update_frequency", "data_retention_period",
+    "table_description", "partition_columns", "columns",
+    "vector_field", "business_domain"
+]
+
+for col_name in base_fields:
+    if col_name not in df.columns:
+        if col_name in ["partition_columns", "columns", "vector_field", "business_domain"]:
+            df = df.withColumn(col_name, F.array().cast(ArrayType(StringType())))
+        elif col_name in ["row_count", "size_mb"]:
+            df = df.withColumn(col_name, F.lit(0))
+        else:
+            df = df.withColumn(col_name, F.lit(""))
+
+# --------------------------
+# Generate content field if missing
+# --------------------------
+df = df.withColumn(
+    "content",
+    F.when(F.col("content").isNull() | (F.col("content") == ""),
+           F.concat_ws("; ", F.col("table_name"), F.col("table_description")))
+     .otherwise(F.col("content"))
+)
+
+# --------------------------
+# Fix nulls in scalar fields
+# --------------------------
+scalar_fields_str = [
+    "id", "content", "table_name", "catalog", "schema",
+    "update_frequency", "data_retention_period", "table_description"
+]
+for col_name in scalar_fields_str:
+    df = df.withColumn(col_name, F.when(F.col(col_name).isNull(), "").otherwise(F.col(col_name)))
+
+# Set last_updated_timestamp to current timestamp if null or empty
+df = df.withColumn(
+    "last_updated_timestamp",
+    F.when(F.col("last_updated_timestamp").isNull() | (F.col("last_updated_timestamp") == ""),
+           F.date_format(F.current_timestamp(), "yyyy-MM-dd'T'HH:mm:ss'Z'"))
+     .otherwise(F.col("last_updated_timestamp"))
+)
+
+scalar_fields_num = ["row_count", "size_mb"]
+for col_name in scalar_fields_num:
+    df = df.withColumn(col_name, F.when(F.col(col_name).isNull(), F.lit(0)).otherwise(F.col(col_name)))
+
+# Ensure 'id' exists and is unique
+df = df.withColumn(
+    "id",
+    F.when((F.col("id") == "") | F.col("id").isNull(), F.lit(str(uuid.uuid4()))).otherwise(F.col("id"))
+)
+
+# Ensure 'vector_field' is an array of doubles
+df = df.withColumn(
+    "vector_field",
+    F.when(F.col("vector_field").isNull(), F.array().cast(ArrayType(DoubleType())))
+     .otherwise(F.expr("transform(vector_field, x -> cast(x as double))"))
+)
+
+# --------------------------
+# Convert to Python objects
+# --------------------------
+documents = [r.asDict(recursive=True) for r in df.collect()]
+print(f"Total documents to upload: {len(documents)}")
+
+# --------------------------
+# Clean and normalize columns for Azure Search
+# --------------------------
+def clean_column_metrics(col):
+    if not isinstance(col, dict):
+        return col
+    
+    # Ensure type_category exists
+    type_cat = col.get("type_category", "")
+    
+    cleaned_metrics = {
+        "numeric_measure": None,
+        "categorical_text": None,
+        "datetime": None,
+        "boolean": None
+    }
+
+    cm = col.get("column_metrics", {})
+    
+    # Categorical text
+    if type_cat == "categorical_text" and "categorical_text" in cm:
+        ct = cm["categorical_text"]
+        if "sample_values" in ct:
+            # Ensure sample_values is array of strings
+            ct["sample_values"] = [str(v) for v in ct.get("sample_values", [])]
+        cleaned_metrics["categorical_text"] = ct
+
+    # Datetime
+    if type_cat == "datetime" and "datetime" in cm:
+        dt = cm["datetime"]
+        # Convert date_format array to string (take first element or empty)
+        if "date_format" in dt:
+            if isinstance(dt["date_format"], list):
+                dt["date_format"] = dt["date_format"][0] if dt["date_format"] else ""
+        cleaned_metrics["datetime"] = dt
+
+    # Numeric & boolean just pass through if exist
+    if type_cat == "numeric_measure" and "numeric_measure" in cm:
+        cleaned_metrics["numeric_measure"] = cm["numeric_measure"]
+    if type_cat == "boolean" and "boolean" in cm:
+        cleaned_metrics["boolean"] = cm["boolean"]
+
+    col["column_metrics"] = cleaned_metrics
+
+    # Ensure isRequired exists
+    col["isRequired"] = col.get("isRequired", "Y")
+    return col
+
+def clean_document(doc):
+    # Ensure business_domain is array of strings
+    bd = doc.get("business_domain", [])
+    if isinstance(bd, str):
+        doc["business_domain"] = [s.strip() for s in bd.split(",") if s.strip()]
+    elif bd is None:
+        doc["business_domain"] = []
+
+    # Clean columns
+    if "columns" in doc and isinstance(doc["columns"], list):
+        doc["columns"] = [clean_column_metrics(c) for c in doc["columns"]]
+    else:
+        doc["columns"] = []
+
+    # Ensure vector_field is array of doubles
+    vf = doc.get("vector_field", [])
+    if not isinstance(vf, list):
+        doc["vector_field"] = []
+    else:
+        doc["vector_field"] = [float(x) for x in vf]
+
+    return doc
+
+# Clean all documents
+documents = [clean_document(doc) for doc in documents]
+
+# --------------------------
+# Upload function
+# --------------------------
+def upload_batch(batch):
+    payload = {"value": [{"@search.action": "upload", **doc} for doc in batch]}
+    url = f"{endpoint}/indexes/{index_name}/docs/index?api-version=2024-07-01"
+    resp = requests.post(url, headers=headers, json=payload)
+    if resp.status_code != 200:
+        print(f"Batch failed | HTTP {resp.status_code} | {resp.text}")
+    else:
+        print(f"Batch uploaded successfully | {len(batch)} documents")
+    return resp.json()
+
+# --------------------------
+# Batch upload
+# --------------------------
+for i in range(0, len(documents), BATCH_SIZE):
+    batch = documents[i:i+BATCH_SIZE]
+    upload_batch(batch)
