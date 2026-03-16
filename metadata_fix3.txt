@@ -1,0 +1,54 @@
+import json
+import requests
+
+DATABRICKS_HOST  = "https://<your-workspace>.cloud.databricks.com"
+DATABRICKS_TOKEN = "<your-personal-access-token>"
+SPACE_ID         = "<your-genie-space-id>"
+
+HEADERS = {
+    "Authorization": f"Bearer {DATABRICKS_TOKEN}",
+    "Content-Type": "application/json",
+}
+
+
+def add_table(table_name: str):
+    # Step 1: Fetch full space
+    resp = requests.get(
+        f"{DATABRICKS_HOST}/api/2.0/genie/spaces/{SPACE_ID}",
+        headers=HEADERS,
+        params={"include_serialized_space": "true"},
+    )
+    resp.raise_for_status()
+    raw = resp.json()
+
+    # Guard: ensure serialized_space was returned
+    if not raw.get("serialized_space"):
+        raise ValueError("serialized_space missing in API response. Aborting.")
+
+    # Step 2: Parse and append new table
+    config = json.loads(raw["serialized_space"])
+    tables = config.setdefault("data_sources", {}).setdefault("tables", [])
+
+    if any(t["identifier"] == table_name for t in tables):
+        print(f"Table '{table_name}' already exists.")
+        return
+
+    tables.append({"identifier": table_name})
+
+    # Step 3: PATCH back the complete space object
+    resp = requests.patch(
+        f"{DATABRICKS_HOST}/api/2.0/genie/spaces/{SPACE_ID}",
+        headers=HEADERS,
+        json={
+            "title":            raw["title"],
+            "description":      raw.get("description", ""),
+            "warehouse_id":     raw["warehouse_id"],
+            "serialized_space": json.dumps(config),
+        },
+    )
+    resp.raise_for_status()
+    print(f" Table '{table_name}' added successfully.")
+
+
+# Usage
+add_table("catalog.schema.table_name")
