@@ -52,3 +52,78 @@ def add_table(table_name: str):
 
 # Usage
 add_table("catalog.schema.table_name")
+
+
+
+
+
+
+
+
+
+
+------------------------------------------------------------------
+
+
+
+# ── Widgets ───────────────────────────────────────────────────────────────────
+dbutils.widgets.text("databricks_host",  "", "Databricks Host")
+dbutils.widgets.text("databricks_token", "", "Databricks Token")
+dbutils.widgets.text("space_id",         "", "Genie Space ID")
+dbutils.widgets.text("table_name",       "", "Table Name (catalog.schema.table)")
+
+# ── Read Inputs ───────────────────────────────────────────────────────────────
+DATABRICKS_HOST  = dbutils.widgets.get("databricks_host").strip()
+DATABRICKS_TOKEN = dbutils.widgets.get("databricks_token").strip()
+SPACE_ID         = dbutils.widgets.get("space_id").strip()
+TABLE_NAME       = dbutils.widgets.get("table_name").strip()
+
+# ── Add Table ─────────────────────────────────────────────────────────────────
+import json
+import requests
+
+HEADERS = {
+    "Authorization": f"Bearer {DATABRICKS_TOKEN}",
+    "Content-Type":  "application/json",
+}
+
+def add_table(table_name: str):
+    # Step 1: Fetch full space
+    resp = requests.get(
+        f"{DATABRICKS_HOST}/api/2.0/genie/spaces/{SPACE_ID}",
+        headers=HEADERS,
+        params={"include_serialized_space": "true"},
+    )
+    resp.raise_for_status()
+    raw = resp.json()
+
+    # Guard: ensure serialized_space was returned
+    if not raw.get("serialized_space"):
+        raise ValueError("serialized_space missing in API response. Aborting.")
+
+    # Step 2: Parse and append new table
+    config = json.loads(raw["serialized_space"])
+    tables = config.setdefault("data_sources", {}).setdefault("tables", [])
+
+    if any(t["identifier"] == table_name for t in tables):
+        print(f"Table '{table_name}' already exists.")
+        return
+
+    tables.append({"identifier": table_name})
+
+    # Step 3: PATCH back the complete space object
+    resp = requests.patch(
+        f"{DATABRICKS_HOST}/api/2.0/genie/spaces/{SPACE_ID}",
+        headers=HEADERS,
+        json={
+            "title":            raw["title"],
+            "description":      raw.get("description", ""),
+            "warehouse_id":     raw["warehouse_id"],
+            "serialized_space": json.dumps(config),
+        },
+    )
+    resp.raise_for_status()
+    print(f" Table '{table_name}' added successfully.")
+
+
+add_table(TABLE_NAME)
