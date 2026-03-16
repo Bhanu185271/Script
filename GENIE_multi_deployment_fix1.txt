@@ -1,3 +1,41 @@
+DDCX-PROD - IMPORT - ERROR - No connection adapters were found for 'hhttps://adb-884204550069561.1.azuredatabricks.net/aad/auth/api/2.0/genie/spaces'
+EQM-PROD - IMPORT - FAILED - <html>
+<head>
+<meta http-equiv="Content-Type" content="text/html;charset=utf-8"/>
+<title>Error 403 Unsupported endpoint</title>
+</head>
+<body><h2>HTTP ERROR 403</h2>
+<p>Problem accessing /aad/auth/api/2.0/genie/spaces. Reason:
+<pre>    Unsupported endpoint</pre></p>
+</body>
+</html>
+
+ATLAS-PROD - IMPORT - FAILED - <html>
+<head>
+<meta http-equiv="Content-Type" content="text/html;charset=utf-8"/>
+<title>Error 403 Unsupported endpoint</title>
+</head>
+<body><h2>HTTP ERROR 403</h2>
+<p>Problem accessing /aad/auth/api/2.0/genie/spaces. Reason:
+<pre>    Unsupported endpoint</pre></p>
+</body>
+</html>
+
+
+Total : 3  Passed : 0  Failed : 3
+
+
+
+
+
+
+
+
+
+
+
+
+
 import requests
 import json
 
