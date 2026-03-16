@@ -1,0 +1,119 @@
+
+import requests
+import json
+from datetime import datetime
+
+
+# CONFIG
+
+GENIE_TITLE       = "iNavi - Campaign & Content Insight"
+GENIE_DESCRIPTION = "Genie space created for Insights Navigator application"
+PARENT_PATH       = "/Shared/iNavi_Metadata/genie/post_request_import_api"
+JSON_FILE_PATH    = "/Workspace/Shared/iNavi_Metadata/genie/output_file.json"
+
+SECRET_KEY_DOMAIN       = "inavi-domainurl"
+SECRET_KEY_TOKEN        = "DATABRICKS-API-TOKEN-AIML-THROUGH-SP"
+SECRET_KEY_WAREHOUSE_ID = "inavi-warehouse-id"
+
+
+# APPROACH 1 - Workspace List  
+
+workspace_list = [
+    [ "DEV",      "corxinnvus6kvdevtest001" ],
+    [ "UAT",      "corxinnvus6kvuattest001" ],
+    [ "PRE-PROD", "corxinnvus6kvpreprod001" ],
+    [ "PROD1",   "corxinnvus6kvprod001"    ],
+    [ "PROD2",   "corxinnvus6kvprod002"    ],
+    [ "PROD3",   "corxinnvus6kvprod003"    ],
+]
+
+
+# APPROACH 2 - Using Config Table  
+# to switch to config table driven approach
+
+# from pyspark.sql import SparkSession
+# spark = SparkSession.builder.getOrCreate()
+#
+# config_rows = spark.sql("""
+#     SELECT workspace_label, secret_scope
+#     FROM rx_g_adv_analytics_commercial_uat001.inavi.genie_deployment_config
+#     WHERE is_active = true
+#     ORDER BY workspace_label
+# """).collect()
+#
+# workspace_list = [
+#     [ row["workspace_label"], row["secret_scope"] ]
+#     for row in config_rows
+# ]
+
+
+# STEP 1 - Load serialized_space
+
+with open(JSON_FILE_PATH, "r") as f:
+    serialized_data = json.load(f)
+
+serialized_space = serialized_data.get("serialized_space", "")
+
+if not serialized_space:
+    raise ValueError("serialized_space is empty. Re-export the Genie space and try again.")
+
+
+# STEP 2 - Deploy Genie space to all workspaces
+
+results = []
+
+for label, scope in workspace_list:
+
+    start_time = datetime.utcnow()
+
+    try:
+        domain       = dbutils.secrets.get(scope=scope, key=SECRET_KEY_DOMAIN)
+        token        = dbutils.secrets.get(scope=scope, key=SECRET_KEY_TOKEN)
+        warehouse_id = dbutils.secrets.get(scope=scope, key=SECRET_KEY_WAREHOUSE_ID)
+
+        # POST to /api/2.0/genie/spaces 
+        url = f"{domain}/api/2.0/genie/spaces"
+
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type":  "application/json"
+        }
+
+        payload = {
+            "warehouse_id":     warehouse_id,
+            "parent_path":      PARENT_PATH,
+            "serialized_space": serialized_space,
+            "title":            GENIE_TITLE,
+            "description":      GENIE_DESCRIPTION
+        }
+
+        response = requests.post(
+            url,
+            headers = headers,
+            data    = json.dumps(payload),
+            timeout = 30
+        )
+
+        duration_ms = int((datetime.utcnow() - start_time).total_seconds() * 1000)
+
+        if response.status_code == 200:
+            # Capture the new space_id created in this workspace
+            new_space_id = response.json().get("space_id", "N/A")
+            results.append({ "workspace": label, "status": "SUCCESS", "http_code": 200, "duration_ms": duration_ms, "message": f"Space created. space_id: {new_space_id}" })
+        else:
+            results.append({ "workspace": label, "status": "FAILED", "http_code": response.status_code, "duration_ms": duration_ms, "message": response.text[:300] })
+
+    except Exception as e:
+        duration_ms = int((datetime.utcnow() - start_time).total_seconds() * 1000)
+        results.append({ "workspace": label, "status": "ERROR", "http_code": None, "duration_ms": duration_ms, "message": str(e) })
+
+
+# STEP 3 - Status Summary
+
+passed = sum(1 for r in results if r["status"] == "SUCCESS")
+failed = sum(1 for r in results if r["status"] != "SUCCESS")
+
+for r in results:
+    print(f"{r['workspace']} - {r['status']} - {r['message']}")
+
+print(f"\nTotal : {len(results)}  Passed : {passed}  Failed : {failed}")
