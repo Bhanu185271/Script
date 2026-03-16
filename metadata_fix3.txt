@@ -1,42 +1,69 @@
-# COMMAND ----------
+# ── Widgets ───────────────────────────────────────────────────────────────────
+dbutils.widgets.text("secret_scope",   "", "Secret Scope")
+dbutils.widgets.text("key_domain_url", "", "Key: Domain URL")
+dbutils.widgets.text("key_token",      "", "Key: Token")
+dbutils.widgets.text("key_space_id",   "", "Key: Space ID")
+dbutils.widgets.text("key_warehouse",  "", "Key: Warehouse ID")
+dbutils.widgets.text("table_name",     "", "Table Name (catalog.schema.table)")
 
-###Update API
-import requests
+# ── Read from Key Vault via Secret Scope ──────────────────────────────────────
+SCOPE        = dbutils.widgets.get("secret_scope").strip()
+
+DOMAIN       = dbutils.secrets.get(scope=SCOPE, key=dbutils.widgets.get("key_domain_url").strip())
+TOKEN        = dbutils.secrets.get(scope=SCOPE, key=dbutils.widgets.get("key_token").strip())
+SPACE_ID     = dbutils.secrets.get(scope=SCOPE, key=dbutils.widgets.get("key_space_id").strip())
+WAREHOUSE_ID = dbutils.secrets.get(scope=SCOPE, key=dbutils.widgets.get("key_warehouse").strip())
+TABLE_NAME   = dbutils.widgets.get("table_name").strip()
+
+# ── Add Table ─────────────────────────────────────────────────────────────────
 import json
-import dbutils
+import requests
 
-domain = dbutils.secrets.get(scope="corxinnvus6kvdevtest001", key="inavi-domainurl")
-token = dbutils.secrets.get(scope="corxinnvus6kvdevtest001", key="DATABRICKS-API-TOKEN-AIML-THROUGH-SP")
-
-# The ID of the space you want to update
-space_id = dbutils.secrets.get(scope="corxinnvus6kvdevtest001", key="inavi-genie-cci-space-id")  # Replace with the actual space ID    
-# URL for the API to update an existing Genie space
-url = f"{domain}/api/2.0/genie/spaces/{space_id}"
-
-# Headers for the request
-headers = {
-    "Authorization": f"Bearer {token}",
-    "Content-Type": "application/json"
+HEADERS = {
+    "Authorization": f"Bearer {TOKEN}",
+    "Content-Type":  "application/json",
 }
 
-# Read the serialized space from the file saved earlier (same as before)
-file_path = '/Workspace/Shared/iNavi_Metadata/genie/output_file.json'
+def add_table(table_name: str):
+    # Step 1: Fetch full space
+    resp = requests.get(
+        f"{DOMAIN}/api/2.0/genie/spaces/{SPACE_ID}",
+        headers=HEADERS,
+        params={"include_serialized_space": "true"},
+    )
+    resp.raise_for_status()
+    raw = resp.json()
 
-with open(file_path, 'r') as f:
-    serialized_data = json.load(f)
+    # Guard: ensure serialized_space was returned
+    if not raw.get("serialized_space"):
+        raise ValueError("serialized_space missing in API response. Aborting.")
 
-# Prepare the data for the PATCH request (you can choose which fields you want to update)
-data = {
-    "warehouse_id": dbutils.secrets.get(scope="corxinnvus6kvdevtest001", key="inavi-warehouse-id"), 
-    "parent_path": "/Shared/iNavi_Metadata/genie/post_request_import_api", 
-    "serialized_space": serialized_data.get("serialized_space", ""),
-    "title": "Test",  # New title for the space 
-    "description": "Genie space created for Insights Navigator application"  # New description
-}
+    # Step 2: Parse and append new table
+    config = json.loads(raw["serialized_space"])
+    tables = config.setdefault("data_sources", {}).setdefault("tables", [])
+
+    if any(t["identifier"] == table_name for t in tables):
+        print(f"Table '{table_name}' already exists.")
+        return
+
+    tables.append({"identifier": table_name})
+
+    # Step 3: PATCH back the complete space object
+    resp = requests.patch(
+        f"{DOMAIN}/api/2.0/genie/spaces/{SPACE_ID}",
+        headers=HEADERS,
+        json={
+            "title":            raw["title"],
+            "description":      raw.get("description", ""),
+            "warehouse_id":     WAREHOUSE_ID,
+            "serialized_space": json.dumps(config),
+        },
+    )
+    resp.raise_for_status()
+    print(f" Table '{table_name}' added successfully.")
 
 
-
-
+add_table(TABLE_NAME)
 
 
 
