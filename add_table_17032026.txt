@@ -1,0 +1,57 @@
+import json
+import requests
+
+dbutils.widgets.text("secret_scope",   "", "Secret Scope")
+dbutils.widgets.text("key_domain_url", "", "Key: Domain URL")
+dbutils.widgets.text("key_token",      "", "Key: Token")
+dbutils.widgets.text("key_space_id",   "", "Key: Space ID")
+dbutils.widgets.text("key_warehouse",  "", "Key: Warehouse ID")
+dbutils.widgets.text("table_name",     "", "Table Name (catalog.schema.table)")
+
+SCOPE        = dbutils.widgets.get("secret_scope").strip()
+DOMAIN       = dbutils.secrets.get(scope=SCOPE, key=dbutils.widgets.get("key_domain_url").strip()).rstrip("/")
+TOKEN        = dbutils.secrets.get(scope=SCOPE, key=dbutils.widgets.get("key_token").strip())
+SPACE_ID     = dbutils.secrets.get(scope=SCOPE, key=dbutils.widgets.get("key_space_id").strip())
+WAREHOUSE_ID = dbutils.secrets.get(scope=SCOPE, key=dbutils.widgets.get("key_warehouse").strip())
+TABLE_NAME   = dbutils.widgets.get("table_name").strip()
+
+HEADERS = {
+    "Authorization": f"Bearer {TOKEN}",
+    "Content-Type":  "application/json",
+}
+
+def add_table(table_name):
+    resp = requests.get(
+        f"{DOMAIN}/api/2.0/genie/spaces/{SPACE_ID}",
+        headers=HEADERS,
+        params={"include_serialized_space": "true"},
+    )
+    resp.raise_for_status()
+    raw = resp.json()
+
+    if not raw.get("serialized_space"):
+        raise ValueError("serialized_space not returned by API.")
+
+    config = json.loads(raw["serialized_space"])
+    tables = config.setdefault("data_sources", {}).setdefault("tables", [])
+
+    if any(t["identifier"] == table_name for t in tables):
+        print(f"Table '{table_name}' already exists.")
+        return
+
+    tables.append({"identifier": table_name})
+
+    resp = requests.patch(
+        f"{DOMAIN}/api/2.0/genie/spaces/{SPACE_ID}",
+        headers=HEADERS,
+        json={
+            "title":            raw["title"],
+            "description":      raw.get("description", ""),
+            "warehouse_id":     WAREHOUSE_ID,
+            "serialized_space": json.dumps(config),
+        },
+    )
+    resp.raise_for_status()
+    print(f"Table '{table_name}' added successfully.")
+
+add_table(TABLE_NAME)
