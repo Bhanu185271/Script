@@ -1,0 +1,41 @@
+###Export API
+
+import requests
+import json
+##import dbutils
+
+space_id =  "01f10e19b66c15e5b677d5d9374d0cca"   ##dbutils.secrets.get(scope="corxinnvus6kvdevtest001", key="inavi-genie-cci-space-id") ## Replace with actual space id as per theme
+domain = dbutils.secrets.get(scope="corxinnvus6kvdevtest001", key="inavi-domainurl")
+token = dbutils.secrets.get(scope="corxinnvus6kvdevtest001", key="DATABRICKS-API-TOKEN-AIML-THROUGH-SP") # Provide the Token
+
+url = f"{domain}/api/2.0/genie/spaces/{space_id}?include_serialized_space=true"
+headers = {"Authorization": f"Bearer {token}"}
+
+response = requests.get(url, headers=headers)
+
+# Define the file path in your Databricks workspace
+file_path = '/Workspace/Shared/iNavi_Metadata/genie/output_file_patient_pre_prod_v1.3.json'
+
+if response.status_code == 200:
+    try:
+        # Parse the JSON response
+        data = response.json()
+
+        # Write the JSON data to a file in the specified workspace directory
+        with open(file_path, 'w') as f:
+            json.dump(data, f, indent=4)  # Write with indentation for readability
+        print(f"Output successfully written to: {file_path}")
+    except ValueError as e:
+        print(f"Error parsing JSON: {e}")
+        # Write the raw response content to the file if JSON parsing fails
+        with open(file_path, 'w') as f:
+            f.write(response.text)
+        print("Raw response content written to the file.")
+else:
+    # Write the error response to the file
+    with open(file_path, 'w') as f:
+        error_message = f"Request failed with status code: {response.status_code}\n"
+        error_message += f"Response Headers: {response.headers}\n"
+        error_message += f"Response Text: {response.text}\n"
+        f.write(error_message)
+    print(f"Request failed. Error details written to: {file_path}")
