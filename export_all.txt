@@ -2,6 +2,226 @@ import requests
 import json
 
 
+ PIPELINE PARAMETERS
+
+dbutils.widgets.text("space_id",        "")
+dbutils.widgets.text("workspace_names", "")
+dbutils.widgets.dropdown("deployment_mode", "import", ["import", "update"])
+
+EXPORT_SPACE_ID = dbutils.widgets.get("space_id").strip()
+WORKSPACE_NAMES = [w.strip() for w in dbutils.widgets.get("workspace_names").split(",") if w.strip()]
+DEPLOYMENT_MODE = dbutils.widgets.get("deployment_mode").strip().lower()
+
+if not EXPORT_SPACE_ID:
+    raise ValueError("Parameter 'space_id' is empty. Provide a value in job task parameters before running.")
+
+if not WORKSPACE_NAMES:
+    raise ValueError("Parameter 'workspace_names' is empty. Provide a value in job task parameters before running.")
+
+if DEPLOYMENT_MODE not in ("import", "update"):
+    raise ValueError(f"Invalid deployment_mode '{DEPLOYMENT_MODE}'. Must be 'import' or 'update'.")
+
+print(f"space_id        : {EXPORT_SPACE_ID}")
+print(f"workspace_names : {WORKSPACE_NAMES}")
+print(f"deployment_mode : {DEPLOYMENT_MODE}")
+
+
+ CONFIG
+
+GENIE_TITLE       = "Test Genie Deployment Campaign & Content, Customer Journey and ATLAS, ACE and ES Insights v3"
+GENIE_DESCRIPTION = "Genie space created for Insights Navigator application"
+PARENT_PATH       = "/Shared/iNavi_Metadata/genie/post_request_import_api"
+JSON_FILE_PATH    = "/Workspace/Shared/iNavi_Metadata/genie/output_file_test_18032026_v2.json"
+
+
+# EXPORT CONFIG
+
+EXPORT_SCOPE      = "corxinnvus6kvuat001"
+EXPORT_TOKEN_KEY  = "PROD-DDCX-UAT-SP-PAT-TOKEN"
+EXPORT_DOMAIN_KEY = "inavi-domainurl"
+
+
+# DEPLOYMENT SCOPE
+
+DEPLOY_SCOPE = "corxinnvus6kvuat001"
+
+
+# WORKSPACE SECRET KEY MAPPING
+
+workspace_credentials = {
+    "DDCX-PROD": {
+        "domain_key":    "DDCX-PROD-domainurl",
+        "warehouse_key": "DDCX-PROD-warehouse-id",
+        "token_key":     "DDCX-PROD-api-token",
+        # "space_id_key":  "DDCX-PROD-space-id"
+    },
+    "EQM-PROD": {
+        "domain_key":    "EQM-PROD-domainurl",
+        "warehouse_key": "EQM-PROD-warehouse-id",
+        "token_key":     "EQM-PROD-api-token",
+        # "space_id_key":  "EQM-PROD-space-id"
+    },
+    # "MOC-ADV": {
+    #     "domain_key":    "MOC-ADV-domainurl",
+    #     "warehouse_key": "MOC-ADV-warehouse-id",
+    #     "token_key":     "MOC-ADV-api-token",
+    #     # "space_id_key":  "MOC-ADV-space-id"
+    # },
+    "ATLAS-PROD": {
+        "domain_key":    "ATLAS-PROD-domainurl",
+        "warehouse_key": "ATLAS-PROD-warehouse-id",
+        "token_key":     "ATLAS-PROD-api-token",
+        # "space_id_key":  "ATLAS-PROD-space-id"
+    },
+    "DEV": {
+        "domain_key":    "DEV-domainurl",
+        "warehouse_key": "DEV-warehouse-id",
+        "token_key":     "DEV-api-token",
+        # "space_id_key":  "DEV-space-id"
+    },
+}
+
+def get_credentials(label, action):
+    keys         = workspace_credentials[label]
+    domain       = dbutils.secrets.get(scope=DEPLOY_SCOPE, key=keys["domain_key"])
+    warehouse_id = dbutils.secrets.get(scope=DEPLOY_SCOPE, key=keys["warehouse_key"])
+    token        = dbutils.secrets.get(scope=DEPLOY_SCOPE, key=keys["token_key"])
+    space_id     = dbutils.secrets.get(scope=DEPLOY_SCOPE, key=keys["space_id_key"]) if action == "update" and "space_id_key" in keys else None
+    return domain, warehouse_id, token, space_id
+
+
+# APPROACH 2 - Config Table 
+
+# from pyspark.sql import SparkSession
+# spark = SparkSession.builder.getOrCreate()
+#
+# config_rows = spark.sql("""
+#     SELECT workspace_label, secret_scope, action
+#     FROM rx_g_adv_analytics_commercial_uat001.inavi.genie_deployment_config
+#     WHERE is_active = true
+#     ORDER BY workspace_label
+# """).collect()
+#
+# workspace_list = [
+#     [ row["workspace_label"], row["secret_scope"], row["action"] ]
+#     for row in config_rows
+# ]
+
+
+# VALIDATION
+
+invalid = [w for w in WORKSPACE_NAMES if w not in workspace_credentials]
+
+if invalid:
+    raise ValueError(f"Unknown workspace(s): {invalid}. Check workspace_names parameter.")
+
+if DEPLOYMENT_MODE == "update":
+    missing_space_id = [w for w in WORKSPACE_NAMES if "space_id_key" not in workspace_credentials[w]]
+    if missing_space_id:
+        raise ValueError(f"space_id_key missing for workspace(s): {missing_space_id}. Uncomment space_id_key before running update.")
+
+
+# STEP 1 - Fetch export credentials
+
+export_token  = dbutils.secrets.get(scope=EXPORT_SCOPE, key=EXPORT_TOKEN_KEY)
+export_domain = dbutils.secrets.get(scope=EXPORT_SCOPE, key=EXPORT_DOMAIN_KEY)
+
+
+# STEP 2 - Export Genie space
+
+print(f"\nExporting space : {EXPORT_SPACE_ID}")
+
+export_url      = f"{export_domain}/api/2.0/genie/spaces/{EXPORT_SPACE_ID}?include_serialized_space=true"
+export_response = requests.get(export_url, headers={"Authorization": f"Bearer {export_token}"}, timeout=30)
+
+if export_response.status_code == 200:
+    with open(JSON_FILE_PATH, "w") as f:
+        json.dump(export_response.json(), f, indent=4)
+    print(f"Exported successfully to : {JSON_FILE_PATH}")
+else:
+    raise Exception(f"Export failed. HTTP {export_response.status_code} : {export_response.text[:300]}")
+
+
+# STEP 3 - Load serialized_space
+
+with open(JSON_FILE_PATH, "r") as f:
+    serialized_data = json.load(f)
+
+serialized_space = serialized_data.get("serialized_space", "")
+
+if not serialized_space:
+    raise ValueError("serialized_space is empty. Re-export the Genie space and try again.")
+
+
+# STEP 4 - Deploy or update each workspace using its own token
+
+results = []
+
+for label in WORKSPACE_NAMES:
+
+    action = DEPLOYMENT_MODE
+
+    try:
+        domain, warehouse_id, token, space_id = get_credentials(label, action)
+
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type":  "application/json"
+        }
+
+        payload = {
+            "warehouse_id":     warehouse_id,
+            "parent_path":      PARENT_PATH,
+            "serialized_space": serialized_space,
+            "title":            GENIE_TITLE,
+            "description":      GENIE_DESCRIPTION
+        }
+
+        if action == "import":
+            url      = f"{domain}/api/2.0/genie/spaces"
+            response = requests.post(url, headers=headers, data=json.dumps(payload), timeout=30)
+
+        elif action == "update":
+            url      = f"{domain}/api/2.0/genie/spaces/{space_id}"
+            response = requests.patch(url, headers=headers, data=json.dumps(payload), timeout=30)
+
+        if response.status_code == 200:
+            msg = f"Space created. space_id: {response.json().get('space_id', 'N/A')}" if action == "import" else "Updated successfully"
+            results.append({ "workspace": label, "action": action, "status": "SUCCESS", "message": msg })
+        else:
+            results.append({ "workspace": label, "action": action, "status": "FAILED", "message": response.text[:300] })
+
+    except Exception as e:
+        results.append({ "workspace": label, "action": action, "status": "ERROR", "message": str(e) })
+
+
+# STEP 5 - Summary
+
+passed = sum(1 for r in results if r["status"] == "SUCCESS")
+failed = sum(1 for r in results if r["status"] != "SUCCESS")
+
+for r in results:
+    print(f"{r['workspace']} - {r['action'].upper()} - {r['status']} - {r['message']}")
+
+print(f"\nTotal : {len(results)}  Passed : {passed}  Failed : {failed}")
+
+
+
+
+
+
+
+
+
+
+
+----------------------------------------------
+
+
+import requests
+import json
+
+
 # PIPELINE PARAMETERS
 
 dbutils.widgets.text("space_id",        "")
