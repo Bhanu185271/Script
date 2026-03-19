@@ -1,10 +1,87 @@
-============================================================
-  CELL 12 — Save to Genie API
-============================================================
+def safe_str(val):
+    """Always returns a clean string safe for dbutils.widgets.text()"""
+    if val is None:
+        return ""
+    if isinstance(val, list):
+        return str(val[0]) if val else ""
+    return str(val)
 
-  Saving 2 addition(s) and 4 update(s)...
+# ADD THIS ↓
+def safe_list(val):
+    """Always returns description as a list ['...'] as the API requires"""
+    if val is None or val == "":
+        return []
+    if isinstance(val, list):
+        return [str(val[0])] if val else []
+    return [str(val)]   # ← wraps plain string into a list
 
- Error 400
-     {"error_code":"INVALID_PARAMETER_VALUE","message":"Invalid serialized_space: Expected an array for description but found \"It gives the source like the record is for Veeva email or Mass Email..\"","details":[{"@type":"type.googleapis.com/google.rpc.RequestInfo","request_id":"3d285906-7184-430b-9d92-4a75aa29be01","serving_data":""}]}
 
-  Nothing was saved. Fix the error above and retry.
+
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CELL 12 — SAVE TO API (fixed)
+# ─────────────────────────────────────────────────────────────────────────────
+
+diff = build_diff()
+
+print("=" * 60)
+print("  CELL 12 — Save to Genie API")
+print("=" * 60)
+
+if not diff:
+    print("\n  ⚠️  Nothing to save — no changes staged.")
+    print("     Use Cells 3–10C to make changes first.")
+else:
+    # ── Sanitize all descriptions before sending ──────────────────────────────
+    # API strictly requires description = ["string"], never a plain "string"
+    for t in get_tables():
+        if "description" in t:
+            d = t["description"]
+            if isinstance(d, str):
+                t["description"] = [d]
+            elif isinstance(d, list) and d:
+                t["description"] = [str(d[0])]
+            elif isinstance(d, list) and not d:
+                del t["description"]        # remove empty list — API rejects []
+
+        for c in t.get("column_configs", []):
+            if "description" in c:
+                d = c["description"]
+                if isinstance(d, str):
+                    c["description"] = [d]
+                elif isinstance(d, list) and d:
+                    c["description"] = [str(d[0])]
+                elif isinstance(d, list) and not d:
+                    del c["description"]    # remove empty list
+
+    print("  ✅ Descriptions sanitized (all confirmed as arrays).")
+    print(f"  Saving {len([l for l in diff if l[0] == 'ADDED'])} addition(s) and "
+          f"{len([l for l in diff if l[0] == 'REMOVED'])} update(s)...")
+
+    payload = {
+        "title"           : space_data["title"],
+        "description"     : space_data.get("description", ""),
+        "warehouse_id"    : space_data["warehouse_id"],
+        "serialized_space": json.dumps(serialized_space),
+    }
+
+    save_resp = requests.patch(
+        f"{DATABRICKS_HOST}/api/2.0/genie/spaces/{SPACE_ID}",
+        headers=HEADERS,
+        json=payload,
+        timeout=30,
+    )
+
+    if save_resp.status_code == 200:
+        original_snapshot.clear()
+        original_snapshot.update(copy.deepcopy(serialized_space))
+        print(f"\n  🎉 SUCCESS — Genie Space updated!")
+        print(f"     Space : {space_data['title']}")
+        print(f"     ID    : {SPACE_ID}")
+        print(f"\n  Genie will use the new metadata immediately.")
+        print(f"  Run Cell 11 to confirm diff is now empty.")
+    else:
+        print(f"\n  ❌ Error {save_resp.status_code}")
+        print(f"     {save_resp.text[:500]}")
+        print("\n  Nothing was saved. Fix the error above and retry.")
