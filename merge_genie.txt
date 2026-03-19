@@ -1,0 +1,673 @@
+# ==============================================================================
+# GENIE SPACE MERGER — Complete, merges every field in serialized_space
+# ==============================================================================
+#
+# Merges ALL fields:
+#   data_sources  → tables (with column configs + descriptions), metric_views
+#   instructions  → joins, text_instructions, example_sqls,
+#                   sql_snippets (filters, expressions, measures)
+#   config        → sample_questions
+#   benchmarks    → benchmark questions with ground-truth SQL
+#
+# Two independent save options:
+#   Cell 4 — Option A : Create a brand new merged Genie space
+#   Cell 5 — Option B : Merge Space 1 INTO Space 2 (updates Space 2 in place)
+#
+# No extra libraries — only requests (pre-installed in Databricks).
+# ==============================================================================
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CELL 1 — CONFIG
+# ─────────────────────────────────────────────────────────────────────────────
+
+DATABRICKS_HOST = "https://<your-workspace>.cloud.databricks.com"  # No trailing slash
+TOKEN           = "<your-personal-access-token>"
+
+# The two spaces you want to merge
+SPACE_ID_1      = "<space-id-1>"    # e.g. your Sales space
+SPACE_ID_2      = "<space-id-2>"    # e.g. your Revenue space
+
+# ── Used only for Option A (create new space) ─────────────────────────────────
+WAREHOUSE_ID     = "<your-warehouse-id>"
+NEW_SPACE_TITLE  = "Sales + Revenue (Merged)"
+NEW_SPACE_DESC   = "Merged Genie space combining Sales and Revenue"
+PARENT_PATH      = "/Workspace/Users/<your-email>"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CELL 2 — LOAD BOTH SPACES + MERGE
+# Fetches both spaces, runs the full merge, prints a detailed report.
+# Run once. Both save options (Cell 4 and Cell 5) use the result.
+# ─────────────────────────────────────────────────────────────────────────────
+
+import requests, json, copy, uuid
+
+HEADERS = {
+    "Authorization": f"Bearer {TOKEN}",
+    "Content-Type" : "application/json",
+}
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def new_id():
+    """Fresh 32-char hex ID (required format for most Genie IDs)"""
+    return uuid.uuid4().hex + uuid.uuid4().hex[:0]
+
+def short_id():
+    """16-char hex ID (used for joins, measures, filters, expressions)"""
+    return uuid.uuid4().hex[:16]
+
+def safe_str(val):
+    """Always returns a clean string — never None"""
+    if val is None:            return ""
+    if isinstance(val, list):  return str(val[0]) if val else ""
+    return str(val)
+
+def safe_list(val):
+    """Always returns description as ['string'] as the API requires"""
+    if val is None or val == "": return []
+    if isinstance(val, list):    return [str(val[0])] if val else []
+    return [str(val)]
+
+def fetch_space(space_id):
+    resp = requests.get(
+        f"{DATABRICKS_HOST}/api/2.0/genie/spaces/{space_id}",
+        headers=HEADERS,
+        params={"include_serialized_space": "true"},
+        timeout=30,
+    )
+    if resp.status_code != 200:
+        raise Exception(f"Failed to fetch {space_id}: {resp.status_code} {resp.text}")
+    data = resp.json()
+    raw  = data.get("serialized_space")
+    if raw is None:
+        raise KeyError(f"serialized_space missing for {space_id}. "
+                       "Check that include_serialized_space=true is supported.")
+    parsed = json.loads(raw) if isinstance(raw, str) else raw
+    return data, parsed
+
+def print_space_summary(label, space_data, ss):
+    tables     = ss.get("data_sources", {}).get("tables", [])
+    mv         = ss.get("data_sources", {}).get("metric_views", [])
+    joins      = ss.get("instructions", {}).get("join_specs", [])
+    txt        = ss.get("instructions", {}).get("text_instructions", [])
+    ex_sqls    = ss.get("instructions", {}).get("example_question_sqls", [])
+    filters    = ss.get("instructions", {}).get("sql_snippets", {}).get("filters", [])
+    expressions= ss.get("instructions", {}).get("sql_snippets", {}).get("expressions", [])
+    measures   = ss.get("instructions", {}).get("sql_snippets", {}).get("measures", [])
+    benchmarks = ss.get("benchmarks", [])
+    sample_qs  = ss.get("config", {}).get("sample_questions", [])
+
+    print(f"\n  {label}: '{space_data['title']}'  (ID: {space_data['space_id']})")
+    print(f"  {'─' * 54}")
+    print(f"    Tables            : {len(tables)}")
+    for t in tables:
+        cols = len(t.get("column_configs", []))
+        print(f"      • {t['identifier']}  ({cols} columns)")
+    print(f"    Metric Views      : {len(mv)}")
+    print(f"    Joins             : {len(joins)}")
+    print(f"    Text Instructions : {len(txt)}")
+    print(f"    Example SQLs      : {len(ex_sqls)}")
+    print(f"    Filters           : {len(filters)}")
+    print(f"    Expressions       : {len(expressions)}")
+    print(f"    Measures          : {len(measures)}")
+    print(f"    Benchmarks        : {len(benchmarks)}")
+    print(f"    Sample Questions  : {len(sample_qs)}")
+
+# ── Merge function — handles every field ──────────────────────────────────────
+
+def merge_column_configs(base_cols, incoming_cols):
+    """
+    Merge column_configs from Space 2 into Space 1's list.
+    - If column exists in both: keep Space 1's config but fill in any
+      missing fields (description, synonyms, get_example_values, etc.)
+    - If column only in Space 2: add it.
+    Returns merged list and a change report.
+    """
+    base_map    = {c["column_name"]: c for c in base_cols}
+    added       = []
+    enriched    = []
+
+    for inc_col in incoming_cols:
+        col_name = inc_col["column_name"]
+        if col_name not in base_map:
+            # Column doesn't exist in Space 1 — add it
+            base_cols.append(copy.deepcopy(inc_col))
+            base_map[col_name] = base_cols[-1]
+            added.append(col_name)
+        else:
+            # Column exists — fill in any missing fields from Space 2
+            base_col = base_map[col_name]
+            changed  = False
+            for field in ["description", "synonyms", "get_example_values",
+                          "build_value_dictionary"]:
+                if field not in base_col and field in inc_col:
+                    base_col[field] = copy.deepcopy(inc_col[field])
+                    changed = True
+            if changed:
+                enriched.append(col_name)
+
+    return base_cols, added, enriched
+
+
+def merge_spaces(ss1, ss2):
+    """
+    Full merge of ss2 into ss1.
+    Space 1 always wins on conflicts.
+    Returns (merged_dict, report_dict)
+    """
+    merged = copy.deepcopy(ss1)
+    report = {}
+
+    # ── 1. TABLES ─────────────────────────────────────────────────────────────
+    existing_tables = {
+        t["identifier"]: t
+        for t in merged.setdefault("data_sources", {}).setdefault("tables", [])
+    }
+    tbl_added    = []
+    tbl_enriched = []
+    col_added    = {}
+    col_enriched = {}
+
+    for inc_t in ss2.get("data_sources", {}).get("tables", []):
+        ident = inc_t["identifier"]
+        if ident not in existing_tables:
+            # Brand new table — add entirely
+            merged["data_sources"]["tables"].append(copy.deepcopy(inc_t))
+            existing_tables[ident] = merged["data_sources"]["tables"][-1]
+            tbl_added.append(ident)
+        else:
+            # Table exists — merge descriptions and column_configs
+            base_t = existing_tables[ident]
+
+            # Table description: fill only if Space 1 has none
+            if not base_t.get("description") and inc_t.get("description"):
+                base_t["description"] = safe_list(inc_t["description"])
+                tbl_enriched.append(f"{ident} (description filled)")
+
+            # Column configs: deep merge
+            base_cols = base_t.setdefault("column_configs", [])
+            inc_cols  = inc_t.get("column_configs", [])
+            if inc_cols:
+                _, ca, ce = merge_column_configs(base_cols, inc_cols)
+                if ca: col_added[ident]    = ca
+                if ce: col_enriched[ident] = ce
+
+    report["tables"] = {
+        "added"         : tbl_added,
+        "enriched"      : tbl_enriched,
+        "columns_added" : col_added,
+        "cols_enriched" : col_enriched,
+    }
+
+    # ── 2. METRIC VIEWS ───────────────────────────────────────────────────────
+    existing_mv = {
+        mv["identifier"]
+        for mv in merged["data_sources"].setdefault("metric_views", [])
+    }
+    mv_added = []
+    for mv in ss2.get("data_sources", {}).get("metric_views", []):
+        if mv["identifier"] not in existing_mv:
+            merged["data_sources"]["metric_views"].append(copy.deepcopy(mv))
+            existing_mv.add(mv["identifier"])
+            mv_added.append(mv["identifier"])
+    report["metric_views"] = {"added": mv_added}
+
+    # ── 3. JOINS ──────────────────────────────────────────────────────────────
+    def join_key(j):
+        l = j.get("left",  {}).get("identifier", "")
+        r = j.get("right", {}).get("identifier", "")
+        return tuple(sorted([l, r]))   # order-independent dedup
+
+    existing_joins = {
+        join_key(j)
+        for j in merged.setdefault("instructions", {}).setdefault("join_specs", [])
+    }
+    joins_added   = []
+    joins_skipped = []
+
+    for j in ss2.get("instructions", {}).get("join_specs", []):
+        jk = join_key(j)
+        if jk not in existing_joins:
+            new_j      = copy.deepcopy(j)
+            new_j["id"] = short_id()
+            merged["instructions"]["join_specs"].append(new_j)
+            existing_joins.add(jk)
+            joins_added.append(f"{jk[0]} ↔ {jk[1]}")
+        else:
+            joins_skipped.append(f"{jk[0]} ↔ {jk[1]}")
+    report["joins"] = {"added": joins_added, "skipped": joins_skipped}
+
+    # ── 4. TEXT INSTRUCTIONS ──────────────────────────────────────────────────
+    # Keep all from both — deduplicate by content string to avoid exact duplicates
+    existing_txt_content = {
+        safe_str(ti.get("content"))
+        for ti in merged["instructions"].setdefault("text_instructions", [])
+    }
+    txt_added   = []
+    txt_skipped = []
+
+    for ti in ss2.get("instructions", {}).get("text_instructions", []):
+        content = safe_str(ti.get("content"))
+        if content not in existing_txt_content:
+            new_ti      = copy.deepcopy(ti)
+            new_ti["id"] = short_id()
+            merged["instructions"]["text_instructions"].append(new_ti)
+            existing_txt_content.add(content)
+            txt_added.append(content[:70])
+        else:
+            txt_skipped.append(content[:70])
+    report["text_instructions"] = {"added": txt_added, "skipped": txt_skipped}
+
+    # ── 5. EXAMPLE SQLs ───────────────────────────────────────────────────────
+    # Deduplicate by question text
+    existing_ex_qs = {
+        safe_str(ex.get("question"))
+        for ex in merged["instructions"].setdefault("example_question_sqls", [])
+    }
+    ex_added   = []
+    ex_skipped = []
+
+    for ex in ss2.get("instructions", {}).get("example_question_sqls", []):
+        q = safe_str(ex.get("question"))
+        if q not in existing_ex_qs:
+            new_ex      = copy.deepcopy(ex)
+            new_ex["id"] = short_id()
+            merged["instructions"]["example_question_sqls"].append(new_ex)
+            existing_ex_qs.add(q)
+            ex_added.append(q[:70])
+        else:
+            ex_skipped.append(q[:70])
+    report["example_sqls"] = {"added": ex_added, "skipped": ex_skipped}
+
+    # ── 6. SQL SNIPPETS — FILTERS ─────────────────────────────────────────────
+    snippets = merged["instructions"].setdefault("sql_snippets", {})
+
+    existing_filter_names = {
+        f.get("display_name", "")
+        for f in snippets.setdefault("filters", [])
+    }
+    filters_added   = []
+    filters_skipped = []
+
+    for f in ss2.get("instructions", {}).get("sql_snippets", {}).get("filters", []):
+        name = f.get("display_name", "")
+        if name not in existing_filter_names:
+            new_f      = copy.deepcopy(f)
+            new_f["id"] = short_id()
+            snippets["filters"].append(new_f)
+            existing_filter_names.add(name)
+            filters_added.append(name)
+        else:
+            filters_skipped.append(name)
+    report["filters"] = {"added": filters_added, "skipped": filters_skipped}
+
+    # ── 7. SQL SNIPPETS — EXPRESSIONS ────────────────────────────────────────
+    existing_expr_aliases = {
+        e.get("alias", "")
+        for e in snippets.setdefault("expressions", [])
+    }
+    exprs_added   = []
+    exprs_skipped = []
+
+    for e in ss2.get("instructions", {}).get("sql_snippets", {}).get("expressions", []):
+        alias = e.get("alias", "")
+        if alias not in existing_expr_aliases:
+            new_e      = copy.deepcopy(e)
+            new_e["id"] = short_id()
+            snippets["expressions"].append(new_e)
+            existing_expr_aliases.add(alias)
+            exprs_added.append(alias)
+        else:
+            exprs_skipped.append(alias)
+    report["expressions"] = {"added": exprs_added, "skipped": exprs_skipped}
+
+    # ── 8. SQL SNIPPETS — MEASURES ────────────────────────────────────────────
+    existing_measure_aliases = {
+        m.get("alias", "")
+        for m in snippets.setdefault("measures", [])
+    }
+    measures_added   = []
+    measures_skipped = []
+
+    for m in ss2.get("instructions", {}).get("sql_snippets", {}).get("measures", []):
+        alias = m.get("alias", "")
+        if alias not in existing_measure_aliases:
+            new_m      = copy.deepcopy(m)
+            new_m["id"] = short_id()
+            snippets["measures"].append(new_m)
+            existing_measure_aliases.add(alias)
+            measures_added.append(alias)
+        else:
+            measures_skipped.append(alias)
+    report["measures"] = {"added": measures_added, "skipped": measures_skipped}
+
+    # ── 9. BENCHMARKS ────────────────────────────────────────────────────────
+    # Deduplicate by question text
+    existing_bm_qs = {
+        safe_str(b.get("question"))
+        for b in merged.setdefault("benchmarks", [])
+    }
+    bm_added   = []
+    bm_skipped = []
+
+    for b in ss2.get("benchmarks", []):
+        q = safe_str(b.get("question"))
+        if q not in existing_bm_qs:
+            new_b      = copy.deepcopy(b)
+            new_b["id"] = short_id()
+            merged["benchmarks"].append(new_b)
+            existing_bm_qs.add(q)
+            bm_added.append(q[:70])
+        else:
+            bm_skipped.append(q[:70])
+    report["benchmarks"] = {"added": bm_added, "skipped": bm_skipped}
+
+    # ── 10. SAMPLE QUESTIONS ─────────────────────────────────────────────────
+    existing_sq_qs = {
+        safe_str(sq.get("question"))
+        for sq in merged.setdefault("config", {}).setdefault("sample_questions", [])
+    }
+    sq_added   = []
+    sq_skipped = []
+
+    for sq in ss2.get("config", {}).get("sample_questions", []):
+        q = safe_str(sq.get("question"))
+        if q not in existing_sq_qs:
+            new_sq      = copy.deepcopy(sq)
+            new_sq["id"] = uuid.uuid4().hex + "00000000"   # 32-char format
+            merged["config"]["sample_questions"].append(new_sq)
+            existing_sq_qs.add(q)
+            sq_added.append(q[:70])
+        else:
+            sq_skipped.append(q[:70])
+    report["sample_questions"] = {"added": sq_added, "skipped": sq_skipped}
+
+    # ── Preserve version (use the higher of the two) ──────────────────────────
+    v1 = ss1.get("version", 1)
+    v2 = ss2.get("version", 1)
+    merged["version"] = max(v1, v2)
+
+    return merged, report
+
+
+# ── Run ───────────────────────────────────────────────────────────────────────
+print("⏳ Loading spaces...")
+space_data_1, ss1 = fetch_space(SPACE_ID_1)
+space_data_2, ss2 = fetch_space(SPACE_ID_2)
+
+print("\n" + "=" * 60)
+print("  Spaces Loaded — Before Merge")
+print("=" * 60)
+print_space_summary("Space 1", space_data_1, ss1)
+print_space_summary("Space 2", space_data_2, ss2)
+
+print("\n⏳ Merging...")
+merged_ss, report = merge_spaces(ss1, ss2)
+
+# ── Print merge report ────────────────────────────────────────────────────────
+SECTION_LABELS = {
+    "tables"           : "TABLES",
+    "metric_views"     : "METRIC VIEWS",
+    "joins"            : "JOINS",
+    "text_instructions": "TEXT INSTRUCTIONS",
+    "example_sqls"     : "EXAMPLE SQLs",
+    "filters"          : "FILTERS (sql_snippets)",
+    "expressions"      : "EXPRESSIONS (sql_snippets)",
+    "measures"         : "MEASURES (sql_snippets)",
+    "benchmarks"       : "BENCHMARKS",
+    "sample_questions" : "SAMPLE QUESTIONS",
+}
+
+print("\n" + "=" * 60)
+print("  Merge Report (Space 1 is base — Space 1 wins on conflicts)")
+print("=" * 60)
+
+total_added   = 0
+total_skipped = 0
+
+for key, label in SECTION_LABELS.items():
+    r = report.get(key, {})
+    added   = r.get("added",   [])
+    skipped = r.get("skipped", [])
+    enriched= r.get("enriched",[])
+    c_added = r.get("columns_added", {})
+    c_enr   = r.get("cols_enriched", {})
+
+    total_added   += len(added)
+    total_skipped += len(skipped)
+
+    print(f"\n  {label}")
+    if added:
+        for item in added:
+            print(f"    +  {item}")
+    if enriched:
+        for item in enriched:
+            print(f"    ~  {item}  (filled missing fields)")
+    if c_added:
+        for tbl, cols in c_added.items():
+            for col in cols:
+                print(f"    +  {tbl} → column: {col}")
+    if c_enr:
+        for tbl, cols in c_enr.items():
+            for col in cols:
+                print(f"    ~  {tbl} → column: {col}  (enriched)")
+    if skipped:
+        for item in skipped:
+            print(f"    =  {item}  (already in Space 1 — kept)")
+    if not added and not enriched and not c_added and not c_enr and not skipped:
+        print(f"    (nothing in Space 2 for this section)")
+
+# ── Final counts ──────────────────────────────────────────────────────────────
+def count_all(ss):
+    return {
+        "Tables"       : len(ss.get("data_sources", {}).get("tables", [])),
+        "Metric Views" : len(ss.get("data_sources", {}).get("metric_views", [])),
+        "Joins"        : len(ss.get("instructions", {}).get("join_specs", [])),
+        "Text Inst"    : len(ss.get("instructions", {}).get("text_instructions", [])),
+        "Example SQLs" : len(ss.get("instructions", {}).get("example_question_sqls", [])),
+        "Filters"      : len(ss.get("instructions", {}).get("sql_snippets", {}).get("filters", [])),
+        "Expressions"  : len(ss.get("instructions", {}).get("sql_snippets", {}).get("expressions", [])),
+        "Measures"     : len(ss.get("instructions", {}).get("sql_snippets", {}).get("measures", [])),
+        "Benchmarks"   : len(ss.get("benchmarks", [])),
+        "Sample Qs"    : len(ss.get("config", {}).get("sample_questions", [])),
+    }
+
+c1 = count_all(ss1)
+c2 = count_all(ss2)
+cm = count_all(merged_ss)
+
+print(f"\n{'=' * 60}")
+print(f"  {'Field':<18}  {'Space 1':>8}  {'Space 2':>8}  {'Merged':>8}")
+print(f"  {'─' * 50}")
+for field in c1:
+    print(f"  {field:<18}  {c1[field]:>8}  {c2[field]:>8}  {cm[field]:>8}")
+print(f"{'=' * 60}")
+print(f"\n  + {total_added} items added from Space 2")
+print(f"  = {total_skipped} items already existed — Space 1 version kept")
+print(f"\n✅ Merge complete (in memory — not saved yet)")
+print("   ▶  Run Cell 3 to inspect merged content")
+print("   ▶  Run Cell 4 for Option A — Create a NEW space")
+print("   ▶  Run Cell 5 for Option B — Merge INTO Space 2")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CELL 3 — INSPECT MERGED CONTENT  (optional, run anytime)
+# Type a section name in the widget to inspect merged content before saving.
+# ─────────────────────────────────────────────────────────────────────────────
+
+dbutils.widgets.text(
+    name         = "inspect_section",
+    defaultValue = "tables",
+    label        = "Inspect: tables / joins / measures / filters / expressions / benchmarks / sample_questions / example_sqls / all"
+)
+
+section = dbutils.widgets.get("inspect_section").strip().lower()
+
+print("=" * 60)
+print(f"  CELL 3 — Inspect Merged Content: '{section}'")
+print("=" * 60)
+
+def show_tables(ss):
+    tables = ss.get("data_sources", {}).get("tables", [])
+    print(f"\n  TABLES ({len(tables)}):")
+    for t in tables:
+        desc = safe_str(t.get("description"))
+        cols = t.get("column_configs", [])
+        print(f"\n    • {t['identifier']}")
+        print(f"        Description : {desc[:80] or '(none)'}")
+        print(f"        Columns     : {len(cols)}")
+        for c in cols:
+            cdesc = safe_str(c.get("description"))
+            print(f"          - {c['column_name']:<28} {cdesc[:50] or '(no desc)'}")
+
+def show_joins(ss):
+    joins = ss.get("instructions", {}).get("join_specs", [])
+    print(f"\n  JOINS ({len(joins)}):")
+    for j in joins:
+        l   = j.get("left",  {}).get("identifier", "")
+        r   = j.get("right", {}).get("identifier", "")
+        sql = "".join(j.get("sql", []))
+        print(f"    • {l}  ↔  {r}")
+        print(f"        ON : {sql}")
+
+def show_snippets(ss, kind):
+    items = ss.get("instructions", {}).get("sql_snippets", {}).get(kind, [])
+    print(f"\n  {kind.upper()} ({len(items)}):")
+    for item in items:
+        sql  = "".join(item.get("sql", []))
+        syns = ", ".join(item.get("synonyms", []))
+        name = item.get("display_name") or item.get("alias", "")
+        print(f"    • {name:<28}  SQL: {sql[:60]}")
+        if syns: print(f"        synonyms: {syns}")
+
+def show_benchmarks(ss):
+    bms = ss.get("benchmarks", [])
+    print(f"\n  BENCHMARKS ({len(bms)}):")
+    for b in bms:
+        q   = safe_str(b.get("question"))
+        sql = "".join(b.get("sql", []))
+        print(f"    • Q  : {q[:80]}")
+        print(f"      SQL: {sql[:80]}")
+
+def show_sample_questions(ss):
+    sqs = ss.get("config", {}).get("sample_questions", [])
+    print(f"\n  SAMPLE QUESTIONS ({len(sqs)}):")
+    for sq in sqs:
+        print(f"    • {safe_str(sq.get('question'))[:80]}")
+
+def show_example_sqls(ss):
+    exs = ss.get("instructions", {}).get("example_question_sqls", [])
+    print(f"\n  EXAMPLE SQLs ({len(exs)}):")
+    for ex in exs:
+        q   = safe_str(ex.get("question"))
+        sql = "".join(ex.get("sql", []))
+        print(f"    • Q  : {q[:70]}")
+        print(f"      SQL: {sql[:80]}")
+
+dispatch = {
+    "tables"          : lambda: show_tables(merged_ss),
+    "joins"           : lambda: show_joins(merged_ss),
+    "measures"        : lambda: show_snippets(merged_ss, "measures"),
+    "filters"         : lambda: show_snippets(merged_ss, "filters"),
+    "expressions"     : lambda: show_snippets(merged_ss, "expressions"),
+    "benchmarks"      : lambda: show_benchmarks(merged_ss),
+    "sample_questions": lambda: show_sample_questions(merged_ss),
+    "example_sqls"    : lambda: show_example_sqls(merged_ss),
+}
+
+if section == "all":
+    for fn in dispatch.values():
+        fn()
+elif section in dispatch:
+    dispatch[section]()
+else:
+    print(f"  ⚠️  Unknown section '{section}'.")
+    print("     Valid: tables, joins, measures, filters, expressions,")
+    print("            benchmarks, sample_questions, example_sqls, all")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CELL 4 — OPTION A: Create a Brand New Merged Genie Space
+# Creates a completely new space. Space 1 and Space 2 are NOT touched.
+# ─────────────────────────────────────────────────────────────────────────────
+
+print("=" * 60)
+print("  OPTION A — Creating New Merged Genie Space")
+print("=" * 60)
+print(f"\n  Title      : {NEW_SPACE_TITLE}")
+print(f"  Description: {NEW_SPACE_DESC}")
+print(f"  Location   : {PARENT_PATH}")
+print(f"  Warehouse  : {WAREHOUSE_ID}")
+print(f"\n  Sending to API...")
+
+payload_a = {
+    "title"           : NEW_SPACE_TITLE,
+    "description"     : NEW_SPACE_DESC,
+    "warehouse_id"    : WAREHOUSE_ID,
+    "parent_path"     : PARENT_PATH,
+    "serialized_space": json.dumps(merged_ss),
+}
+
+resp_a = requests.post(
+    f"{DATABRICKS_HOST}/api/2.0/genie/spaces",
+    headers=HEADERS,
+    json=payload_a,
+    timeout=30,
+)
+
+if resp_a.status_code == 200:
+    new_space = resp_a.json()
+    print(f"\n  🎉 SUCCESS — New space created!")
+    print(f"     Title    : {new_space.get('title', '')}")
+    print(f"     Space ID : {new_space.get('space_id', '')}")
+    print(f"\n  Find it in Databricks → Genie → '{NEW_SPACE_TITLE}'")
+    print(f"\n  Space 1 '{space_data_1['title']}' — untouched ✅")
+    print(f"  Space 2 '{space_data_2['title']}' — untouched ✅")
+else:
+    print(f"\n  ❌ Error {resp_a.status_code}")
+    print(f"     {resp_a.text[:600]}")
+    print("\n  Common causes:")
+    print("    • WAREHOUSE_ID is wrong or no CAN USE permission on it")
+    print("    • PARENT_PATH folder does not exist")
+    print("    • serialized_space has invalid content — run Cell 3 to inspect")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CELL 5 — OPTION B: Merge Space 1 INTO Space 2 (updates Space 2 in place)
+# Space 2 gets all merged content. Space 1 is NOT touched.
+# ─────────────────────────────────────────────────────────────────────────────
+
+print("=" * 60)
+print("  OPTION B — Merging Space 1 INTO Space 2")
+print("=" * 60)
+print(f"\n  Space 1 : '{space_data_1['title']}'  →  source (read only)")
+print(f"  Space 2 : '{space_data_2['title']}'  →  will be UPDATED")
+print(f"\n  Sending to API...")
+
+payload_b = {
+    "title"           : space_data_2["title"],
+    "description"     : space_data_2.get("description", ""),
+    "warehouse_id"    : space_data_2["warehouse_id"],
+    "serialized_space": json.dumps(merged_ss),
+}
+
+resp_b = requests.patch(
+    f"{DATABRICKS_HOST}/api/2.0/genie/spaces/{SPACE_ID_2}",
+    headers=HEADERS,
+    json=payload_b,
+    timeout=30,
+)
+
+if resp_b.status_code == 200:
+    print(f"\n  🎉 SUCCESS — Space 2 updated with merged content!")
+    print(f"\n  Space 2 '{space_data_2['title']}' ({SPACE_ID_2}) — updated ✅")
+    print(f"  Space 1 '{space_data_1['title']}' ({SPACE_ID_1}) — untouched ✅")
+    print(f"\n  Open Space 2 in Databricks to verify.")
+else:
+    print(f"\n  ❌ Error {resp_b.status_code}")
+    print(f"     {resp_b.text[:600]}")
+    print("\n  Common causes:")
+    print("    • No CAN EDIT permission on Space 2")
+    print("    • serialized_space has invalid content — run Cell 3 to inspect")
