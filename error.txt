@@ -1,0 +1,110 @@
+# CELL 3 — SECTION 1: Setup Widgets  Edit Table & Column Descriptions
+
+# HOW TO USE:
+#   1. Pick a table from Widget 1
+#   2. See the current descriptions printed below
+#   3. Pick a column from Widget 3
+#   4. Fill in Widget 2 (table desc) and Widget 4 (column desc)
+#   5. Run Cell 4 to stage the changes
+
+dbutils.widgets.removeAll()
+
+# Widget 1 — Table selector
+dbutils.widgets.dropdown(
+    name         = "1_table",
+    defaultValue = table_ids()[0] if table_ids() else "",
+    choices      = table_ids(),
+    label        = "1. Select Table"
+)
+
+selected_table = dbutils.widgets.get("1_table")
+t = find_table(selected_table)
+
+print("=" * 60)
+print("  SECTION 1 — Edit Table & Column Descriptions")
+print("=" * 60)
+
+if not t:
+    print("No table selected or table not found.")
+else:
+    existing_table_desc = (t.get("description") or [""])[0]
+    col_configs         = t.get("column_configs", [])
+    col_names           = [c["column_name"] for c in col_configs]
+
+    print(f"\n  Selected Table : {selected_table}")
+    print(f"\n  Current Table Description:")
+    print(f"      '{existing_table_desc or '(empty)'}'")
+    print(f"\n  Configured Columns ({len(col_names)}):")
+    if col_configs:
+        for c in col_configs:
+            cdesc = c.get("description", "(no description)")
+            print(f"      • {c['column_name']:<30} {cdesc[:60]}")
+    else:
+        print("      (none — add columns when using Section 2 Add Table)")
+
+    # Widget 2 — New table description (pre-filled with existing)
+    dbutils.widgets.text(
+        name         = "2_table_description",
+        defaultValue = existing_table_desc,
+        label        = "2. New Table Description (edit me)"
+    )
+
+    # Widget 3 — Column selector
+    col_choices = col_names if col_names else ["(no columns configured)"]
+    dbutils.widgets.dropdown(
+        name         = "3_column",
+        defaultValue = col_choices[0],
+        choices      = col_choices,
+        label        = "3. Select Column to Edit"
+    )
+
+    selected_col      = dbutils.widgets.get("3_column")
+    col_obj           = next((c for c in col_configs if c["column_name"] == selected_col), {})
+    existing_col_desc = col_obj.get("description", "")
+
+    # Widget 4 — New column description (pre-filled with existing)
+    dbutils.widgets.text(
+        name         = "4_column_description",
+        defaultValue = existing_col_desc,
+        label        = "4. New Column Description (edit me)"
+    )
+
+    print(f"\n  Selected Column     : {selected_col}")
+    print(f"  Current Column Desc : '{existing_col_desc or '(empty)'}'")
+    print("\n Edit widgets 2 and 4 above, then run Cell 4 to stage changes.")
+
+
+
+
+Py4JError: An error occurred while calling o472.createTextWidget. Trace:
+py4j.Py4JException: Method createTextWidget([class java.lang.String, class java.util.ArrayList, class java.lang.String, null]) does not exist
+	at py4j.reflection.ReflectionEngine.getMethod(ReflectionEngine.java:344)
+	at py4j.reflection.ReflectionEngine.getMethod(ReflectionEngine.java:352)
+	at py4j.Gateway.invoke(Gateway.java:297)
+	at py4j.commands.AbstractCommand.invokeMethod(AbstractCommand.java:132)
+	at py4j.commands.CallCommand.execute(CallCommand.java:79)
+	at py4j.ClientServerConnection.waitForCommands(ClientServerConnection.java:199)
+	at py4j.ClientServerConnection.run(ClientServerConnection.java:119)
+	at java.base/java.lang.Thread.run(Thread.java:840)
+
+File <command-6282732675381746>, line 66
+     63 existing_col_desc = col_obj.get("description", "")
+     65 # Widget 4 — New column description (pre-filled with existing)
+---> 66 dbutils.widgets.text(
+     67     name         = "4_column_description",
+     68     defaultValue = existing_col_desc,
+     69     label        = "4. New Column Description (edit me)"
+     70 )
+     72 print(f"\n  Selected Column     : {selected_col}")
+     73 print(f"  Current Column Desc : '{existing_col_desc or '(empty)'}'")
+File /databricks/python_shell/lib/dbruntime/WidgetHandlerImpl.py:180, in WidgetsHandlerImpl.text(self, name, defaultValue, label)
+    173 def text(self, name: str, defaultValue: str, label: str | None = None) -> None:
+    174     """ Creates a text input widget with given name, default value and optional label for
+    175     display
+    176     :param name: Name of argument associated with the new input widget
+    177     :param defaultValue: Default value of the input widget
+    178     :param label: Optional label string for display in notebook and dashboard
+    179     """
+--> 180     self._notebookArguments.createTextWidget(name, defaultValue, label, None)
+
+    
