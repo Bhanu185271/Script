@@ -1,0 +1,833 @@
+# =============================================================================
+# GENIE SPACE EDITOR — Complete Databricks Notebook
+# =============================================================================
+# Paste each cell block into a separate Databricks notebook cell.
+# Cells are clearly marked: ── CELL 1 ──, ── CELL 2 ──, etc.
+# =============================================================================
+
+
+# ── CELL 1 ── Install dependencies (run once) ─────────────────────────────────
+"""
+%pip install ipywidgets requests
+"""
+
+
+# ── CELL 2 ── CONFIG — Fill in your values ───────────────────────────────────
+"""
+DATABRICKS_HOST = "https://<your-workspace>.cloud.databricks.com"   # No trailing slash
+TOKEN           = "<your-personal-access-token>"                     # PAT or service principal token
+SPACE_ID        = "<your-genie-space-id>"                            # From Genie space URL
+"""
+
+
+# ── CELL 3 ── LOAD GENIE SPACE ────────────────────────────────────────────────
+"""
+import requests, json, copy
+from IPython.display import display, clear_output, HTML
+import ipywidgets as widgets
+
+# ── Shared style constants ──────────────────────────────────────────────────
+STYLE = {
+    "label_w"  : "160px",
+    "input_w"  : "560px",
+    "input_wm" : "560px",   # multi-select width
+    "btn_w"    : "180px",
+    "area_h"   : "90px",
+    "sel_h"    : "130px",
+}
+
+def W(width): return widgets.Layout(width=width)
+def WH(width, height): return widgets.Layout(width=width, height=height)
+def label_style(): return {"description_width": STYLE["label_w"]}
+
+HEADERS = {
+    "Authorization": f"Bearer {TOKEN}",
+    "Content-Type" : "application/json",
+}
+
+# ── Fetch space from API ─────────────────────────────────────────────────────
+def fetch_space():
+    resp = requests.get(
+        f"{DATABRICKS_HOST}/api/2.0/genie/spaces/{SPACE_ID}",
+        headers=HEADERS,
+        timeout=30,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+print("⏳ Loading Genie space...")
+space_data      = fetch_space()
+serialized_space = json.loads(space_data["serialized_space"])
+
+# Deep copy — original stays untouched for diff later
+original_serialized = copy.deepcopy(serialized_space)
+
+# ── Convenience helpers ──────────────────────────────────────────────────────
+def get_tables():
+    return serialized_space.setdefault("data_sources", {}).setdefault("tables", [])
+
+def get_instructions():
+    return serialized_space.setdefault("instructions", {})
+
+def get_joins():
+    return get_instructions().setdefault("join_specs", [])
+
+def get_measures():
+    return get_instructions().setdefault("sql_snippets", {}).setdefault("measures", [])
+
+def find_table(identifier):
+    for t in get_tables():
+        if t.get("identifier") == identifier:
+            return t
+    return None
+
+def table_identifiers():
+    return [t.get("identifier", "") for t in get_tables()]
+
+print(f"✅ Loaded: '{space_data['title']}'")
+print(f"   Warehouse : {space_data.get('warehouse_id','')}")
+print(f"   Tables    : {len(get_tables())}")
+print(f"   Joins     : {len(get_joins())}")
+print(f"   Measures  : {len(get_measures())}")
+"""
+
+
+# ── CELL 4 ── SECTION 1 — Edit Table & Column Descriptions ───────────────────
+"""
+# ── Header ───────────────────────────────────────────────────────────────────
+display(HTML('''
+<div style="
+    background: linear-gradient(135deg,#1a1a2e 0%,#16213e 60%,#0f3460 100%);
+    border-radius:12px; padding:20px 28px; margin-bottom:12px;
+    border-left: 5px solid #e94560; font-family: 'Segoe UI', sans-serif;">
+  <span style="color:#e94560;font-size:11px;letter-spacing:3px;
+               text-transform:uppercase;font-weight:700;">Section 1</span>
+  <h2 style="color:#eaeaea;margin:6px 0 4px;font-size:22px;font-weight:700;">
+      📋 Table &amp; Column Descriptions
+  </h2>
+  <p style="color:#8892a4;margin:0;font-size:13px;">
+      Select a table → edit its description → pick columns → edit their descriptions
+  </p>
+</div>
+'''))
+
+# ── Widget definitions ────────────────────────────────────────────────────────
+w1_table = widgets.Dropdown(
+    description="📦 Table",
+    options=table_identifiers(),
+    style=label_style(), layout=W(STYLE["input_w"])
+)
+w1_table_desc = widgets.Textarea(
+    description="📝 Table Desc",
+    placeholder="Enter a clear business-friendly table description...",
+    style=label_style(), layout=WH(STYLE["input_w"], STYLE["area_h"])
+)
+w1_columns = widgets.SelectMultiple(
+    description="🔢 Columns",
+    options=[],
+    style=label_style(), layout=WH(STYLE["input_wm"], STYLE["sel_h"])
+)
+w1_col_desc = widgets.Textarea(
+    description="📝 Column Desc",
+    placeholder="Description applied to ALL selected columns above...",
+    style=label_style(), layout=WH(STYLE["input_w"], STYLE["area_h"])
+)
+
+btn1_apply  = widgets.Button(
+    description="✅ Apply Changes",
+    button_style="success", layout=W(STYLE["btn_w"])
+)
+btn1_reset  = widgets.Button(
+    description="🔄 Reset Fields",
+    button_style="warning", layout=W(STYLE["btn_w"])
+)
+out1_status = widgets.Output()
+
+hint1 = widgets.HTML(
+    '<span style="color:#888;font-size:12px;font-style:italic;">'
+    '💡 Hold Ctrl / Cmd to select multiple columns at once</span>'
+)
+
+# ── Logic: when table changes, populate fields ────────────────────────────────
+def on_table_change_1(change):
+    t = find_table(w1_table.value)
+    if not t:
+        return
+    # Pre-fill table description
+    desc = t.get("description", [])
+    w1_table_desc.value = desc[0] if desc else ""
+    # Populate columns from column_configs
+    cols = [c["column_name"] for c in t.get("column_configs", [])]
+    w1_columns.options = cols if cols else ["(No columns configured — add via 'Add Table')"]
+    w1_col_desc.value = ""
+
+w1_table.observe(on_table_change_1, names="value")
+on_table_change_1(None)   # trigger on load
+
+# ── Apply button ──────────────────────────────────────────────────────────────
+def on_apply_1(b):
+    with out1_status:
+        clear_output()
+        t = find_table(w1_table.value)
+        if not t:
+            print("❌ Table not found."); return
+
+        changed = []
+
+        # Table description
+        new_tdesc = w1_table_desc.value.strip()
+        old_tdesc = (t.get("description") or [""])[0]
+        if new_tdesc and new_tdesc != old_tdesc:
+            t["description"] = [new_tdesc]
+            changed.append(f"  • Table description updated")
+
+        # Column descriptions
+        selected_cols = list(w1_columns.value)
+        new_cdesc = w1_col_desc.value.strip()
+        if selected_cols and new_cdesc:
+            col_map = {c["column_name"]: c for c in t.setdefault("column_configs", [])}
+            for col in selected_cols:
+                if col in col_map:
+                    col_map[col]["description"] = new_cdesc
+                else:
+                    new_cfg = {"column_name": col, "description": new_cdesc}
+                    t["column_configs"].append(new_cfg)
+                    col_map[col] = new_cfg
+                changed.append(f"  • Column '{col}' description updated")
+
+        if changed:
+            print("✅ Staged (not yet saved):\n" + "\n".join(changed))
+        else:
+            print("⚠️  Nothing changed. Fill in at least one field.")
+
+btn1_apply.on_click(on_apply_1)
+
+def on_reset_1(b):
+    on_table_change_1(None)   # reload original values from state
+    w1_col_desc.value = ""
+    with out1_status:
+        clear_output()
+        print("🔄 Fields reset.")
+
+btn1_reset.on_click(on_reset_1)
+
+# ── Render ────────────────────────────────────────────────────────────────────
+display(widgets.VBox([
+    w1_table,
+    w1_table_desc,
+    hint1,
+    w1_columns,
+    w1_col_desc,
+    widgets.HBox([btn1_apply, btn1_reset]),
+    out1_status,
+], layout=widgets.Layout(gap="8px")))
+"""
+
+
+# ── CELL 5 ── SECTION 2 — Add New Table to Space ─────────────────────────────
+"""
+display(HTML('''
+<div style="
+    background: linear-gradient(135deg,#0d2137 0%,#0a3d2b 100%);
+    border-radius:12px; padding:20px 28px; margin-bottom:12px;
+    border-left:5px solid #2ecc71; font-family:'Segoe UI',sans-serif;">
+  <span style="color:#2ecc71;font-size:11px;letter-spacing:3px;
+               text-transform:uppercase;font-weight:700;">Section 2</span>
+  <h2 style="color:#eaeaea;margin:6px 0 4px;font-size:22px;font-weight:700;">
+      ➕ Add New Table to Genie Space
+  </h2>
+  <p style="color:#8892a4;margin:0;font-size:13px;">
+      Enter the full Unity Catalog identifier and optional column configs
+  </p>
+</div>
+'''))
+
+w2_identifier = widgets.Text(
+    description="🗄️ Identifier",
+    placeholder="catalog.schema.table_name",
+    style=label_style(), layout=W(STYLE["input_w"])
+)
+w2_table_desc = widgets.Textarea(
+    description="📝 Table Desc",
+    placeholder="Business-friendly description for this table...",
+    style=label_style(), layout=WH(STYLE["input_w"], STYLE["area_h"])
+)
+w2_columns_raw = widgets.Textarea(
+    description="🔢 Columns",
+    placeholder="One column name per line, e.g.:\norder_id\ncustomer_id\norder_date",
+    style=label_style(), layout=WH(STYLE["input_w"], "110px")
+)
+w2_get_examples = widgets.Checkbox(
+    value=True,
+    description=" Get example values (helps Genie understand data)",
+    style={"description_width": "initial"}
+)
+w2_build_dict = widgets.Checkbox(
+    value=False,
+    description=" Build value dictionary (for low-cardinality columns like status, region)",
+    style={"description_width": "initial"}
+)
+
+btn2_add    = widgets.Button(
+    description="➕ Add Table",
+    button_style="success", layout=W(STYLE["btn_w"])
+)
+btn2_clear  = widgets.Button(
+    description="🧹 Clear",
+    button_style="warning", layout=W("120px")
+)
+out2_status = widgets.Output()
+
+hint2 = widgets.HTML(
+    '<span style="color:#888;font-size:12px;font-style:italic;">'
+    '💡 Identifier must exactly match Unity Catalog: catalog.schema.table</span>'
+)
+
+def on_add_table(b):
+    with out2_status:
+        clear_output()
+        identifier = w2_identifier.value.strip()
+        if not identifier:
+            print("❌ Identifier is required."); return
+        if identifier.count(".") != 2:
+            print("❌ Identifier must be in format: catalog.schema.table"); return
+        if identifier in table_identifiers():
+            print(f"⚠️  Table '{identifier}' already exists in this space."); return
+
+        # Build column_configs
+        raw_cols  = [c.strip() for c in w2_columns_raw.value.strip().splitlines() if c.strip()]
+        col_cfgs  = []
+        for col in raw_cols:
+            cfg = {
+                "column_name"       : col,
+                "get_example_values": w2_get_examples.value,
+            }
+            if w2_build_dict.value:
+                cfg["build_value_dictionary"] = True
+            col_cfgs.append(cfg)
+
+        new_table = {"identifier": identifier}
+        if w2_table_desc.value.strip():
+            new_table["description"] = [w2_table_desc.value.strip()]
+        if col_cfgs:
+            new_table["column_configs"] = col_cfgs
+
+        get_tables().append(new_table)
+
+        # Refresh table dropdowns in Section 1 and Section 3
+        w1_table.options = table_identifiers()
+
+        print(f"✅ Table staged: '{identifier}'")
+        print(f"   Columns configured : {len(col_cfgs)}")
+        print(f"   Description        : {'Yes' if new_table.get('description') else 'No'}")
+
+btn2_add.on_click(on_add_table)
+
+def on_clear_2(b):
+    w2_identifier.value  = ""
+    w2_table_desc.value  = ""
+    w2_columns_raw.value = ""
+    with out2_status: clear_output()
+
+btn2_clear.on_click(on_clear_2)
+
+display(widgets.VBox([
+    w2_identifier,
+    w2_table_desc,
+    w2_columns_raw,
+    hint2,
+    w2_get_examples,
+    w2_build_dict,
+    widgets.HBox([btn2_add, btn2_clear]),
+    out2_status,
+], layout=widgets.Layout(gap="8px")))
+"""
+
+
+# ── CELL 6 ── SECTION 3 — Joins Editor ───────────────────────────────────────
+"""
+display(HTML('''
+<div style="
+    background: linear-gradient(135deg,#1a0a2e 0%,#2d1b69 100%);
+    border-radius:12px; padding:20px 28px; margin-bottom:12px;
+    border-left:5px solid #a855f7; font-family:'Segoe UI',sans-serif;">
+  <span style="color:#a855f7;font-size:11px;letter-spacing:3px;
+               text-transform:uppercase;font-weight:700;">Section 3</span>
+  <h2 style="color:#eaeaea;margin:6px 0 4px;font-size:22px;font-weight:700;">
+      🔗 Join Relationships
+  </h2>
+  <p style="color:#8892a4;margin:0;font-size:13px;">
+      Define how tables relate. Genie uses this to auto-generate correct JOINs in queries.
+  </p>
+</div>
+'''))
+
+import uuid
+
+def make_join_id():
+    return uuid.uuid4().hex[:16]
+
+# ── Existing joins list (read-only view) ─────────────────────────────────────
+def joins_summary():
+    rows = get_joins()
+    if not rows:
+        return "<i style='color:#888'>No joins configured yet.</i>"
+    html = "<table style='border-collapse:collapse;font-size:13px;width:100%;'>"
+    html += "<tr style='background:#1e2a3a;color:#a0b4c8;'>"
+    html += "<th style='padding:6px 10px;text-align:left'>Left Table</th>"
+    html += "<th style='padding:6px 10px;text-align:left'>Right Table</th>"
+    html += "<th style='padding:6px 10px;text-align:left'>Join Condition</th>"
+    html += "<th style='padding:6px 10px;text-align:left'>ID</th></tr>"
+    for j in rows:
+        left  = j.get("left",  {}).get("identifier","")
+        right = j.get("right", {}).get("identifier","")
+        sql   = "".join(j.get("sql", []))
+        jid   = j.get("id","")[:8] + "..."
+        html += f"<tr style='border-bottom:1px solid #2a3a4a'>"
+        html += f"<td style='padding:6px 10px;color:#eaeaea'>{left}</td>"
+        html += f"<td style='padding:6px 10px;color:#eaeaea'>{right}</td>"
+        html += f"<td style='padding:6px 10px;color:#f0c27f;font-family:monospace'>{sql}</td>"
+        html += f"<td style='padding:6px 10px;color:#666'>{jid}</td></tr>"
+    html += "</table>"
+    return html
+
+out3_view   = widgets.Output()
+out3_status = widgets.Output()
+
+def refresh_joins_view():
+    with out3_view:
+        clear_output()
+        display(HTML(joins_summary()))
+
+refresh_joins_view()
+
+# ── Add join form ─────────────────────────────────────────────────────────────
+w3_left_table  = widgets.Dropdown(
+    description="⬅️ Left Table",
+    options=table_identifiers(),
+    style=label_style(), layout=W(STYLE["input_w"])
+)
+w3_left_alias  = widgets.Text(
+    description="   Alias",
+    placeholder="e.g. orders",
+    style=label_style(), layout=W("320px")
+)
+w3_right_table = widgets.Dropdown(
+    description="➡️ Right Table",
+    options=table_identifiers(),
+    style=label_style(), layout=W(STYLE["input_w"])
+)
+w3_right_alias = widgets.Text(
+    description="   Alias",
+    placeholder="e.g. customers",
+    style=label_style(), layout=W("320px")
+)
+w3_join_sql    = widgets.Text(
+    description="🔗 Condition",
+    placeholder="orders.customer_id = customers.customer_id",
+    style=label_style(), layout=W(STYLE["input_w"])
+)
+
+btn3_add    = widgets.Button(
+    description="➕ Add Join",
+    button_style="success", layout=W(STYLE["btn_w"])
+)
+btn3_clear  = widgets.Button(
+    description="🧹 Clear",
+    button_style="warning", layout=W("120px")
+)
+
+hint3 = widgets.HTML(
+    '<span style="color:#888;font-size:12px;font-style:italic;">'
+    '💡 Alias is optional. Condition is pure SQL without the JOIN keyword.</span>'
+)
+
+def on_add_join(b):
+    with out3_status:
+        clear_output()
+        left_t  = w3_left_table.value
+        right_t = w3_right_table.value
+        sql_cond = w3_join_sql.value.strip()
+
+        if not sql_cond:
+            print("❌ Join condition is required."); return
+        if left_t == right_t:
+            print("❌ Left and right tables must be different."); return
+
+        left_obj  = {"identifier": left_t}
+        right_obj = {"identifier": right_t}
+        if w3_left_alias.value.strip():
+            left_obj["alias"] = w3_left_alias.value.strip()
+        if w3_right_alias.value.strip():
+            right_obj["alias"] = w3_right_alias.value.strip()
+
+        new_join = {
+            "id"   : make_join_id(),
+            "left" : left_obj,
+            "right": right_obj,
+            "sql"  : [sql_cond],
+        }
+        get_joins().append(new_join)
+        refresh_joins_view()
+        print(f"✅ Join staged: {left_t} ↔ {right_t}")
+        print(f"   Condition: {sql_cond}")
+
+btn3_add.on_click(on_add_join)
+
+def on_clear_3(b):
+    w3_join_sql.value   = ""
+    w3_left_alias.value = ""
+    w3_right_alias.value = ""
+    with out3_status: clear_output()
+
+btn3_clear.on_click(on_clear_3)
+
+display(widgets.VBox([
+    widgets.HTML("<b style='color:#ccc'>📄 Current Joins:</b>"),
+    out3_view,
+    widgets.HTML("<br><b style='color:#ccc'>➕ Add New Join:</b>"),
+    w3_left_table,
+    w3_left_alias,
+    w3_right_table,
+    w3_right_alias,
+    w3_join_sql,
+    hint3,
+    widgets.HBox([btn3_add, btn3_clear]),
+    out3_status,
+], layout=widgets.Layout(gap="8px")))
+"""
+
+
+# ── CELL 7 ── SECTION 4 — Measures Editor ────────────────────────────────────
+"""
+display(HTML('''
+<div style="
+    background: linear-gradient(135deg,#1a1200 0%,#3d2e00 100%);
+    border-radius:12px; padding:20px 28px; margin-bottom:12px;
+    border-left:5px solid #f59e0b; font-family:'Segoe UI',sans-serif;">
+  <span style="color:#f59e0b;font-size:11px;letter-spacing:3px;
+               text-transform:uppercase;font-weight:700;">Section 4</span>
+  <h2 style="color:#eaeaea;margin:6px 0 4px;font-size:22px;font-weight:700;">
+      📐 Measures
+  </h2>
+  <p style="color:#8892a4;margin:0;font-size:13px;">
+      Define reusable SQL expressions that Genie understands as business metrics.
+  </p>
+</div>
+'''))
+
+def measures_summary():
+    rows = get_measures()
+    if not rows:
+        return "<i style='color:#888'>No measures configured yet.</i>"
+    html = "<table style='border-collapse:collapse;font-size:13px;width:100%;'>"
+    html += "<tr style='background:#1e2a3a;color:#a0b4c8;'>"
+    html += "<th style='padding:6px 10px;text-align:left'>Display Name</th>"
+    html += "<th style='padding:6px 10px;text-align:left'>Alias</th>"
+    html += "<th style='padding:6px 10px;text-align:left'>SQL</th>"
+    html += "<th style='padding:6px 10px;text-align:left'>Synonyms</th></tr>"
+    for m in rows:
+        sql  = "".join(m.get("sql", []))
+        syns = ", ".join(m.get("synonyms", []))
+        html += "<tr style='border-bottom:1px solid #2a3a4a'>"
+        html += f"<td style='padding:6px 10px;color:#eaeaea'>{m.get('display_name','')}</td>"
+        html += f"<td style='padding:6px 10px;color:#93c5fd;font-family:monospace'>{m.get('alias','')}</td>"
+        html += f"<td style='padding:6px 10px;color:#f0c27f;font-family:monospace'>{sql}</td>"
+        html += f"<td style='padding:6px 10px;color:#86efac'>{syns}</td></tr>"
+    html += "</table>"
+    return html
+
+out4_view   = widgets.Output()
+out4_status = widgets.Output()
+
+def refresh_measures_view():
+    with out4_view:
+        clear_output()
+        display(HTML(measures_summary()))
+
+refresh_measures_view()
+
+w4_display_name = widgets.Text(
+    description="🏷️ Display Name",
+    placeholder="e.g. Total Revenue",
+    style=label_style(), layout=W(STYLE["input_w"])
+)
+w4_alias = widgets.Text(
+    description="🔤 Alias",
+    placeholder="e.g. total_revenue  (used in SQL)",
+    style=label_style(), layout=W(STYLE["input_w"])
+)
+w4_sql = widgets.Text(
+    description="⚙️ SQL",
+    placeholder="e.g. SUM(orders.order_amount)",
+    style=label_style(), layout=W(STYLE["input_w"])
+)
+w4_synonyms = widgets.Text(
+    description="🔁 Synonyms",
+    placeholder="Comma-separated: revenue, total sales, earnings",
+    style=label_style(), layout=W(STYLE["input_w"])
+)
+
+btn4_add   = widgets.Button(
+    description="➕ Add Measure",
+    button_style="success", layout=W(STYLE["btn_w"])
+)
+btn4_clear = widgets.Button(
+    description="🧹 Clear",
+    button_style="warning", layout=W("120px")
+)
+
+hint4 = widgets.HTML(
+    '<span style="color:#888;font-size:12px;font-style:italic;">'
+    '💡 Synonyms help Genie match natural language like "revenue" or "earnings" to this measure.</span>'
+)
+
+def on_add_measure(b):
+    with out4_status:
+        clear_output()
+        display_name = w4_display_name.value.strip()
+        alias        = w4_alias.value.strip()
+        sql_expr     = w4_sql.value.strip()
+        syns_raw     = w4_synonyms.value.strip()
+
+        if not display_name or not alias or not sql_expr:
+            print("❌ Display Name, Alias and SQL are all required."); return
+
+        synonyms = [s.strip() for s in syns_raw.split(",") if s.strip()] if syns_raw else []
+
+        new_measure = {
+            "id"          : make_join_id(),
+            "display_name": display_name,
+            "alias"       : alias,
+            "sql"         : [sql_expr],
+        }
+        if synonyms:
+            new_measure["synonyms"] = synonyms
+
+        get_measures().append(new_measure)
+        refresh_measures_view()
+        print(f"✅ Measure staged: '{display_name}' → {sql_expr}")
+
+btn4_add.on_click(on_add_measure)
+
+def on_clear_4(b):
+    w4_display_name.value = ""
+    w4_alias.value        = ""
+    w4_sql.value          = ""
+    w4_synonyms.value     = ""
+    with out4_status: clear_output()
+
+btn4_clear.on_click(on_clear_4)
+
+display(widgets.VBox([
+    widgets.HTML("<b style='color:#ccc'>📄 Current Measures:</b>"),
+    out4_view,
+    widgets.HTML("<br><b style='color:#ccc'>➕ Add New Measure:</b>"),
+    w4_display_name,
+    w4_alias,
+    w4_sql,
+    w4_synonyms,
+    hint4,
+    widgets.HBox([btn4_add, btn4_clear]),
+    out4_status,
+], layout=widgets.Layout(gap="8px")))
+"""
+
+
+# ── CELL 8 ── SECTION 5 — Preview Diff & Save to API ─────────────────────────
+"""
+display(HTML('''
+<div style="
+    background: linear-gradient(135deg,#0a1628 0%,#1a0a0a 100%);
+    border-radius:12px; padding:20px 28px; margin-bottom:12px;
+    border-left:5px solid #e94560; font-family:'Segoe UI',sans-serif;">
+  <span style="color:#e94560;font-size:11px;letter-spacing:3px;
+               text-transform:uppercase;font-weight:700;">Section 5</span>
+  <h2 style="color:#eaeaea;margin:6px 0 4px;font-size:22px;font-weight:700;">
+      🔍 Preview Changes &amp; Save to Genie API
+  </h2>
+  <p style="color:#8892a4;margin:0;font-size:13px;">
+      Review every change before anything is written to the API. No surprises.
+  </p>
+</div>
+'''))
+
+out5_diff   = widgets.Output()
+out5_save   = widgets.Output()
+
+btn5_preview = widgets.Button(
+    description="🔍 Preview Diff",
+    button_style="info",
+    layout=W("180px")
+)
+btn5_save = widgets.Button(
+    description="🚀 Confirm & Save to API",
+    button_style="danger",
+    layout=W("220px"),
+    disabled=True           # enabled only after preview
+)
+btn5_discard = widgets.Button(
+    description="🗑️ Discard All",
+    button_style="warning",
+    layout=W("160px")
+)
+
+# ── Diff builder ─────────────────────────────────────────────────────────────
+def build_diff():
+    lines = []
+
+    orig_tables = {t["identifier"]: t for t in original_serialized.get("data_sources", {}).get("tables", [])}
+    new_tables  = {t["identifier"]: t for t in get_tables()}
+
+    # New tables added
+    for ident, t in new_tables.items():
+        if ident not in orig_tables:
+            lines.append(("added", f"TABLE ADDED: {ident}"))
+            if t.get("description"):
+                lines.append(("added", f"  description: {t['description'][0][:120]}"))
+            for c in t.get("column_configs", []):
+                lines.append(("added", f"  column: {c['column_name']}"))
+
+    # Changed tables
+    for ident, orig_t in orig_tables.items():
+        new_t = new_tables.get(ident, {})
+
+        # Table description
+        old_desc = (orig_t.get("description") or [""])[0]
+        new_desc = (new_t.get("description")  or [""])[0]
+        if old_desc != new_desc:
+            lines.append(("removed", f"TABLE DESC [{ident}]  OLD: {old_desc[:100] or '(empty)'}"))
+            lines.append(("added",   f"TABLE DESC [{ident}]  NEW: {new_desc[:100]}"))
+
+        # Column descriptions
+        orig_cols = {c["column_name"]: c for c in orig_t.get("column_configs", [])}
+        new_cols  = {c["column_name"]: c for c in new_t.get("column_configs", [])}
+        for col, nc in new_cols.items():
+            old_cdesc = (orig_cols.get(col) or {}).get("description", "")
+            new_cdesc = nc.get("description", "")
+            if old_cdesc != new_cdesc:
+                lines.append(("removed", f"  COL DESC [{col}]  OLD: {old_cdesc[:100] or '(empty)'}"))
+                lines.append(("added",   f"  COL DESC [{col}]  NEW: {new_cdesc[:100]}"))
+
+    # Joins diff
+    orig_joins = {j["id"]: j for j in original_serialized.get("instructions", {}).get("join_specs", [])}
+    new_joins  = {j["id"]: j for j in get_joins()}
+    for jid, j in new_joins.items():
+        if jid not in orig_joins:
+            left  = j.get("left",  {}).get("identifier","")
+            right = j.get("right", {}).get("identifier","")
+            sql   = "".join(j.get("sql",[]))
+            lines.append(("added", f"JOIN ADDED: {left} ↔ {right}  ON  {sql}"))
+
+    # Measures diff
+    orig_m_ids = {m["id"] for m in original_serialized.get("instructions", {}).get("sql_snippets", {}).get("measures", [])}
+    for m in get_measures():
+        if m["id"] not in orig_m_ids:
+            sql = "".join(m.get("sql",[]))
+            lines.append(("added", f"MEASURE ADDED: {m.get('display_name','')} → {sql}"))
+
+    return lines
+
+def render_diff(lines):
+    if not lines:
+        return "<p style='color:#2ecc71;font-size:14px;'>✅ No changes detected.</p>"
+
+    html = "<div style='font-family:monospace;font-size:13px;line-height:1.8;'>"
+    for kind, text in lines:
+        if kind == "added":
+            color = "#2ecc71"
+            prefix = "+"
+        else:
+            color = "#e94560"
+            prefix = "−"
+        html += (
+            f"<div style='color:{color};background:{"#0a2a0a" if kind=="added" else "#2a0a0a"};"
+            f"padding:3px 10px;border-radius:4px;margin:2px 0;white-space:pre-wrap;'>"
+            f"{prefix} {text}</div>"
+        )
+    html += "</div>"
+    return html
+
+# ── Preview button ────────────────────────────────────────────────────────────
+def on_preview(b):
+    with out5_diff:
+        clear_output()
+        diff_lines = build_diff()
+        display(HTML(f"""
+        <div style='background:#0d1117;border:1px solid #30363d;border-radius:8px;
+                    padding:16px;margin-top:8px;max-height:400px;overflow-y:auto;'>
+          <h4 style='color:#ccc;margin:0 0 12px;'>📋 Diff — {len(diff_lines)} change(s) detected</h4>
+          {render_diff(diff_lines)}
+        </div>
+        """))
+        if diff_lines:
+            btn5_save.disabled = False
+            print("\n✅ Review above. Click '🚀 Confirm & Save to API' when ready.")
+        else:
+            btn5_save.disabled = True
+            print("\n⚠️  Nothing to save.")
+
+btn5_preview.on_click(on_preview)
+
+# ── Save button ───────────────────────────────────────────────────────────────
+def on_save(b):
+    with out5_save:
+        clear_output()
+        print("⏳ Saving to Genie API...")
+        try:
+            payload = {
+                "title"           : space_data["title"],
+                "description"     : space_data.get("description", ""),
+                "warehouse_id"    : space_data["warehouse_id"],
+                "serialized_space": json.dumps(serialized_space),
+            }
+            resp = requests.patch(
+                f"{DATABRICKS_HOST}/api/2.0/genie/spaces/{SPACE_ID}",
+                headers=HEADERS,
+                json=payload,
+                timeout=30,
+            )
+            if resp.status_code == 200:
+                display(HTML("""
+                <div style='background:#0a2a0a;border:1px solid #2ecc71;border-radius:8px;
+                            padding:16px;margin-top:8px;'>
+                  <h3 style='color:#2ecc71;margin:0'>🎉 Success! Genie Space Updated.</h3>
+                  <p style='color:#86efac;margin:8px 0 0;font-size:13px;'>
+                      All changes have been saved. Genie will use the new metadata immediately.
+                  </p>
+                </div>"""))
+                btn5_save.disabled = True
+            else:
+                display(HTML(f"""
+                <div style='background:#2a0a0a;border:1px solid #e94560;border-radius:8px;padding:16px;'>
+                  <h3 style='color:#e94560;margin:0'>❌ Error {resp.status_code}</h3>
+                  <pre style='color:#fca5a5;font-size:12px;margin-top:8px'>{resp.text[:500]}</pre>
+                </div>"""))
+        except Exception as ex:
+            print(f"❌ Exception: {ex}")
+
+btn5_save.on_click(on_save)
+
+# ── Discard button ────────────────────────────────────────────────────────────
+def on_discard(b):
+    global serialized_space
+    serialized_space = copy.deepcopy(original_serialized)
+    w1_table.options = table_identifiers()
+    btn5_save.disabled = True
+    with out5_diff: clear_output()
+    with out5_save:
+        clear_output()
+        display(HTML("""
+        <div style='background:#1a1000;border:1px solid #f59e0b;border-radius:8px;padding:12px;'>
+          <p style='color:#fbbf24;margin:0;'>🗑️ All unsaved changes discarded. Space reset to original.</p>
+        </div>"""))
+
+btn5_discard.on_click(on_discard)
+
+# ── Render ────────────────────────────────────────────────────────────────────
+display(widgets.VBox([
+    widgets.HBox([btn5_preview, btn5_save, btn5_discard]),
+    out5_diff,
+    out5_save,
+], layout=widgets.Layout(gap="10px")))
+"""
