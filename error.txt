@@ -1,140 +1,23 @@
-# ─────────────────────────────────────────────────────────────────────────────
-# DEBUG CELL — Find exactly what's wrong in the JSON before sending to API
-# ─────────────────────────────────────────────────────────────────────────────
+============================================================
+  OPTION A — Creating New Merged Genie Space
+============================================================
 
-import json, copy
+  Title      : Test Genie Merger Campaign & Content, Customer Journey and ATLAS, ACE and ES Insights v2 (1) + sales
+  Description: Genie space merger for Insights Navigator application
+  Location   : /Shared/iNavi_Metadata/genie/post_request_import_api
+  Warehouse  : b802a9ace025221b
 
-ready_ss = sanitize_and_sort(merged_ss)
+  Sanitizing and sorting merged space...
+  ✅ Tables sorted by identifier
+  ✅ All instruction lists sorted by id
+  ✅ Descriptions sanitized to ['string'] format
 
-# ── Test 1: Can Python serialize it at all? ───────────────────────────────────
-print("Test 1: json.dumps()...")
-try:
-    serialized = json.dumps(ready_ss)
-    print(f"  ✅ OK — {len(serialized)} characters")
-except Exception as e:
-    print(f"  ❌ FAILED: {e}")
-    raise
+  Sending to API...
 
-# ── Test 2: Are there any non-serializable types hiding inside? ───────────────
-print("\nTest 2: Scanning for non-serializable values...")
+  ❌ Error 400
+     {"error_code":"BAD_REQUEST","message":"Invalid JSON in field 'serialized_space'","details":[{"@type":"type.googleapis.com/google.rpc.RequestInfo","request_id":"d9ba9916-4b30-4b5d-ba85-7a8d84dad785","serving_data":""}]}
 
-def find_bad_values(obj, path="root"):
-    issues = []
-    if isinstance(obj, dict):
-        for k, v in obj.items():
-            issues += find_bad_values(v, f"{path}.{k}")
-    elif isinstance(obj, list):
-        for i, v in enumerate(obj):
-            issues += find_bad_values(v, f"{path}[{i}]")
-    elif not isinstance(obj, (str, int, float, bool, type(None))):
-        issues.append(f"  ❌ BAD TYPE at {path}: {type(obj).__name__} = {repr(obj)[:80]}")
-    return issues
-
-issues = find_bad_values(ready_ss)
-if issues:
-    for i in issues:
-        print(i)
-else:
-    print("  ✅ No bad types found")
-
-# ── Test 3: Check for NaN or Infinity (valid Python, invalid JSON) ────────────
-print("\nTest 3: Scanning for NaN / Infinity...")
-
-def find_nan_inf(obj, path="root"):
-    issues = []
-    if isinstance(obj, dict):
-        for k, v in obj.items():
-            issues += find_nan_inf(v, f"{path}.{k}")
-    elif isinstance(obj, list):
-        for i, v in enumerate(obj):
-            issues += find_nan_inf(v, f"{path}[{i}]")
-    elif isinstance(obj, float):
-        import math
-        if math.isnan(obj) or math.isinf(obj):
-            issues.append(f"  ❌ NaN/Inf at {path}: {obj}")
-    return issues
-
-nan_issues = find_nan_inf(ready_ss)
-if nan_issues:
-    for i in nan_issues:
-        print(i)
-else:
-    print("  ✅ No NaN/Infinity found")
-
-# ── Test 4: Check for control characters in strings ───────────────────────────
-print("\nTest 4: Scanning for invalid control characters in strings...")
-
-def find_control_chars(obj, path="root"):
-    issues = []
-    if isinstance(obj, dict):
-        for k, v in obj.items():
-            issues += find_control_chars(v, f"{path}.{k}")
-    elif isinstance(obj, list):
-        for i, v in enumerate(obj):
-            issues += find_control_chars(v, f"{path}[{i}]")
-    elif isinstance(obj, str):
-        for ci, ch in enumerate(obj):
-            cp = ord(ch)
-            # Control chars 0x00-0x1F except tab(9), newline(10), CR(13)
-            if cp < 0x20 and cp not in (9, 10, 13):
-                issues.append(
-                    f"  ❌ Control char U+{cp:04X} at {path} pos {ci}: "
-                    f"...{repr(obj[max(0,ci-20):ci+20])}..."
-                )
-                break  # one per field is enough
-    return issues
-
-ctrl_issues = find_control_chars(ready_ss)
-if ctrl_issues:
-    for i in ctrl_issues[:20]:   # cap at 20 so output isn't huge
-        print(i)
-else:
-    print("  ✅ No control characters found")
-
-# ── Test 5: Try section-by-section serialization to isolate the bad section ──
-print("\nTest 5: Section-by-section serialization...")
-sections = {
-    "version"      : ready_ss.get("version"),
-    "config"       : ready_ss.get("config"),
-    "data_sources" : ready_ss.get("data_sources"),
-    "instructions" : ready_ss.get("instructions"),
-    "benchmarks"   : ready_ss.get("benchmarks"),
-}
-for name, val in sections.items():
-    try:
-        json.dumps(val)
-        print(f"  ✅ {name}")
-    except Exception as e:
-        print(f"  ❌ {name} — {e}")
-
-# ── Test 6: Go deeper into instructions ───────────────────────────────────────
-print("\nTest 6: instructions sub-sections...")
-inst = ready_ss.get("instructions", {})
-sub_sections = {
-    "join_specs"          : inst.get("join_specs"),
-    "text_instructions"   : inst.get("text_instructions"),
-    "example_question_sqls": inst.get("example_question_sqls"),
-    "sql_snippets.filters"  : inst.get("sql_snippets", {}).get("filters"),
-    "sql_snippets.expressions": inst.get("sql_snippets", {}).get("expressions"),
-    "sql_snippets.measures"   : inst.get("sql_snippets", {}).get("measures"),
-}
-for name, val in sub_sections.items():
-    try:
-        json.dumps(val)
-        print(f"  ✅ {name}")
-    except Exception as e:
-        print(f"  ❌ {name} — {e}")
-
-# ── Test 7: Go deeper into data_sources ──────────────────────────────────────
-print("\nTest 7: Each table individually...")
-for t in ready_ss.get("data_sources", {}).get("tables", []):
-    ident = t.get("identifier", "?") if isinstance(t, dict) else str(t)
-    try:
-        json.dumps(t)
-        print(f"  ✅ {ident}")
-    except Exception as e:
-        print(f"  ❌ {ident} — {e}")
-
-print("\n" + "=" * 60)
-print("  Done. Share the output above to identify the issue.")
-print("=" * 60)
+  Hints:
+    • WAREHOUSE_ID wrong or no CAN USE permission
+    • PARENT_PATH folder does not exist
+    • Run Cell 4 with 'all' to inspect merged content
