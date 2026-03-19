@@ -1,15 +1,10 @@
-============================================================
-  OPTION B — Merging Space 1 INTO Space 2
-============================================================
+# ── Run merge ─────────────────────────────────────────────────────────────────
+print("\n⏳ Merging...")
+merged_ss, report = merge_spaces(ss1, ss2)
 
-  Space 1 : 'Test Genie Deployment Campaign & Content, Customer Journey and ATLAS, ACE and ES Insights v2 (1)'  →  source (read only)
-  Space 2 : 'Test Market and brand performance and Channel dynamics and Patient data (v1.4)'  →  will be UPDATED in place
-
-  Sending to API...
-
-  Error 400
-     {"error_code":"INVALID_PARAMETER_VALUE","message":"Invalid export proto: data_sources.tables must be sorted by identifier","details":[{"@type":"type.googleapis.com/google.rpc.RequestInfo","request_id":"d8fe94cb-b6af-4b93-9fe7-796d4166c6ba","serving_data":""}]}
-
-  Common causes:
-    • No CAN EDIT permission on Space 2
-    • serialized_space invalid — run Cell 4 (all) to inspect
+# ── Post-merge: sort tables alphabetically (API strictly requires this) ────────
+merged_ss["data_sources"]["tables"] = sorted(
+    merged_ss.get("data_sources", {}).get("tables", []),
+    key=lambda t: t.get("identifier", "") if isinstance(t, dict) else ""
+)
+print("  ✅ Tables sorted by identifier.")
