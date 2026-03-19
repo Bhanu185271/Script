@@ -1,3 +1,6 @@
+https://docs.databricks.com/aws/en/genie/conversation-api?language=Create+a+new+space
+
+
 # ==============================================================================
 # GENIE SPACE MERGER — Complete & Fixed (double-encoding fix applied)
 # ==============================================================================
