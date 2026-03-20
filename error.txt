@@ -1,39 +1,29 @@
 # ==============================================================================
-# GENIE SPACE — MERGE & ROLLBACK (Unified Notebook)
+# GENIE SPACE — MERGE & ROLLBACK
+# ==============================================================================
+# Same cell structure as before.
+# Cell 1 has a mode dropdown (merge / rollback).
+# Each merge cell checks: if mode == "merge" → run  else → skip (pass)
+# Last cell is rollback — runs only if mode == "rollback"
 # ==============================================================================
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CELL 1 — CONFIG  (edit these values once)
+# CELL 1 — CONFIG + MODE SELECTION
 # ─────────────────────────────────────────────────────────────────────────────
 
-DATABRICKS_HOST = "https://<your-workspace>.cloud.databricks.com"
-TOKEN           = "<your-personal-access-token>"
+DATABRICKS_HOST  = "https://<your-workspace>.cloud.databricks.com"
+TOKEN            = "<your-personal-access-token>"
 
-NEW_SPACE_TITLE = "Merged Space Title"
-NEW_SPACE_DESC  = "Merged Genie space"
-WAREHOUSE_ID    = "<your-warehouse-id>"
-PARENT_PATH     = "/Workspace/Users/chandrabhanu.x.chandrabhanu@gsk.com"
+NEW_SPACE_TITLE  = "Merged Space Title"
+NEW_SPACE_DESC   = "Merged Genie space"
+WAREHOUSE_ID     = "<your-warehouse-id>"
+PARENT_PATH      = "/Workspace/Users/chandrabhanu.x.chandrabhanu@gsk.com"
 
-SNAPSHOT_FOLDER = "/Workspace/Users/chandrabhanu.x.chandrabhanu@gsk.com"
+SNAPSHOT_FOLDER  = "/Workspace/Users/chandrabhanu.x.chandrabhanu@gsk.com"
 MERGED_SAVE_PATH = "/Workspace/Users/chandrabhanu.x.chandrabhanu@gsk.com/merged_genie_space.json"
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# CELL 2 — MODE SELECTION + CONDITIONAL WIDGETS
-# Run this cell first. It creates the top-level dropdown and,
-# based on selection, shows the right follow-up widgets.
-# ─────────────────────────────────────────────────────────────────────────────
-
-import requests, json, copy
-from datetime import datetime
-
-HEADERS = {
-    "Authorization": f"Bearer {TOKEN}",
-    "Content-Type" : "application/json",
-}
-
-# ── Widget 1: Mode selector ───────────────────────────────────────────────────
+# ── Widget 1: Mode ────────────────────────────────────────────────────────────
 dbutils.widgets.dropdown(
     name         = "mode",
     defaultValue = "merge",
@@ -52,41 +42,48 @@ if mode == "merge":
     dbutils.widgets.text(
         name         = "space_id_2",
         defaultValue = "",
-        label        = "3. Space ID 2  (merge target — will be patched)"
+        label        = "3. Space ID 2  (merge target)"
     )
-    print(f"Mode : MERGE")
-    print(f"Fill in Space ID 1 and Space ID 2 above, then run Cell 3.")
+    print("Mode : MERGE")
+    print("Fill Space ID 1 and Space ID 2 above, then run each cell in order.")
+    print("  Cell 2  → Load spaces")
+    print("  Cell 2B → Safety check")
+    print("  Cell 3  → Merge")
+    print("  Cell 4  → Preview merged JSON")
+    print("  Cell 5  → Sanitize + sort")
+    print("  Cell 5B → Save merged JSON to disk + Snapshot Space 2")
+    print("  Cell 7  → PATCH Space 2")
 
 else:
     dbutils.widgets.text(
         name         = "rollback_file",
         defaultValue = "",
-        label        = "2. Snapshot filename  (e.g. snapshot_abc123_20250320_143022.json)"
+        label        = "2. Snapshot filename  (e.g. snapshot_<space_id>_20250320_143022.json)"
     )
-    print(f"Mode : ROLLBACK")
+    print("Mode : ROLLBACK")
     print(f"Snapshot folder : {SNAPSHOT_FOLDER}")
-    print(f"Enter the snapshot filename in the widget above, then run Cell 3.")
+    print("Enter snapshot filename in the widget above, then run Cell 8 (Rollback).")
+    print("All merge cells (2 to 7) will be skipped automatically.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CELL 3 — EXECUTE  (merge or rollback based on mode widget)
+# CELL 2 — LOAD BOTH SPACES
+# Skipped automatically if mode = rollback
 # ─────────────────────────────────────────────────────────────────────────────
 
 mode = dbutils.widgets.get("mode")
 
-# ═════════════════════════════════════════════════════════════════════════════
-# MERGE PATH
-# ═════════════════════════════════════════════════════════════════════════════
 if mode == "merge":
+    import requests, json, copy
+    from datetime import datetime
+
+    HEADERS = {
+        "Authorization": f"Bearer {TOKEN}",
+        "Content-Type" : "application/json",
+    }
 
     SPACE_ID_1 = dbutils.widgets.get("space_id_1").strip()
     SPACE_ID_2 = dbutils.widgets.get("space_id_2").strip()
-
-    if not SPACE_ID_1 or not SPACE_ID_2:
-        print("Provide both Space ID 1 and Space ID 2 in the widgets above.")
-        dbutils.notebook.exit("Missing space IDs")
-
-    # ── Helpers ───────────────────────────────────────────────────────────────
 
     def fetch_space(space_id):
         resp = requests.get(
@@ -132,6 +129,65 @@ if mode == "merge":
         print(f"    Measures          : {len(snip.get('measures', []))}")
         print(f"    Benchmarks        : {bm_count(inner)}")
         print(f"    Sample Questions  : {len(inner.get('config', {}).get('sample_questions', []))}")
+
+    print("Loading spaces...")
+    outer1, ss1 = fetch_space(SPACE_ID_1)
+    outer2, ss2 = fetch_space(SPACE_ID_2)
+
+    print("\n" + "=" * 60)
+    print("  Both Spaces Loaded")
+    print("=" * 60)
+    print_summary("Space 1 (base)", outer1, ss1)
+    print_summary("Space 2", outer2, ss2)
+    print("\nReady. Run Cell 2B.")
+
+else:
+    print("Mode = rollback — Cell 2 skipped.")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CELL 2B — SAFETY CHECK
+# Skipped automatically if mode = rollback
+# ─────────────────────────────────────────────────────────────────────────────
+
+mode = dbutils.widgets.get("mode")
+
+if mode == "merge":
+    ss1_identifiers = {
+        t.get("identifier","")
+        for t in ss1.get("data_sources",{}).get("tables",[])
+        if isinstance(t, dict)
+    }
+    ss2_identifiers = {
+        t.get("identifier","")
+        for t in ss2.get("data_sources",{}).get("tables",[])
+        if isinstance(t, dict)
+    }
+    already_merged = ss1_identifiers & ss2_identifiers
+
+    if len(already_merged) == len(ss1_identifiers) and len(ss1_identifiers) > 0:
+        print("WARNING: Space 2 already contains ALL tables from Space 1.")
+        print("Re-merging will DUPLICATE Space 1 content.")
+    elif already_merged:
+        print(f"WARNING: {len(already_merged)} Space 1 table(s) already exist in Space 2:")
+        for t in already_merged:
+            print(f"  • {t}")
+    else:
+        print("Safe to merge — no overlap between Space 1 and Space 2 tables.")
+
+else:
+    print("Mode = rollback — Cell 2B skipped.")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CELL 3 — MERGE
+# Skipped automatically if mode = rollback
+# ─────────────────────────────────────────────────────────────────────────────
+
+mode = dbutils.widgets.get("mode")
+
+if mode == "merge":
+    import copy
 
     def merge_col_configs(base_cols, inc_cols):
         base_map = {
@@ -250,9 +306,9 @@ if mode == "merge":
                 if isinstance(c, str):  c = [c]
                 if isinstance(c, list): incoming_content.extend(c)
 
-            already_merged = any(MERGE_MARKER in str(line) for line in base_content)
+            already_merged_marker = any(MERGE_MARKER in str(line) for line in base_content)
 
-            if not already_merged:
+            if not already_merged_marker:
                 merged_content = (
                     incoming_content
                     + ["\r\n"]
@@ -345,6 +401,197 @@ if mode == "merge":
         merged["version"] = max(ss1.get("version", 1), ss2.get("version", 1))
         return merged, report
 
+    print("Merging...")
+    merged_ss, report = do_merge(ss1, ss2)
+
+    LABELS = {
+        "tables"           : "TABLES",
+        "text_instructions": "TEXT INSTRUCTIONS",
+        "example_sqls"     : "EXAMPLE SQLs",
+        "filters"          : "FILTERS",
+        "expressions"      : "EXPRESSIONS",
+        "measures"         : "MEASURES",
+        "benchmarks"       : "BENCHMARKS",
+        "sample_questions" : "SAMPLE QUESTIONS",
+    }
+
+    total_added = total_skipped = 0
+    print("\n" + "=" * 60)
+    print("  Merge Report  (Space 1 = base, Space 1 wins on conflicts)")
+    print("=" * 60)
+    for key, label in LABELS.items():
+        r        = report.get(key, {})
+        added    = r.get("added",    [])
+        skipped  = r.get("skipped",  [])
+        enriched = r.get("enriched", [])
+        ca       = r.get("cols_added",    {})
+        ce       = r.get("cols_enriched", {})
+        total_added   += len(added)
+        total_skipped += len(skipped)
+        print(f"\n  {label}")
+        for x in added:    print(f"    +  {x}")
+        for x in enriched: print(f"    ~  {x}")
+        for t, cols in ca.items():
+            for c in cols: print(f"    +  {t} → col: {c}")
+        for t, cols in ce.items():
+            for c in cols: print(f"    ~  {t} → col: {c}  (enriched)")
+        for x in skipped:  print(f"    =  {x}  (Space 1 version kept)")
+        if not added and not enriched and not ca and not ce and not skipped:
+            print(f"    (nothing to merge)")
+
+    def count_all(ss):
+        ds   = ss.get("data_sources", {})
+        inst = ss.get("instructions", {})
+        snip = inst.get("sql_snippets", {})
+        return {
+            "Tables"      : len(ds.get("tables", [])),
+            "Text Inst"   : len(inst.get("text_instructions", [])),
+            "Example SQLs": len(inst.get("example_question_sqls", [])),
+            "Filters"     : len(snip.get("filters", [])),
+            "Expressions" : len(snip.get("expressions", [])),
+            "Measures"    : len(snip.get("measures", [])),
+            "Benchmarks"  : bm_count(ss),
+            "Sample Qs"   : len(ss.get("config", {}).get("sample_questions", [])),
+        }
+
+    c1 = count_all(ss1)
+    c2 = count_all(ss2)
+    cm = count_all(merged_ss)
+
+    print(f"\n{'=' * 60}")
+    print(f"  {'Field':<18}  {'Space 1':>8}  {'Space 2':>8}  {'Merged':>8}")
+    print(f"  {'─' * 50}")
+    for f in c1:
+        print(f"  {f:<18}  {c1[f]:>8}  {c2[f]:>8}  {cm[f]:>8}")
+    print(f"{'=' * 60}")
+    print(f"\n  + {total_added} added from Space 2")
+    print(f"  = {total_skipped} already existed — Space 1 version kept")
+
+    txt_count  = len(merged_ss.get("instructions", {}).get("text_instructions", []))
+    txt_lines  = merged_ss.get("instructions", {}).get("text_instructions", [])
+    line_count = len(txt_lines[0].get("content", [])) if txt_lines else 0
+    print(f"\n  text_instructions count : {txt_count}  {'✅' if txt_count == 1 else '❌ must be 1'}")
+    print(f"  text_instructions lines : {line_count}")
+    print("\nMerge complete. Run Cell 4 to preview.")
+
+else:
+    print("Mode = rollback — Cell 3 skipped.")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CELL 4 — PREVIEW MERGED JSON
+# Skipped automatically if mode = rollback
+# ─────────────────────────────────────────────────────────────────────────────
+
+mode = dbutils.widgets.get("mode")
+
+if mode == "merge":
+    dbutils.widgets.text(
+        name         = "preview_section",
+        defaultValue = "summary",
+        label        = "Preview: summary / tables / text_inst / example_sqls / filters / measures / benchmarks / raw"
+    )
+
+    section = dbutils.widgets.get("preview_section").strip().lower()
+
+    print("=" * 60)
+    print(f"  CELL 4 — Preview Merged JSON: '{section}'")
+    print("=" * 60)
+
+    ds   = merged_ss.get("data_sources", {})
+    inst = merged_ss.get("instructions", {})
+    snip = inst.get("sql_snippets", {})
+
+    if section == "summary":
+        counts = count_all(merged_ss)
+        print(f"\n  Version : {merged_ss.get('version','?')}")
+        for f, v in counts.items():
+            print(f"    {f:<18} : {v}")
+        print(f"\n  Use 'tables', 'text_inst', 'measures', 'benchmarks', 'raw' to drill in.")
+
+    elif section == "tables":
+        for t in ds.get("tables", []):
+            if not isinstance(t, dict): continue
+            print(f"\n  {t.get('identifier','?')}")
+            print(f"    description : {safe_str(t.get('description'))[:80] or '(none)'}")
+            for c in t.get("column_configs", []):
+                if isinstance(c, dict):
+                    desc = safe_str(c.get("description", ""))
+                    print(f"      col: {c.get('column_name','?'):<30} {desc[:50] or ''}")
+
+    elif section == "text_inst":
+        txts = inst.get("text_instructions", [])
+        print(f"\n  text_instructions count: {len(txts)}  (must be 1)")
+        for ti in txts:
+            if not isinstance(ti, dict): continue
+            content = ti.get("content", [])
+            print(f"\n  id: {ti.get('id','(none)')}")
+            print(f"  content lines: {len(content)}")
+            for line in content[:10]:
+                print(f"    {str(line)[:120]}")
+            if len(content) > 10:
+                print(f"    ... ({len(content)-10} more lines)")
+
+    elif section == "example_sqls":
+        for ex in inst.get("example_question_sqls", []):
+            if not isinstance(ex, dict): continue
+            q   = safe_str(ex.get("question", ""))
+            sql = "".join(ex.get("sql", []))
+            print(f"\n  id: {ex.get('id','(none)')}")
+            print(f"    Q  : {q[:80]}")
+            print(f"    SQL: {sql[:100]}")
+
+    elif section == "filters":
+        for f in snip.get("filters", []):
+            if not isinstance(f, dict): continue
+            sql = "".join(f.get("sql", []))
+            print(f"\n  {f.get('display_name','?')}  id: {f.get('id','(none)')}")
+            print(f"    SQL: {sql[:100]}")
+
+    elif section == "measures":
+        for m in snip.get("measures", []):
+            if not isinstance(m, dict): continue
+            sql  = "".join(m.get("sql", []))
+            syns = ", ".join(m.get("synonyms", []))
+            print(f"\n  {m.get('display_name','?')}  id: {m.get('id','(none)')}")
+            print(f"    sql  : {sql[:100]}")
+            if syns: print(f"    syns : {syns}")
+
+    elif section == "benchmarks":
+        bm = merged_ss.get("benchmarks", {})
+        qs = bm.get("questions", []) if isinstance(bm, dict) else (bm if isinstance(bm, list) else [])
+        print(f"\n  {len(qs)} benchmark questions:")
+        for b in qs:
+            if not isinstance(b, dict): continue
+            q = safe_str(b.get("question", ""))
+            print(f"\n  id: {b.get('id','(none)')}")
+            print(f"    Q : {q[:100]}")
+
+    elif section == "raw":
+        raw_str = json.dumps(merged_ss, indent=2, ensure_ascii=False)
+        total   = len(raw_str)
+        print(f"\n  Total JSON length: {total:,} chars\n")
+        for i in range(0, min(total, 12000), 4000):
+            print(raw_str[i:i+4000])
+        if total > 12000:
+            print(f"\n  ... ({total-12000:,} more chars)")
+
+    else:
+        print(f"Unknown: '{section}'")
+        print("Valid: summary, tables, text_inst, example_sqls, filters, measures, benchmarks, raw")
+
+else:
+    print("Mode = rollback — Cell 4 skipped.")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CELL 5 — FINAL PREPARE: Sanitize + Sort
+# Skipped automatically if mode = rollback
+# ─────────────────────────────────────────────────────────────────────────────
+
+mode = dbutils.widgets.get("mode")
+
+if mode == "merge":
     def fix_description(val):
         if isinstance(val, list):
             clean = [str(v) for v in val if v is not None and str(v).strip()]
@@ -393,48 +640,58 @@ if mode == "merge":
         if "sample_questions" in cfg:
             cfg["sample_questions"] = by_id(cfg["sample_questions"])
 
-    def count_all(ss):
-        ds   = ss.get("data_sources", {})
-        inst = ss.get("instructions", {})
-        snip = inst.get("sql_snippets", {})
-        return {
-            "Tables"      : len(ds.get("tables", [])),
-            "Text Inst"   : len(inst.get("text_instructions", [])),
-            "Example SQLs": len(inst.get("example_question_sqls", [])),
-            "Filters"     : len(snip.get("filters", [])),
-            "Expressions" : len(snip.get("expressions", [])),
-            "Measures"    : len(snip.get("measures", [])),
-            "Benchmarks"  : bm_count(ss),
-            "Sample Qs"   : len(ss.get("config", {}).get("sample_questions", [])),
-        }
-
-    # ── STEP 1: Load both spaces ───────────────────────────────────────────────
     print("=" * 60)
-    print("  MERGE — Loading spaces")
-    print("=" * 60)
-    outer1, ss1 = fetch_space(SPACE_ID_1)
-    outer2, ss2 = fetch_space(SPACE_ID_2)
-    print_summary("Space 1 (base)", outer1, ss1)
-    print_summary("Space 2", outer2, ss2)
-
-    # ── STEP 2: Safety check ───────────────────────────────────────────────────
-    ss1_ids = {t.get("identifier","") for t in ss1.get("data_sources",{}).get("tables",[]) if isinstance(t, dict)}
-    ss2_ids = {t.get("identifier","") for t in ss2.get("data_sources",{}).get("tables",[]) if isinstance(t, dict)}
-    overlap = ss1_ids & ss2_ids
-    if len(overlap) == len(ss1_ids) and len(ss1_ids) > 0:
-        print("\n  WARNING: Space 2 already contains ALL tables from Space 1.")
-        print("  Space 2 may have already been patched. Proceeding with caution.\n")
-    elif overlap:
-        print(f"\n  WARNING: {len(overlap)} Space 1 table(s) already exist in Space 2.")
-    else:
-        print("\n  Safe — no table overlap.\n")
-
-    # ── STEP 3: Snapshot Space 2 BEFORE merge ─────────────────────────────────
-    print("=" * 60)
-    print("  SNAPSHOT — Saving Space 2 before merge")
+    print("  CELL 5 — Preparing for API")
     print("=" * 60)
 
-    timestamp     = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    ready_ss = copy.deepcopy(merged_ss)
+
+    print("\n  Step 1: Sanitizing descriptions...")
+    sanitize_descriptions(ready_ss)
+    print("  All descriptions are ['string'] arrays")
+
+    print("\n  Step 2: Sorting all lists...")
+    sort_lists(ready_ss)
+    print("  Tables sorted by identifier")
+    print("  example_question_sqls sorted by id")
+    print("  filters / expressions / measures sorted by id")
+    print("  benchmarks.questions sorted by id")
+
+    print("\n  Step 3: Validating JSON...")
+    try:
+        test_str = json.dumps(ready_ss, ensure_ascii=False)
+        json.loads(test_str)
+        print(f"  Valid JSON — {len(test_str):,} characters")
+    except Exception as e:
+        print(f"  JSON error: {e}")
+        raise
+
+    txt_count = len(ready_ss.get("instructions", {}).get("text_instructions", []))
+    ex_ids    = [x.get("id","") for x in ready_ss.get("instructions",{}).get("example_question_sqls",[]) if isinstance(x,dict)]
+    ex_sorted = ex_ids == sorted(ex_ids)
+    print(f"\n  Checks:")
+    print(f"    text_instructions count : {txt_count}  {'✅' if txt_count <= 1 else '❌ must be 1'}")
+    print(f"    example_question_sqls   : {'✅ sorted' if ex_sorted else '❌ NOT sorted'}")
+    print("\n  ready_ss prepared. Run Cell 5B.")
+
+else:
+    print("Mode = rollback — Cell 5 skipped.")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CELL 5B — SNAPSHOT SPACE 2 + SAVE MERGED JSON
+# Snapshot is taken HERE — right before patch — so it's always fresh.
+# Skipped automatically if mode = rollback
+# ─────────────────────────────────────────────────────────────────────────────
+
+mode = dbutils.widgets.get("mode")
+
+if mode == "merge":
+    from datetime import datetime
+
+    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+
+    # ── Snapshot Space 2 (saved BEFORE patch) ─────────────────────────────────
     snapshot_name = f"snapshot_{SPACE_ID_2}_{timestamp}.json"
     snapshot_path = f"{SNAPSHOT_FOLDER}/{snapshot_name}"
 
@@ -447,82 +704,23 @@ if mode == "merge":
         "serialized_space": outer2.get("serialized_space", ""),
     }
 
+    print("=" * 60)
+    print("  CELL 5B — Snapshot + Save Merged JSON")
+    print("=" * 60)
+
     try:
         with open(snapshot_path, "w", encoding="utf-8") as f:
             json.dump(rollback_payload, f, indent=2, ensure_ascii=False)
         print(f"\n  Snapshot saved : {snapshot_path}")
         print(f"  Space          : '{outer2.get('title','?')}'")
-        print(f"  To rollback    : select 'rollback' in widget, enter filename: {snapshot_name}")
+        print(f"\n  To rollback    : select 'rollback' in Cell 1 widget")
+        print(f"  Filename       : {snapshot_name}")
     except Exception as e:
         print(f"\n  WARNING: Could not save snapshot: {e}")
-        print(f"  Proceeding with merge, but rollback will not be available.")
+        print(f"  Create the folder first: {SNAPSHOT_FOLDER}")
 
-    # ── STEP 4: Merge ──────────────────────────────────────────────────────────
-    print("\n" + "=" * 60)
-    print("  MERGE — Running merge")
-    print("=" * 60)
-
-    merged_ss, report = do_merge(ss1, ss2)
-
-    LABELS = {
-        "tables"           : "TABLES",
-        "text_instructions": "TEXT INSTRUCTIONS",
-        "example_sqls"     : "EXAMPLE SQLs",
-        "filters"          : "FILTERS",
-        "expressions"      : "EXPRESSIONS",
-        "measures"         : "MEASURES",
-        "benchmarks"       : "BENCHMARKS",
-        "sample_questions" : "SAMPLE QUESTIONS",
-    }
-    total_added = total_skipped = 0
-    for key, label in LABELS.items():
-        r        = report.get(key, {})
-        added    = r.get("added",    [])
-        skipped  = r.get("skipped",  [])
-        enriched = r.get("enriched", [])
-        ca       = r.get("cols_added",    {})
-        ce       = r.get("cols_enriched", {})
-        total_added   += len(added)
-        total_skipped += len(skipped)
-        print(f"\n  {label}")
-        for x in added:    print(f"    +  {x}")
-        for x in enriched: print(f"    ~  {x}")
-        for t, cols in ca.items():
-            for c in cols: print(f"    +  {t} → col: {c}")
-        for t, cols in ce.items():
-            for c in cols: print(f"    ~  {t} → col: {c}  (enriched)")
-        for x in skipped:  print(f"    =  {x}  (Space 1 version kept)")
-        if not added and not enriched and not ca and not ce and not skipped:
-            print(f"    (nothing to merge)")
-
-    c1 = count_all(ss1)
-    c2 = count_all(ss2)
-    cm = count_all(merged_ss)
-    print(f"\n{'=' * 60}")
-    print(f"  {'Field':<18}  {'Space 1':>8}  {'Space 2':>8}  {'Merged':>8}")
-    print(f"  {'─' * 50}")
-    for f in c1:
-        print(f"  {f:<18}  {c1[f]:>8}  {c2[f]:>8}  {cm[f]:>8}")
-    print(f"{'=' * 60}")
-    print(f"\n  + {total_added} added from Space 2")
-    print(f"  = {total_skipped} already existed — Space 1 version kept")
-
-    # ── STEP 5: Sanitize + Sort ────────────────────────────────────────────────
-    ready_ss = copy.deepcopy(merged_ss)
-    sanitize_descriptions(ready_ss)
-    sort_lists(ready_ss)
-
-    try:
-        test_str = json.dumps(ready_ss, ensure_ascii=False)
-        json.loads(test_str)
-        print(f"\n  Valid JSON — {len(test_str):,} characters")
-    except Exception as e:
-        print(f"\n  JSON error: {e}")
-        raise
-
-    # ── STEP 6: Save merged JSON to disk ──────────────────────────────────────
-    ts         = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-    patch_path = MERGED_SAVE_PATH.replace(".json", f"_PATCH_{ts}.json")
+    # ── Save merged JSON ───────────────────────────────────────────────────────
+    patch_path = MERGED_SAVE_PATH.replace(".json", f"_PATCH_{timestamp}.json")
 
     full_patch = {
         "space_id"        : SPACE_ID_2,
@@ -532,19 +730,35 @@ if mode == "merge":
         "parent_path"     : outer2.get("parent_path", ""),
         "serialized_space": json.dumps(ready_ss, indent=2, ensure_ascii=False)
     }
+
     try:
         with open(patch_path, "w", encoding="utf-8") as f:
             json.dump(full_patch, f, indent=2, ensure_ascii=False)
-        print(f"  Merged JSON saved : {patch_path}")
+        print(f"\n  Merged JSON saved : {patch_path}")
+        print(f"  Size : {len(json.dumps(full_patch)):,} characters")
     except Exception as e:
-        print(f"  Could not save merged JSON: {e}")
+        print(f"\n  Could not save merged JSON: {e}")
 
-    # ── STEP 7: PATCH Space 2 ─────────────────────────────────────────────────
-    print("\n" + "=" * 60)
-    print("  PATCH — Updating Space 2")
+    print("\n  Run Cell 7 to PATCH Space 2.")
+
+else:
+    print("Mode = rollback — Cell 5B skipped.")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CELL 7 — PATCH SPACE 2
+# Skipped automatically if mode = rollback
+# ─────────────────────────────────────────────────────────────────────────────
+
+mode = dbutils.widgets.get("mode")
+
+if mode == "merge":
+    print("=" * 60)
+    print("  CELL 7 — Update Space 2 In Place (PATCH)")
     print("=" * 60)
     print(f"\n  Space 1 '{outer1['title']}' : source (read only)")
     print(f"  Space 2 '{outer2['title']}' : will be REPLACED")
+    print(f"\n  Space 2 content will be fully overwritten.")
 
     payload = {
         "title"           : outer2["title"],
@@ -553,6 +767,7 @@ if mode == "merge":
         "serialized_space": json.dumps(ready_ss, ensure_ascii=False),
     }
 
+    print(f"\n  Sending PATCH...")
     resp = requests.patch(
         f"{DATABRICKS_HOST}/api/2.0/genie/spaces/{SPACE_ID_2}",
         headers=HEADERS,
@@ -562,43 +777,58 @@ if mode == "merge":
 
     if resp.status_code == 200:
         print(f"\n  SUCCESS — Space 2 updated!")
-        print(f"  Space 2 '{outer2['title']}' — updated")
+        print(f"  Space 2 '{outer2['title']}' ({SPACE_ID_2}) — updated")
         print(f"  Space 1 '{outer1['title']}' — untouched")
         print(f"\n  To rollback if needed:")
-        print(f"    1. Set widget to 'rollback'")
+        print(f"    1. Set mode widget to 'rollback'")
         print(f"    2. Enter filename : {snapshot_name}")
-        print(f"    3. Run this cell again")
+        print(f"    3. Run Cell 8")
     else:
         print(f"\n  Error {resp.status_code}")
         print(f"  {resp.text[:600]}")
+        print("\n  Checks:")
+        print("    Run Cell 4 with 'text_inst' to check text_instructions count")
+        print("    Run Cell 4 with 'raw' to inspect the full JSON")
+
+else:
+    print("Mode = rollback — Cell 7 skipped.")
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-# ROLLBACK PATH
-# ═════════════════════════════════════════════════════════════════════════════
-elif mode == "rollback":
+# ─────────────────────────────────────────────────────────────────────────────
+# CELL 8 — ROLLBACK
+# Runs only if mode = rollback. Skipped if mode = merge.
+# ─────────────────────────────────────────────────────────────────────────────
+
+mode = dbutils.widgets.get("mode")
+
+if mode == "rollback":
+    import requests, json
+
+    HEADERS = {
+        "Authorization": f"Bearer {TOKEN}",
+        "Content-Type" : "application/json",
+    }
 
     rollback_file = dbutils.widgets.get("rollback_file").strip()
 
     if not rollback_file:
-        print("Enter the snapshot filename in the widget above.")
-        dbutils.notebook.exit("Missing rollback filename")
+        print("Enter the snapshot filename in the widget in Cell 1.")
+        raise ValueError("rollback_file widget is empty.")
 
     snapshot_path = f"{SNAPSHOT_FOLDER}/{rollback_file}"
 
     print("=" * 60)
-    print("  ROLLBACK — Restoring Space 2 from snapshot")
+    print("  CELL 8 — ROLLBACK")
     print("=" * 60)
-    print(f"\n  Loading : {snapshot_path}")
+    print(f"\n  Loading snapshot : {snapshot_path}")
 
     try:
         with open(snapshot_path, "r", encoding="utf-8") as f:
             rollback_payload = json.load(f)
         print(f"  Snapshot loaded")
     except FileNotFoundError:
-        print(f"\n  File not found: {snapshot_path}")
-        print(f"  Check the filename in the widget. Available snapshots are in:")
-        print(f"  {SNAPSHOT_FOLDER}")
+        print(f"\n  File not found : {snapshot_path}")
+        print(f"  Check the filename. Snapshots are saved in: {SNAPSHOT_FOLDER}")
         raise
     except Exception as e:
         print(f"\n  Failed to load snapshot: {e}")
@@ -606,16 +836,15 @@ elif mode == "rollback":
 
     space_id_to_restore = rollback_payload.get("space_id", "")
 
-    # Show what we are restoring
-    raw = rollback_payload.get("serialized_space", "{}")
-    ss  = json.loads(raw) if isinstance(raw, str) else raw
-    ds  = ss.get("data_sources", {})
+    raw  = rollback_payload.get("serialized_space", "{}")
+    ss   = json.loads(raw) if isinstance(raw, str) else raw
+    ds   = ss.get("data_sources", {})
     inst = ss.get("instructions", {})
     snip = inst.get("sql_snippets", {})
     bm   = ss.get("benchmarks", {})
     bm_c = len(bm.get("questions", [])) if isinstance(bm, dict) else len(bm) if isinstance(bm, list) else 0
 
-    print(f"\n  Restoring:")
+    print(f"\n  Restoring to:")
     print(f"    Title        : '{rollback_payload.get('title','?')}'")
     print(f"    Space ID     : {space_id_to_restore}")
     print(f"    Tables       : {len(ds.get('tables', []))}")
@@ -646,3 +875,6 @@ elif mode == "rollback":
         print(f"\n  Rollback failed: {resp.status_code}")
         print(f"  {resp.text[:500]}")
         print("\n  Check you have CAN EDIT on Space 2.")
+
+else:
+    print("Mode = merge — Cell 8 (rollback) skipped.")
