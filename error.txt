@@ -1,27 +1,24 @@
-# ── Safety check — warn if Space 2 already contains Space 1 tables ────────────
-ss1_identifiers = {
-    t.get("identifier","")
-    for t in ss1.get("data_sources",{}).get("tables",[])
-    if isinstance(t, dict)
-}
-ss2_identifiers = {
-    t.get("identifier","")
-    for t in ss2.get("data_sources",{}).get("tables",[])
-    if isinstance(t, dict)
-}
+# OLD — appended blindly every run
+merged_content = base_content + separator + added_content
 
-already_merged = ss1_identifiers & ss2_identifiers
+# NEW — deduplicates before appending
+existing_normalized = {str(line).strip().lower() for line in base_content}
+new_lines = []
+for line in incoming_content:
+    normalized = str(line).strip().lower()
+    if normalized and normalized not in existing_normalized:
+        new_lines.append(line)
+        existing_normalized.add(normalized)   # also dedupes within Space 2
 
-if len(already_merged) == len(ss1_identifiers) and len(ss1_identifiers) > 0:
-    print("⚠️  WARNING: Space 2 already contains ALL tables from Space 1.")
-    print("   Space 2 may have already been patched previously.")
-    print("   Re-merging will DUPLICATE Space 1 content.")
-    print("   If you already ran PATCH successfully, DO NOT re-run this cell.")
-    print("   Reload the ORIGINAL Space 2 (before patching) if you need to re-merge.")
-elif already_merged:
-    print(f"⚠️  WARNING: {len(already_merged)} Space 1 table(s) already exist in Space 2:")
-    for t in already_merged:
-        print(f"   • {t}")
-    print("   This may indicate Space 2 was already partially merged.")
+if new_lines:
+    merged_content = base_content + ["\r\n"] + new_lines
 else:
-    print("✅ Safe to merge — no overlap between Space 1 and Space 2 tables.")
+    merged_content = base_content   # nothing new — no change
+
+
+
+# OLD — used Space 2's original title
+"title": outer2["title"]
+
+# NEW — uses NEW_SPACE_TITLE from Cell 1 config
+"title": NEW_SPACE_TITLE
