@@ -1,58 +1,32 @@
-# ── 2. TEXT INSTRUCTIONS ─────────────────────────────────────────────────────
-# API allows ONLY ONE item.
-# Dedup ensures: run once or multiple times → same result, no duplicate lines.
-
+# ── 2. TEXT INSTRUCTIONS ─────────────────────
 txt1_list = inst1.setdefault("text_instructions", [])
 txt2_list = inst2.get("text_instructions", [])
 
 if txt2_list:
-    # Get Space 1 base content
     if txt1_list:
         base_content = txt1_list[0].get("content", [])
         if isinstance(base_content, str):
             base_content = [base_content]
-        base_content = list(base_content)
     else:
         base_content = []
 
-    # Collect all lines from Space 2
-    incoming_content = []
+    added_content = []
     for ti in txt2_list:
         if not isinstance(ti, dict): continue
         c = ti.get("content", [])
-        if isinstance(c, str):  c = [c]
-        if isinstance(c, list): incoming_content.extend(c)
+        if isinstance(c, str):   c = [c]
+        if isinstance(c, list):  added_content.extend(c)
 
-    # Dedup — only add Space 2 lines that don't already exist in Space 1
-    existing_normalized = {
-        str(line).strip().lower()
-        for line in base_content
-        if line and str(line).strip()
-    }
-    new_lines = []
-    for line in incoming_content:
-        normalized = str(line).strip().lower()
-        if normalized and normalized not in existing_normalized:
-            new_lines.append(line)
-            existing_normalized.add(normalized)  # also dedupes within Space 2
-
-    # Combine — Space 1 + blank separator + new Space 2 lines only
-    if new_lines:
-        merged_content = base_content + ["\r\n"] + new_lines
-    else:
-        merged_content = base_content   # nothing new — no change at all
-
-    # Write back into the single item
     if txt1_list:
-        txt1_list[0]["content"] = merged_content
+        separator = ["\r\n"]
+        txt1_list[0]["content"] = base_content + separator + added_content
     else:
         new_item = copy.deepcopy(txt2_list[0])
-        new_item["content"] = merged_content
+        new_item["content"] = added_content
         txt1_list.append(new_item)
 
     report["text_instructions"] = {
-        "added"  : [f"{len(new_lines)} new line(s) added from Space 2"] if new_lines
-                   else ["All Space 2 lines already exist — nothing added (dedup)"],
+        "added"  : [f"Content merged from {len(txt2_list)} Space 2 instruction(s)"],
         "skipped": []
     }
 else:
