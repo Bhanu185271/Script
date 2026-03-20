@@ -1,8 +1,18 @@
-https://docs.databricks.com/aws/en/genie/conversation-api?language=Create+a+new+space
-
-
 # ==============================================================================
-# GENIE SPACE MERGER — Complete & Fixed (double-encoding fix applied)
+# GENIE SPACE MERGER — Final Fixed Version
+# ==============================================================================
+# Root cause of all "Invalid JSON" errors was ID handling:
+#   - IDs from Space 1 don't belong to Space 2
+#   - IDs from Space 2 don't belong to Space 1
+#   - Any ID we generate ourselves fails Databricks internal Protobuf validation
+#   FIX: Strip ALL IDs before sending. Databricks regenerates valid ones.
+#
+# Other fixes applied:
+#   - data= instead of json= in requests (prevents double encoding)
+#   - ensure_ascii=True in json.dumps (prevents hidden unicode issues)
+#   - JSON round-trip validation before every API call
+#   - descriptions sanitized to ["string"] format
+#   - all lists sorted as API requires
 # ==============================================================================
 
 
@@ -10,12 +20,12 @@ https://docs.databricks.com/aws/en/genie/conversation-api?language=Create+a+new+
 # CELL 1 — CONFIG
 # ─────────────────────────────────────────────────────────────────────────────
 
-DATABRICKS_HOST  = "https://<your-workspace>.cloud.databricks.com"
+DATABRICKS_HOST  = "https://<your-workspace>.cloud.databricks.com"  # No trailing slash
 TOKEN            = "<your-personal-access-token>"
-SPACE_ID_1       = "<space-id-1>"
-SPACE_ID_2       = "<space-id-2>"
+SPACE_ID_1       = "<space-id-1>"    # Source space  (e.g. Sales)
+SPACE_ID_2       = "<space-id-2>"    # Target space  (e.g. Revenue)
 
-# Used only for Option A (create new space)
+# Used only for Option A — Create new space
 WAREHOUSE_ID     = "<your-warehouse-id>"
 NEW_SPACE_TITLE  = "Sales + Revenue (Merged)"
 NEW_SPACE_DESC   = "Merged Genie space combining Sales and Revenue"
@@ -26,7 +36,7 @@ PARENT_PATH      = "/Workspace/Users/<your-email>"
 # CELL 2 — HELPERS + LOAD BOTH SPACES
 # ─────────────────────────────────────────────────────────────────────────────
 
-import requests, json, copy, uuid
+import requests, json, copy
 
 HEADERS = {
     "Authorization": f"Bearer {TOKEN}",
@@ -35,10 +45,8 @@ HEADERS = {
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def short_id():
-    return uuid.uuid4().hex[:16]
-
 def safe_str(val):
+    """Always returns a clean string — handles None, list, dict, str."""
     if val is None:           return ""
     if isinstance(val, list): return str(val[0]) if val else ""
     if isinstance(val, dict): return str(list(val.values())[0]) if val else ""
@@ -69,6 +77,7 @@ def extract_text(item, *keys):
     return safe_str(item)
 
 def fetch_space(space_id):
+    """Fetch a Genie space and return (space_data dict, serialized_space dict)."""
     resp = requests.get(
         f"{DATABRICKS_HOST}/api/2.0/genie/spaces/{space_id}",
         headers=HEADERS,
@@ -85,26 +94,42 @@ def fetch_space(space_id):
     parsed = json.loads(raw) if isinstance(raw, str) else raw
     return data, parsed
 
-# ── THE CORE FIX ──────────────────────────────────────────────────────────────
-# Builds the final payload as a raw JSON string.
-# Uses data= (not json=) in requests calls to prevent double-encoding.
-# serialized_space must be a JSON string nested inside the outer JSON —
-# using json= would encode it twice, breaking the inner JSON structure.
+# ── THE KEY FIX 1 — Strip all IDs ────────────────────────────────────────────
+# IDs in serialized_space are space-specific — they belong to the space they
+# came from. When merging two spaces, mixing IDs from both causes Databricks
+# Protobuf validation to fail silently with "Invalid JSON".
+# Any ID we generate ourselves also fails because Databricks uses a specific
+# internal ULID format (32-char hex with timestamp prefix).
+# Solution: remove every "id" field — Databricks regenerates valid ones on save.
 
-def build_payload(fields_dict, ready_ss):
+def strip_all_ids(ss):
     """
-    Builds the complete request payload as a raw JSON string.
-    serialized_space is json.dumps(ready_ss) — a string nested inside JSON.
-    The whole thing is then json.dumps()'d once more for the request body.
-    This ensures exactly ONE level of encoding — what the API expects.
+    Recursively remove every 'id' key from the serialized_space dict.
+    Databricks will auto-generate fresh valid IDs when the space is saved.
+    This fixes ALL ID-related "Invalid JSON" errors.
     """
-    payload = {**fields_dict, "serialized_space": json.dumps(ready_ss)}
-    return json.dumps(payload)
+    s = copy.deepcopy(ss)
 
-# ── sanitize_and_sort ─────────────────────────────────────────────────────────
-# Applies all API-required sorts + fixes descriptions. Call before any save.
+    def _strip(obj):
+        if isinstance(obj, dict):
+            obj.pop("id", None)        # remove id at this level
+            for v in obj.values():
+                _strip(v)              # recurse into all values
+        elif isinstance(obj, list):
+            for item in obj:
+                _strip(item)           # recurse into list items
+
+    _strip(s)
+    return s
+
+# ── THE KEY FIX 2 — sanitize_and_sort ────────────────────────────────────────
+# API requires specific sort orders and description format.
 
 def sanitize_and_sort(ss):
+    """
+    Applies all API-required sorts and fixes description format.
+    Must be called on merged_ss before strip_all_ids and before saving.
+    """
     s = copy.deepcopy(ss)
 
     def sort_by(lst, key, default=""):
@@ -114,6 +139,7 @@ def sanitize_and_sort(ss):
         )
 
     def fix_desc(val):
+        """Ensure description is always ['string'] not 'string' or None."""
         if val is None:           return None
         if isinstance(val, list): return [str(val[0])] if val else None
         if isinstance(val, str) and val.strip(): return [val]
@@ -125,12 +151,10 @@ def sanitize_and_sort(ss):
 
     for t in tables:
         if not isinstance(t, dict): continue
-        # Fix table description
         if "description" in t:
             fixed = fix_desc(t["description"])
             if fixed: t["description"] = fixed
             else:     del t["description"]
-        # Fix column descriptions
         for c in t.get("column_configs", []):
             if not isinstance(c, dict): continue
             if "description" in c:
@@ -138,6 +162,7 @@ def sanitize_and_sort(ss):
                 if fixed: c["description"] = fixed
                 else:     del c["description"]
 
+    # Sort tables by identifier — API strict requirement
     ds["tables"] = sort_by(tables, "identifier")
 
     if "metric_views" in ds:
@@ -155,16 +180,38 @@ def sanitize_and_sort(ss):
         if key in snip:
             snip[key] = sort_by(snip[key], "id")
 
-    # ── benchmarks ────────────────────────────────────────────────────────────
+    # ── benchmarks + sample_questions ─────────────────────────────────────────
     if "benchmarks" in s:
         s["benchmarks"] = sort_by(s["benchmarks"], "id")
 
-    # ── config.sample_questions ───────────────────────────────────────────────
     cfg = s.setdefault("config", {})
     if "sample_questions" in cfg:
         cfg["sample_questions"] = sort_by(cfg["sample_questions"], "id")
 
     return s
+
+# ── THE KEY FIX 3 — build_raw_payload ────────────────────────────────────────
+# serialized_space must be a JSON string nested inside the outer JSON object.
+# Using json= in requests double-encodes it, breaking the inner structure.
+# We build the full payload as a raw string and use data= instead of json=.
+
+def build_raw_payload(fields, ready_ss):
+    """
+    Builds the complete API payload as a raw JSON string.
+    ensure_ascii=True converts all unicode chars to safe ASCII sequences,
+    preventing hidden character issues in Databricks Protobuf parser.
+    """
+    inner   = json.dumps(ready_ss, ensure_ascii=True)
+    payload = {**fields, "serialized_space": inner}
+    return json.dumps(payload, ensure_ascii=True)
+
+def validate_json(ss):
+    """Round-trip test — catches bad values locally before wasting an API call."""
+    try:
+        result = json.loads(json.dumps(ss, ensure_ascii=True))
+        return True, len(json.dumps(result))
+    except Exception as e:
+        return False, str(e)
 
 def print_space_summary(label, space_data, ss):
     tables      = ss.get("data_sources", {}).get("tables", [])
@@ -178,7 +225,7 @@ def print_space_summary(label, space_data, ss):
     benchmarks  = ss.get("benchmarks", [])
     sample_qs   = ss.get("config", {}).get("sample_questions", [])
 
-    print(f"\n  {label}: '{space_data['title']}'  (ID: {space_data['space_id']})")
+    print(f"\n  {label}: '{space_data['title']}'")
     print(f"  {'─' * 54}")
     print(f"    Tables            : {len(tables)}")
     for t in tables:
@@ -195,7 +242,7 @@ def print_space_summary(label, space_data, ss):
     print(f"    Benchmarks        : {len(benchmarks)}")
     print(f"    Sample Questions  : {len(sample_qs)}")
 
-# ── Load ──────────────────────────────────────────────────────────────────────
+# ── Load both spaces ──────────────────────────────────────────────────────────
 print("⏳ Loading spaces...")
 space_data_1, ss1 = fetch_space(SPACE_ID_1)
 space_data_2, ss2 = fetch_space(SPACE_ID_2)
@@ -213,6 +260,7 @@ print("\n✅ Ready. Run Cell 3 to merge.")
 # ─────────────────────────────────────────────────────────────────────────────
 
 def merge_column_configs(base_cols, incoming_cols):
+    """Merge columns from Space 2 into Space 1 list. Space 1 wins on conflict."""
     base_map = {c["column_name"]: c for c in base_cols if isinstance(c, dict)}
     added, enriched = [], []
     for inc_col in incoming_cols:
@@ -237,15 +285,19 @@ def merge_column_configs(base_cols, incoming_cols):
 
 
 def merge_spaces(ss1, ss2):
+    """
+    Full merge of ss2 into ss1. Space 1 always wins on conflicts.
+    IDs are NOT touched here — strip_all_ids() handles them before save.
+    """
     merged = copy.deepcopy(ss1)
     report = {}
 
     # ── 1. TABLES ─────────────────────────────────────────────────────────────
-    existing_tables = {}
-    for t in merged.setdefault("data_sources", {}).setdefault("tables", []):
-        if isinstance(t, dict):
-            existing_tables[t.get("identifier", "")] = t
-
+    existing_tables = {
+        t.get("identifier", ""): t
+        for t in merged.setdefault("data_sources", {}).setdefault("tables", [])
+        if isinstance(t, dict)
+    }
     tbl_added, tbl_enriched, col_added, col_enriched = [], [], {}, {}
 
     for inc_t in ss2.get("data_sources", {}).get("tables", []):
@@ -306,9 +358,7 @@ def merge_spaces(ss1, ss2):
         if not isinstance(j, dict): continue
         jk = join_key(j)
         if jk not in existing_joins:
-            new_j        = copy.deepcopy(j)
-            new_j["id"]  = short_id()
-            merged["instructions"]["join_specs"].append(new_j)
+            merged["instructions"]["join_specs"].append(copy.deepcopy(j))
             existing_joins.add(jk)
             joins_added.append(f"{jk[0]} ↔ {jk[1]}")
         else:
@@ -325,7 +375,6 @@ def merge_spaces(ss1, ss2):
         content = extract_text(ti, "content")
         if content not in existing_txt:
             new_ti = copy.deepcopy(as_dict(ti))
-            new_ti["id"] = short_id()
             if "content" not in new_ti and "_raw" in new_ti:
                 new_ti["content"] = new_ti.pop("_raw")
             merged["instructions"]["text_instructions"].append(new_ti)
@@ -345,7 +394,6 @@ def merge_spaces(ss1, ss2):
         q = extract_text(ex, "question")
         if q not in existing_ex:
             new_ex = copy.deepcopy(as_dict(ex))
-            new_ex["id"] = short_id()
             if "question" not in new_ex and "_raw" in new_ex:
                 new_ex["question"] = new_ex.pop("_raw")
             merged["instructions"]["example_question_sqls"].append(new_ex)
@@ -367,9 +415,7 @@ def merge_spaces(ss1, ss2):
         if not isinstance(f, dict): continue
         name = f.get("display_name", "")
         if name not in existing_filters:
-            new_f       = copy.deepcopy(f)
-            new_f["id"] = short_id()
-            snippets["filters"].append(new_f)
+            snippets["filters"].append(copy.deepcopy(f))
             existing_filters.add(name)
             filters_added.append(name)
         else:
@@ -387,9 +433,7 @@ def merge_spaces(ss1, ss2):
         if not isinstance(e, dict): continue
         alias = e.get("alias", "")
         if alias not in existing_exprs:
-            new_e       = copy.deepcopy(e)
-            new_e["id"] = short_id()
-            snippets["expressions"].append(new_e)
+            snippets["expressions"].append(copy.deepcopy(e))
             existing_exprs.add(alias)
             exprs_added.append(alias)
         else:
@@ -407,9 +451,7 @@ def merge_spaces(ss1, ss2):
         if not isinstance(m, dict): continue
         alias = m.get("alias", "")
         if alias not in existing_measures:
-            new_m       = copy.deepcopy(m)
-            new_m["id"] = short_id()
-            snippets["measures"].append(new_m)
+            snippets["measures"].append(copy.deepcopy(m))
             existing_measures.add(alias)
             measures_added.append(alias)
         else:
@@ -425,8 +467,7 @@ def merge_spaces(ss1, ss2):
     for b in ss2.get("benchmarks", []):
         q = extract_text(b, "question")
         if q not in existing_bm:
-            new_b       = copy.deepcopy(as_dict(b))
-            new_b["id"] = short_id()
+            new_b = copy.deepcopy(as_dict(b))
             if "question" not in new_b and "_raw" in new_b:
                 new_b["question"] = new_b.pop("_raw")
             merged["benchmarks"].append(new_b)
@@ -445,8 +486,7 @@ def merge_spaces(ss1, ss2):
     for sq in ss2.get("config", {}).get("sample_questions", []):
         q = extract_text(sq, "question")
         if q not in existing_sq:
-            new_sq       = copy.deepcopy(as_dict(sq))
-            new_sq["id"] = short_id()
+            new_sq = copy.deepcopy(as_dict(sq))
             if "question" not in new_sq and "_raw" in new_sq:
                 new_sq["question"] = new_sq.pop("_raw")
             merged["config"]["sample_questions"].append(new_sq)
@@ -462,12 +502,12 @@ def merge_spaces(ss1, ss2):
     return merged, report
 
 
-# ── Run merge ─────────────────────────────────────────────────────────────────
+# ── Run ───────────────────────────────────────────────────────────────────────
 print("\n⏳ Merging...")
 merged_ss, report = merge_spaces(ss1, ss2)
 
 # ── Print report ──────────────────────────────────────────────────────────────
-SECTION_LABELS = {
+LABELS = {
     "tables"           : "TABLES",
     "metric_views"     : "METRIC VIEWS",
     "joins"            : "JOINS",
@@ -485,7 +525,7 @@ print("  Merge Report  (Space 1 = base, Space 1 wins on conflicts)")
 print("=" * 60)
 
 total_added = total_skipped = 0
-for key, label in SECTION_LABELS.items():
+for key, label in LABELS.items():
     r        = report.get(key, {})
     added    = r.get("added",   [])
     skipped  = r.get("skipped", [])
@@ -497,15 +537,16 @@ for key, label in SECTION_LABELS.items():
 
     print(f"\n  {label}")
     for item in added:    print(f"    +  {item}")
-    for item in enriched: print(f"    ~  {item}")
+    for item in enriched: print(f"    ~  {item}  (filled missing fields)")
     for tbl, cols in c_added.items():
         for col in cols: print(f"    +  {tbl} → column: {col}")
     for tbl, cols in c_enr.items():
         for col in cols: print(f"    ~  {tbl} → column: {col}  (enriched)")
-    for item in skipped:  print(f"    =  {item}  (kept Space 1 version)")
+    for item in skipped:  print(f"    =  {item}  (Space 1 version kept)")
     if not added and not enriched and not c_added and not c_enr and not skipped:
         print(f"    (nothing to merge in this section)")
 
+# ── Counts ────────────────────────────────────────────────────────────────────
 def count_all(ss):
     return {
         "Tables"      : len(ss.get("data_sources", {}).get("tables", [])),
@@ -534,18 +575,18 @@ print(f"\n  + {total_added} items added from Space 2")
 print(f"  = {total_skipped} items already existed — Space 1 version kept")
 print(f"\n✅ Merge complete (in memory — not saved yet)")
 print("   ▶  Run Cell 4 to inspect merged content")
-print("   ▶  Run Cell 5 for Option A — Create a NEW space")
+print("   ▶  Run Cell 5 for Option A — Create a NEW space  (recommended)")
 print("   ▶  Run Cell 6 for Option B — Merge INTO Space 2")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CELL 4 — INSPECT MERGED CONTENT  (optional, run anytime)
+# CELL 4 — INSPECT  (optional, run anytime)
 # ─────────────────────────────────────────────────────────────────────────────
 
 dbutils.widgets.text(
     name         = "inspect_section",
     defaultValue = "tables",
-    label        = "Inspect: tables/joins/measures/filters/expressions/benchmarks/sample_questions/example_sqls/all"
+    label        = "Inspect: tables / joins / measures / filters / expressions / benchmarks / sample_questions / example_sqls / all"
 )
 
 section = dbutils.widgets.get("inspect_section").strip().lower()
@@ -577,7 +618,8 @@ def show_joins(ss):
         l   = j.get("left",  {}).get("identifier", "") if isinstance(j.get("left"),  dict) else ""
         r   = j.get("right", {}).get("identifier", "") if isinstance(j.get("right"), dict) else ""
         sql = "".join(j.get("sql", []))
-        print(f"    • {l}  ↔  {r}  |  ON: {sql[:60]}")
+        print(f"    • {l}  ↔  {r}")
+        print(f"        ON : {sql}")
 
 def show_snippets(ss, kind):
     items = ss.get("instructions", {}).get("sql_snippets", {}).get(kind, [])
@@ -636,41 +678,43 @@ else:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CELL 5 — OPTION A: Create a Brand New Merged Genie Space
-# Space 1 and Space 2 are NOT touched.
+# CELL 5 — OPTION A: Create a Brand New Merged Space  (RECOMMENDED)
+# Uses POST — creates a brand new space. Space 1 and Space 2 untouched.
 # ─────────────────────────────────────────────────────────────────────────────
 
 print("=" * 60)
-print("  OPTION A — Creating New Merged Genie Space")
+print("  OPTION A — Creating New Merged Genie Space  (POST)")
 print("=" * 60)
 print(f"\n  Title      : {NEW_SPACE_TITLE}")
 print(f"  Description: {NEW_SPACE_DESC}")
 print(f"  Location   : {PARENT_PATH}")
 print(f"  Warehouse  : {WAREHOUSE_ID}")
 
-# ── Step 1: Sanitize and sort ─────────────────────────────────────────────────
-print(f"\n  Sanitizing and sorting...")
+# ── Step 1: Sanitize + sort ───────────────────────────────────────────────────
+print(f"\n  Step 1: Sanitizing and sorting...")
 ready_ss = sanitize_and_sort(merged_ss)
 print("  ✅ Tables sorted by identifier")
-print("  ✅ All lists sorted by id")
-print("  ✅ Descriptions sanitized")
+print("  ✅ All instruction lists sorted by id")
+print("  ✅ Descriptions sanitized to ['string'] format")
 
-# ── Step 2: Validate JSON before sending ─────────────────────────────────────
-print(f"\n  Validating JSON...")
-try:
-    serialized = json.dumps(ready_ss)
-    json.loads(serialized)   # round-trip check
-    print(f"  ✅ Valid JSON — {len(serialized):,} chars")
-except Exception as e:
-    print(f"  ❌ JSON validation failed: {e}")
+# ── Step 2: Strip ALL IDs — the critical fix ──────────────────────────────────
+print(f"\n  Step 2: Stripping all IDs...")
+ready_ss = strip_all_ids(ready_ss)
+print("  ✅ All IDs removed — Databricks will regenerate valid ones on save")
+
+# ── Step 3: Validate JSON locally ────────────────────────────────────────────
+print(f"\n  Step 3: Validating JSON...")
+ok, info = validate_json(ready_ss)
+if ok:
+    print(f"  ✅ Valid JSON — {info:,} chars")
+else:
+    print(f"  ❌ JSON validation failed: {info}")
     print("     Fix the data issue before sending. Run Cell 4 with 'all' to inspect.")
-    raise
+    raise Exception("JSON validation failed — see above")
 
-# ── Step 3: Build payload as raw string — prevents double encoding ────────────
-# IMPORTANT: use data= not json= in requests call below.
-# json= would encode the already-serialized serialized_space string a second
-# time, turning {"key":"val"} into "{\"key\":\"val\"}" — invalid JSON to API.
-raw_payload = build_payload(
+# ── Step 4: Build raw payload — prevents double encoding ─────────────────────
+print(f"\n  Step 4: Building payload...")
+raw_payload = build_raw_payload(
     {
         "title"       : NEW_SPACE_TITLE,
         "description" : NEW_SPACE_DESC,
@@ -679,63 +723,74 @@ raw_payload = build_payload(
     },
     ready_ss
 )
+print("  ✅ Payload built with ensure_ascii=True")
 
-# ── Step 4: Send ──────────────────────────────────────────────────────────────
-print(f"\n  Sending to API...")
-resp_a = requests.post(
+# ── Step 5: Send POST request ─────────────────────────────────────────────────
+print(f"\n  Step 5: Sending POST to API...")
+resp = requests.post(
     f"{DATABRICKS_HOST}/api/2.0/genie/spaces",
     headers=HEADERS,
-    data=raw_payload,        # ← data= not json= (prevents double encoding)
+    data=raw_payload,          # data= not json= — prevents double encoding
     timeout=30,
 )
 
-if resp_a.status_code == 200:
-    new_space = resp_a.json()
+if resp.status_code == 200:
+    new_space = resp.json()
     print(f"\n  🎉 SUCCESS — New space created!")
     print(f"     Title    : {new_space.get('title', '')}")
     print(f"     Space ID : {new_space.get('space_id', '')}")
     print(f"\n  Space 1 '{space_data_1['title']}' — untouched ✅")
     print(f"  Space 2 '{space_data_2['title']}' — untouched ✅")
+    print(f"\n  Open Databricks → Genie to find '{NEW_SPACE_TITLE}'")
 else:
-    print(f"\n  ❌ Error {resp_a.status_code}")
-    print(f"     {resp_a.text[:800]}")
-    print("\n  Hints:")
+    print(f"\n  ❌ Error {resp.status_code}")
+    print(f"     {resp.text[:800]}")
+    print("\n  Common causes:")
     print("    • WAREHOUSE_ID wrong or no CAN USE permission")
     print("    • PARENT_PATH folder does not exist")
     print("    • Run Cell 4 with 'all' to inspect merged content")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CELL 6 — OPTION B: Merge Space 1 INTO Space 2 (updates Space 2 in place)
-# Space 1 is NOT touched.
+# CELL 6 — OPTION B: Merge Space 1 INTO Space 2  (PATCH — use with caution)
+# Updates Space 2 in place. Space 1 untouched.
+# ⚠️  Space 2 content will be fully replaced. Make sure you have a backup.
 # ─────────────────────────────────────────────────────────────────────────────
 
 print("=" * 60)
-print("  OPTION B — Merging Space 1 INTO Space 2")
+print("  OPTION B — Merging Space 1 INTO Space 2  (PATCH)")
 print("=" * 60)
 print(f"\n  Space 1 : '{space_data_1['title']}'  →  source (read only)")
 print(f"  Space 2 : '{space_data_2['title']}'  →  will be UPDATED in place")
+print(f"\n  ⚠️  Space 2 content will be fully replaced with merged content.")
 
-# ── Step 1: Sanitize and sort ─────────────────────────────────────────────────
-print(f"\n  Sanitizing and sorting...")
+# ── Step 1: Sanitize + sort ───────────────────────────────────────────────────
+print(f"\n  Step 1: Sanitizing and sorting...")
 ready_ss = sanitize_and_sort(merged_ss)
 print("  ✅ Tables sorted by identifier")
-print("  ✅ All lists sorted by id")
-print("  ✅ Descriptions sanitized")
+print("  ✅ All instruction lists sorted by id")
+print("  ✅ Descriptions sanitized to ['string'] format")
 
-# ── Step 2: Validate JSON before sending ─────────────────────────────────────
-print(f"\n  Validating JSON...")
-try:
-    serialized = json.dumps(ready_ss)
-    json.loads(serialized)   # round-trip check
-    print(f"  ✅ Valid JSON — {len(serialized):,} chars")
-except Exception as e:
-    print(f"  ❌ JSON validation failed: {e}")
+# ── Step 2: Strip ALL IDs — the critical fix ──────────────────────────────────
+# Even for PATCH, IDs from Space 1 must be stripped because they don't belong
+# to Space 2. Mixing IDs from two different spaces causes Protobuf failure.
+print(f"\n  Step 2: Stripping all IDs...")
+ready_ss = strip_all_ids(ready_ss)
+print("  ✅ All IDs removed — Databricks will regenerate valid ones on save")
+
+# ── Step 3: Validate JSON locally ────────────────────────────────────────────
+print(f"\n  Step 3: Validating JSON...")
+ok, info = validate_json(ready_ss)
+if ok:
+    print(f"  ✅ Valid JSON — {info:,} chars")
+else:
+    print(f"  ❌ JSON validation failed: {info}")
     print("     Fix the data issue before sending. Run Cell 4 with 'all' to inspect.")
-    raise
+    raise Exception("JSON validation failed — see above")
 
-# ── Step 3: Build payload as raw string — prevents double encoding ────────────
-raw_payload = build_payload(
+# ── Step 4: Build raw payload — prevents double encoding ─────────────────────
+print(f"\n  Step 4: Building payload...")
+raw_payload = build_raw_payload(
     {
         "title"       : space_data_2["title"],
         "description" : space_data_2.get("description", ""),
@@ -743,24 +798,25 @@ raw_payload = build_payload(
     },
     ready_ss
 )
+print("  ✅ Payload built with ensure_ascii=True")
 
-# ── Step 4: Send ──────────────────────────────────────────────────────────────
-print(f"\n  Sending to API...")
-resp_b = requests.patch(
+# ── Step 5: Send PATCH request ────────────────────────────────────────────────
+print(f"\n  Step 5: Sending PATCH to API...")
+resp = requests.patch(
     f"{DATABRICKS_HOST}/api/2.0/genie/spaces/{SPACE_ID_2}",
     headers=HEADERS,
-    data=raw_payload,        # ← data= not json= (prevents double encoding)
+    data=raw_payload,          # data= not json= — prevents double encoding
     timeout=30,
 )
 
-if resp_b.status_code == 200:
+if resp.status_code == 200:
     print(f"\n  🎉 SUCCESS — Space 2 updated!")
     print(f"\n  Space 2 '{space_data_2['title']}' ({SPACE_ID_2}) — updated ✅")
     print(f"  Space 1 '{space_data_1['title']}' ({SPACE_ID_1}) — untouched ✅")
     print(f"\n  Open Space 2 in Databricks to verify the merged content.")
 else:
-    print(f"\n  ❌ Error {resp_b.status_code}")
-    print(f"     {resp_b.text[:800]}")
-    print("\n  Hints:")
+    print(f"\n  ❌ Error {resp.status_code}")
+    print(f"     {resp.text[:800]}")
+    print("\n  Common causes:")
     print("    • No CAN EDIT permission on Space 2")
     print("    • Run Cell 4 with 'all' to inspect merged content")
