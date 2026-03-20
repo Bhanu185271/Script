@@ -1,149 +1,24 @@
-# ─────────────────────────────────────────────────────────────────────────────
-# CELL 3 — MERGE
-# ─────────────────────────────────────────────────────────────────────────────
-
-# ── Safety check ──────────────────────────────────────────────────────────────
-ss1_ids = {
-    t.get("identifier","")
-    for t in ss1.get("data_sources",{}).get("tables",[])
-    if isinstance(t, dict)
-}
-ss2_ids = {
-    t.get("identifier","")
-    for t in ss2.get("data_sources",{}).get("tables",[])
-    if isinstance(t, dict)
-}
-overlap = ss1_ids & ss2_ids
-
-if len(overlap) == len(ss1_ids) and len(ss1_ids) > 0:
-    print("⚠️  WARNING: Space 2 already contains ALL tables from Space 1.")
-    print("   Space 2 may have already been patched. Re-merging may cause duplicates.")
-    print("   If PATCH already ran successfully, do NOT re-run this cell.\n")
-elif overlap:
-    print(f"⚠️  WARNING: {len(overlap)} Space 1 table(s) already exist in Space 2:")
-    for t in overlap:
-        print(f"   • {t}")
-    print()
-else:
-    print("✅ Safe — no table overlap between Space 1 and Space 2.\n")
-
-
-def merge_col_configs(base_cols, inc_cols):
-    base_map = {
-        c["column_name"]: c
-        for c in base_cols
-        if isinstance(c, dict) and "column_name" in c
-    }
-    added, enriched = [], []
-    for col in inc_cols:
-        if not isinstance(col, dict) or "column_name" not in col:
-            continue
-        name = col["column_name"]
-        if name not in base_map:
-            base_cols.append(copy.deepcopy(col))
-            base_map[name] = base_cols[-1]
-            added.append(name)
-        else:
-            base_col = base_map[name]
-            changed  = False
-            for field in ["description", "synonyms", "get_example_values",
-                          "build_value_dictionary", "enable_entity_matching",
-                          "enable_format_assistance", "exclude"]:
-                if field not in base_col and field in col:
-                    base_col[field] = copy.deepcopy(col[field])
-                    changed = True
-            if changed:
-                enriched.append(name)
-    return added, enriched
-
-
-def merge_list(base_list, inc_list, key_fn):
-    existing = set()
-    for item in base_list:
-        if isinstance(item, dict):
-            k = key_fn(item)
-            if k is not None:
-                existing.add(k)
-    added, skipped = [], []
-    for item in inc_list:
-        if not isinstance(item, dict):
-            continue
-        k = key_fn(item)
-        if k is None:
-            continue
-        if k not in existing:
-            base_list.append(copy.deepcopy(item))
-            existing.add(k)
-            added.append(str(k)[:70])
-        else:
-            skipped.append(str(k)[:70])
-    return added, skipped
-
-
-def do_merge(ss1, ss2):
-    merged = copy.deepcopy(ss1)
-    report = {}
-
-    ds1   = merged.setdefault("data_sources", {})
-    inst1 = merged.setdefault("instructions", {})
-    snip1 = inst1.setdefault("sql_snippets", {})
-    ds2   = ss2.get("data_sources", {})
-    inst2 = ss2.get("instructions", {})
-    snip2 = inst2.get("sql_snippets", {})
-
-    # ── 1. TABLES ─────────────────────────────────────────────────────────────
-    tbl_list = ds1.setdefault("tables", [])
-    existing_tbls = {
-        t.get("identifier", ""): t
-        for t in tbl_list if isinstance(t, dict)
-    }
-    tbl_added, tbl_enriched, col_added, col_enriched = [], [], {}, {}
-
-    for t in ds2.get("tables", []):
-        if not isinstance(t, dict) or not t.get("identifier"):
-            continue
-        ident = t["identifier"]
-        if ident not in existing_tbls:
-            tbl_list.append(copy.deepcopy(t))
-            existing_tbls[ident] = tbl_list[-1]
-            tbl_added.append(ident)
-        else:
-            base_t = existing_tbls[ident]
-            if not base_t.get("description") and t.get("description"):
-                base_t["description"] = copy.deepcopy(t["description"])
-                tbl_enriched.append(f"{ident} (description filled)")
-            if t.get("column_configs"):
-                ca, ce = merge_col_configs(
-                    base_t.setdefault("column_configs", []),
-                    t["column_configs"]
-                )
-                if ca: col_added[ident]    = ca
-                if ce: col_enriched[ident] = ce
-
-    report["tables"] = {
-        "added": tbl_added, "enriched": tbl_enriched,
-        "cols_added": col_added, "cols_enriched": col_enriched
-    }
-
-    # ── 2. TEXT INSTRUCTIONS ──────────────────────────────────────────────────
+# ── 2. TEXT INSTRUCTIONS ──────────────────────────────────────────────────
     # API allows ONLY ONE item.
-    # Dedup uses EXACT string match — avoids false positives from normalization.
-    # Run once or multiple times → same result, no duplicate lines.
+    # Uses a MARKER to detect if Space 2 was already merged — no line comparison.
+    # Run once or many times → same result. Nothing skipped. Nothing missed.
+
+    MERGE_MARKER = "=== Additional Instructions ==="
 
     txt1_list = inst1.setdefault("text_instructions", [])
     txt2_list = inst2.get("text_instructions", [])
 
     if txt2_list:
-        # Get Space 1 base content
+        # Get Space 1 base content — all lines, nothing dropped
         if txt1_list:
             base_content = txt1_list[0].get("content", [])
             if isinstance(base_content, str):
                 base_content = [base_content]
-            base_content = list(base_content)
+            base_content = list(base_content)   # full copy, nothing lost
         else:
             base_content = []
 
-        # Collect all lines from Space 2
+        # Collect ALL lines from Space 2 — no filtering, no comparison, nothing skipped
         incoming_content = []
         for ti in txt2_list:
             if not isinstance(ti, dict):
@@ -152,190 +27,54 @@ def do_merge(ss1, ss2):
             if isinstance(c, str):  c = [c]
             if isinstance(c, list): incoming_content.extend(c)
 
-        # Dedup using EXACT match — only skip if the line is truly identical
-        # This prevents false positives that normalization caused
-        existing_exact = set(str(line) for line in base_content)
+        # Check if Space 2 content was already merged using the marker
+        already_merged = any(
+            MERGE_MARKER in str(line)
+            for line in base_content
+        )
 
-        new_lines = []
-        for line in incoming_content:
-            line_str = str(line)
-            if line_str not in existing_exact:
-                new_lines.append(line)
-                existing_exact.add(line_str)  # also dedupes within Space 2
-
-        # Combine — Space 1 + blank line separator + new Space 2 lines
-        if new_lines:
-            merged_content = base_content + ["\r\n"] + new_lines
+        if not already_merged:
+            # First time — append ALL Space 2 lines after the marker
+            merged_content = (
+                base_content                        # ALL Space 1 lines
+                + ["\r\n"]                          # blank line separator
+                + [MERGE_MARKER + "\r\n"]           # marker — prevents re-merge on re-run
+                + incoming_content                  # ALL Space 2 lines, untouched
+            )
+            added_msg = f"{len(incoming_content)} line(s) added from Space 2"
         else:
-            merged_content = base_content   # nothing new — no change
+            # Already merged — do nothing at all
+            merged_content = base_content
+            added_msg = "Space 2 already merged — skipped (marker found, re-run safe)"
 
-        # Write back into the single item
+        # Write back into the single item (Space 1's item is updated in place)
         if txt1_list:
             txt1_list[0]["content"] = merged_content
         else:
+            # Space 1 had no instruction — create from Space 2's item
             new_item = copy.deepcopy(txt2_list[0])
             new_item["content"] = merged_content
             txt1_list.append(new_item)
 
         report["text_instructions"] = {
-            "added"  : [f"{len(new_lines)} new line(s) added from Space 2"] if new_lines
-                       else ["All Space 2 lines already exist — nothing added (dedup)"],
+            "added"  : [added_msg],
             "skipped": []
         }
+
     else:
+        # Space 2 has no text instructions — nothing to merge
         report["text_instructions"] = {"added": [], "skipped": []}
+```
 
-    # ── 3. EXAMPLE SQLs ───────────────────────────────────────────────────────
-    ex_list = inst1.setdefault("example_question_sqls", [])
-    added, skipped = merge_list(
-        ex_list,
-        inst2.get("example_question_sqls", []),
-        key_fn=lambda x: safe_str(x.get("question", ""))
-    )
-    report["example_sqls"] = {"added": added, "skipped": skipped}
+---
 
-    # ── 4. FILTERS ────────────────────────────────────────────────────────────
-    flt_list = snip1.setdefault("filters", [])
-    added, skipped = merge_list(
-        flt_list,
-        snip2.get("filters", []),
-        key_fn=lambda x: x.get("display_name", "")
-    )
-    report["filters"] = {"added": added, "skipped": skipped}
+## What the merged instruction looks like in Genie
+```
+[Space 1 Rule 1]
+[Space 1 Rule 2]
+...all Space 1 lines...
 
-    # ── 5. EXPRESSIONS ────────────────────────────────────────────────────────
-    exp_list = snip1.setdefault("expressions", [])
-    added, skipped = merge_list(
-        exp_list,
-        snip2.get("expressions", []),
-        key_fn=lambda x: x.get("alias", "")
-    )
-    report["expressions"] = {"added": added, "skipped": skipped}
-
-    # ── 6. MEASURES ───────────────────────────────────────────────────────────
-    msr_list = snip1.setdefault("measures", [])
-    added, skipped = merge_list(
-        msr_list,
-        snip2.get("measures", []),
-        key_fn=lambda x: x.get("display_name", x.get("alias", ""))
-    )
-    report["measures"] = {"added": added, "skipped": skipped}
-
-    # ── 7. BENCHMARKS ─────────────────────────────────────────────────────────
-    bm1 = merged.setdefault("benchmarks", {"questions": []})
-    bm2 = ss2.get("benchmarks", {})
-
-    if isinstance(bm1, dict):
-        bm1_questions = bm1.setdefault("questions", [])
-    elif isinstance(bm1, list):
-        merged["benchmarks"] = {"questions": bm1}
-        bm1_questions = merged["benchmarks"]["questions"]
-    else:
-        merged["benchmarks"] = {"questions": []}
-        bm1_questions = merged["benchmarks"]["questions"]
-
-    bm2_questions = bm2.get("questions", []) if isinstance(bm2, dict) else (bm2 if isinstance(bm2, list) else [])
-
-    added, skipped = merge_list(
-        bm1_questions,
-        bm2_questions,
-        key_fn=lambda x: safe_str(x.get("question", ""))
-    )
-    report["benchmarks"] = {"added": added, "skipped": skipped}
-
-    # ── 8. SAMPLE QUESTIONS ───────────────────────────────────────────────────
-    sq_list = merged.setdefault("config", {}).setdefault("sample_questions", [])
-    added, skipped = merge_list(
-        sq_list,
-        ss2.get("config", {}).get("sample_questions", []),
-        key_fn=lambda x: safe_str(x.get("question", ""))
-    )
-    report["sample_questions"] = {"added": added, "skipped": skipped}
-
-    merged["version"] = max(ss1.get("version", 1), ss2.get("version", 1))
-
-    return merged, report   # ← closing line of do_merge()
-
-
-# ── Run ───────────────────────────────────────────────────────────────────────
-print("⏳ Merging...")
-merged_ss, report = do_merge(ss1, ss2)
-
-# ── Print report ──────────────────────────────────────────────────────────────
-print("\n" + "=" * 60)
-print("  Merge Report  (Space 1 = base, Space 1 wins on conflicts)")
-print("=" * 60)
-
-LABELS = {
-    "tables"           : "TABLES",
-    "text_instructions": "TEXT INSTRUCTIONS",
-    "example_sqls"     : "EXAMPLE SQLs",
-    "filters"          : "FILTERS",
-    "expressions"      : "EXPRESSIONS",
-    "measures"         : "MEASURES",
-    "benchmarks"       : "BENCHMARKS",
-    "sample_questions" : "SAMPLE QUESTIONS",
-}
-
-total_added = total_skipped = 0
-for key, label in LABELS.items():
-    r        = report.get(key, {})
-    added    = r.get("added",    [])
-    skipped  = r.get("skipped",  [])
-    enriched = r.get("enriched", [])
-    ca       = r.get("cols_added",    {})
-    ce       = r.get("cols_enriched", {})
-    total_added   += len(added)
-    total_skipped += len(skipped)
-
-    print(f"\n  {label}")
-    for x in added:    print(f"    +  {x}")
-    for x in enriched: print(f"    ~  {x}")
-    for t, cols in ca.items():
-        for c in cols: print(f"    +  {t} → col: {c}")
-    for t, cols in ce.items():
-        for c in cols: print(f"    ~  {t} → col: {c}  (enriched)")
-    for x in skipped:  print(f"    =  {x}  (Space 1 version kept)")
-    if not added and not enriched and not ca and not ce and not skipped:
-        print(f"    (nothing to merge)")
-
-def count_all(ss):
-    ds   = ss.get("data_sources", {})
-    inst = ss.get("instructions", {})
-    snip = inst.get("sql_snippets", {})
-    return {
-        "Tables"      : len(ds.get("tables", [])),
-        "Text Inst"   : len(inst.get("text_instructions", [])),
-        "Example SQLs": len(inst.get("example_question_sqls", [])),
-        "Filters"     : len(snip.get("filters", [])),
-        "Expressions" : len(snip.get("expressions", [])),
-        "Measures"    : len(snip.get("measures", [])),
-        "Benchmarks"  : bm_count(ss),
-        "Sample Qs"   : len(ss.get("config", {}).get("sample_questions", [])),
-    }
-
-c1 = count_all(ss1)
-c2 = count_all(ss2)
-cm = count_all(merged_ss)
-
-print(f"\n{'=' * 60}")
-print(f"  {'Field':<18}  {'Space 1':>8}  {'Space 2':>8}  {'Merged':>8}")
-print(f"  {'─' * 50}")
-for f in c1:
-    print(f"  {f:<18}  {c1[f]:>8}  {c2[f]:>8}  {cm[f]:>8}")
-print(f"{'=' * 60}")
-print(f"\n  + {total_added} items added / merged from Space 2")
-print(f"  = {total_skipped} items already existed — Space 1 version kept")
-
-txt_count  = len(merged_ss.get("instructions", {}).get("text_instructions", []))
-txt_lines  = merged_ss.get("instructions", {}).get("text_instructions", [])
-line_count = len(txt_lines[0].get("content", [])) if txt_lines else 0
-
-print(f"\n  text_instructions count : {txt_count}  {'✅' if txt_count == 1 else '❌ must be 1'}")
-print(f"  text_instructions lines : {line_count}")
-print("\n✅ Merge complete.")
-print("   ▶  Run Cell 4 to preview")
-print("   ▶  Run Cell 5 to prepare (sanitize + sort)")
-print("   ▶  Run Cell 5B to save JSON to disk")
-print("   ▶  Run Cell 6 to CREATE new space  (POST)")
-print("   ▶  Run Cell 7 to UPDATE Space 2 title + content  (PATCH)")
+=== Additional Instructions ===
+[Space 2 Rule A]
+[Space 2 Rule B]
+...all Space 2 lines, nothing missed...
