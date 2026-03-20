@@ -1,75 +1,21 @@
-# ─────────────────────────────────────────────────────────────────────────────
-# CELL 5B — SAVE COMPLETE JSON TO DATABRICKS (outer wrapper + inner content)
-# The saved file matches exactly what gets sent to the API.
-# ─────────────────────────────────────────────────────────────────────────────
+============================================================
+  CELL 6 — Create New Merged Space (POST)
+============================================================
 
-from datetime import datetime
+  Title     : Test Genie Merger Campaign & Content, Customer Journey and ATLAS, ACE and ES Insights v2 (1) + patient data
+  Location  : /Shared/iNavi_Metadata/genie/post_request_import_api
+  Warehouse : b802a9ace025221b
 
-SAVE_PATH = "/Workspace/Shared/<your-folder>/merged_genie_space.json"
+  Space 1 'Test Genie Deployment Campaign & Content, Customer Journey and ATLAS, ACE and ES Insights v2 (1)' — untouched
+  Space 2 'Test Market and brand performance and Channel dynamics and Patient data (v1.4)' — untouched
 
-timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-save_path = SAVE_PATH.replace(".json", f"_{timestamp}.json")
+  Sending POST...
 
-print("=" * 60)
-print("  CELL 5B — Saving Complete Merged JSON to Databricks")
-print("=" * 60)
-print(f"\n  Path : {save_path}")
+  ❌ Error 400
+  {"error_code":"INVALID_PARAMETER_VALUE","message":"Invalid export proto: instructions.example_question_sqls must be sorted by id","details":[{"@type":"type.googleapis.com/google.rpc.RequestInfo","request_id":"2475ce26-c0da-4f62-ba15-14f14f2e4b8f","serving_data":""}]}
 
-# ── Build the FULL outer wrapper — exactly what the API expects ───────────────
-# For POST (new space): includes parent_path, no space_id
-# For PATCH (update):   includes space_id, no parent_path
-# We save both versions so you can see the complete picture.
-
-full_payload_post = {
-    "title"           : NEW_TITLE,
-    "description"     : NEW_DESC,
-    "warehouse_id"    : WAREHOUSE_ID,
-    "parent_path"     : PARENT_PATH,
-    "serialized_space": json.dumps(ready_ss, indent=2, ensure_ascii=False)
-    #                   ↑ this is a JSON string nested inside the outer JSON
-}
-
-full_payload_patch = {
-    "space_id"        : SPACE_ID_2,
-    "title"           : outer2["title"],
-    "description"     : outer2.get("description", ""),
-    "warehouse_id"    : outer2["warehouse_id"],
-    "parent_path"     : outer2.get("parent_path", ""),
-    "serialized_space": json.dumps(ready_ss, indent=2, ensure_ascii=False)
-}
-
-# ── Save POST version (what Cell 6 will send) ─────────────────────────────────
-post_path  = save_path.replace(".json", "_POST.json")
-patch_path = save_path.replace(".json", "_PATCH.json")
-
-try:
-    # POST version
-    with open(post_path, "w", encoding="utf-8") as f:
-        json.dump(full_payload_post, f, indent=2, ensure_ascii=False)
-    print(f"\n  ✅ POST payload saved  : {post_path}")
-    print(f"     Size : {len(json.dumps(full_payload_post)):,} characters")
-
-    # PATCH version
-    with open(patch_path, "w", encoding="utf-8") as f:
-        json.dump(full_payload_patch, f, indent=2, ensure_ascii=False)
-    print(f"  ✅ PATCH payload saved : {patch_path}")
-    print(f"     Size : {len(json.dumps(full_payload_patch)):,} characters")
-
-    print(f"\n  Structure of saved file:")
-    print(f"    {{")
-    print(f"      title           : '{NEW_TITLE}'")
-    print(f"      description     : '...'")
-    print(f"      warehouse_id    : '{WAREHOUSE_ID}'")
-    print(f"      parent_path     : '{PARENT_PATH}'")
-    print(f"      serialized_space: '{{  ← JSON string")
-    print(f"        version       : {ready_ss.get('version','?')}")
-    print(f"        data_sources  : {{tables: {len(ready_ss.get('data_sources',{}).get('tables',[]))} items}}")
-    print(f"        instructions  : {{...}}")
-    print(f"        benchmarks    : {{questions: {len(ready_ss.get('benchmarks',{}).get('questions',[]))  if isinstance(ready_ss.get('benchmarks'),dict) else 0} items}}")
-    print(f"      }}'")
-    print(f"    }}")
-    print(f"\n  Open in Databricks file browser to inspect before running Cell 6 or 7.")
-
-except Exception as e:
-    print(f"\n  ❌ Failed: {e}")
-    print("  Create the folder first in the Databricks file browser.")
+  Checks:
+    • Did you run Cell 5 first?
+    • Is WAREHOUSE_ID correct? Do you have CAN USE on it?
+    • Does PARENT_PATH folder exist?
+    • Run Cell 4 with 'raw' to inspect the exact JSON being sent
