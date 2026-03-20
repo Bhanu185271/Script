@@ -1,18 +1,105 @@
-============================================================
-  CELL 7 — Update Space 2 In Place (PATCH)
-============================================================
+# ─────────────────────────────────────────────────────────────────────────────
+# CELL 5 — PREPARE: Sanitize + Sort only
+# No ID stripping — Space 1 and Space 2 ULIDs never collide
+# ─────────────────────────────────────────────────────────────────────────────
 
-  Space 1 'Test Genie Deployment Campaign & Content, Customer Journey and ATLAS, ACE and ES Insights v2 (1)'  →  source (read only)
-  Space 2 'Test Market and brand performance and Channel dynamics and Patient data (v1.4)'  →  will be REPLACED
+def fix_description(val):
+    if isinstance(val, list):
+        clean = [str(v) for v in val if v is not None and str(v).strip()]
+        return clean if clean else None
+    if isinstance(val, str) and val.strip():
+        return [val.strip()]
+    return None
 
-  ⚠️  Space 2 content will be fully overwritten.
+def sanitize_descriptions(ss):
+    for t in ss.get("data_sources", {}).get("tables", []):
+        if not isinstance(t, dict): continue
+        if "description" in t:
+            fixed = fix_description(t["description"])
+            if fixed: t["description"] = fixed
+            else:     del t["description"]
+        for c in t.get("column_configs", []):
+            if not isinstance(c, dict): continue
+            if "description" in c:
+                fixed = fix_description(c["description"])
+                if fixed: c["description"] = fixed
+                else:     del c["description"]
 
-  Sending PATCH...
+def sort_lists(ss):
+    """Sort all lists exactly as Databricks API requires."""
 
-  ❌ Error 400
-  {"error_code":"INVALID_PARAMETER_VALUE","message":"Invalid export proto: instructions.example_question_sqls must be sorted by id","details":[{"@type":"type.googleapis.com/google.rpc.RequestInfo","request_id":"0844bd11-6f1b-42a5-8ffe-7fe932e39d08","serving_data":""}]}
+    def by_id(lst):
+        """Sort by id. Items without id go to end."""
+        return sorted(
+            lst,
+            key=lambda x: x.get("id", "zzzzzzzzzzzzzzzz") if isinstance(x, dict) else "zzzzzzzzzzzzzzzz"
+        )
 
-  Checks:
-    • Did you run Cell 5 first?
-    • Do you have CAN EDIT on Space 2?
-    • Run Cell 4 with 'raw' to inspect the JSON
+    def by_identifier(lst):
+        return sorted(
+            lst,
+            key=lambda x: x.get("identifier", "") if isinstance(x, dict) else ""
+        )
+
+    ds   = ss.get("data_sources", {})
+    inst = ss.get("instructions", {})
+    snip = inst.get("sql_snippets", {})
+
+    if "tables" in ds:
+        ds["tables"] = by_identifier(ds["tables"])
+    if "metric_views" in ds:
+        ds["metric_views"] = by_identifier(ds["metric_views"])
+
+    for k in ("text_instructions", "example_question_sqls"):
+        if k in inst:
+            inst[k] = by_id(inst[k])
+
+    for k in ("filters", "expressions", "measures"):
+        if k in snip:
+            snip[k] = by_id(snip[k])
+
+    bm = ss.get("benchmarks", {})
+    if isinstance(bm, dict) and "questions" in bm:
+        bm["questions"] = by_id(bm["questions"])
+
+    cfg = ss.get("config", {})
+    if "sample_questions" in cfg:
+        cfg["sample_questions"] = by_id(cfg["sample_questions"])
+
+# ── Run ───────────────────────────────────────────────────────────────────────
+print("=" * 60)
+print("  CELL 5 — Preparing for API")
+print("=" * 60)
+
+ready_ss = copy.deepcopy(merged_ss)
+
+print("\n  Step 1: Sanitizing descriptions...")
+sanitize_descriptions(ready_ss)
+print("  ✅ All descriptions are ['string'] arrays")
+
+print("\n  Step 2: Sorting all lists...")
+sort_lists(ready_ss)
+print("  ✅ Tables sorted by identifier")
+print("  ✅ All instruction lists sorted by id")
+
+print("\n  Step 3: Validating JSON...")
+try:
+    test_str = json.dumps(ready_ss, ensure_ascii=False)
+    json.loads(test_str)
+    print(f"  ✅ Valid JSON — {len(test_str):,} characters")
+except Exception as e:
+    print(f"  ❌ JSON error: {e}")
+    raise
+
+# ── Quick check: verify example_question_sqls are sorted ─────────────────────
+ex_sqls = ready_ss.get("instructions", {}).get("example_question_sqls", [])
+ids = [x.get("id", "") for x in ex_sqls if isinstance(x, dict)]
+is_sorted = ids == sorted(ids)
+print(f"\n  Sort check — example_question_sqls ids sorted: {is_sorted}")
+if not is_sorted:
+    print(f"  ⚠️  IDs: {ids[:5]}")
+
+print("\n✅ ready_ss is prepared.")
+print("   ▶  Run Cell 5B to save to disk")
+print("   ▶  Run Cell 6 to CREATE new space")
+print("   ▶  Run Cell 7 to UPDATE Space 2 in place")
