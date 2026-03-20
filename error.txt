@@ -1,27 +1,27 @@
-# Write back as a single merged item
-if txt1_list:
-    # Add a blank newline separator before Space 2 content starts
-    separator = ["\r\n"]
-    txt1_list[0]["content"] = base_content + separator + added_content
-```
+# ── Safety check — warn if Space 2 already contains Space 1 tables ────────────
+ss1_identifiers = {
+    t.get("identifier","")
+    for t in ss1.get("data_sources",{}).get("tables",[])
+    if isinstance(t, dict)
+}
+ss2_identifiers = {
+    t.get("identifier","")
+    for t in ss2.get("data_sources",{}).get("tables",[])
+    if isinstance(t, dict)
+}
 
----
+already_merged = ss1_identifiers & ss2_identifiers
 
-That's the only change needed. The `"\r\n"` matches the exact line ending format already used in your Genie JSON (you can see `"\\r\\n"` throughout your uploaded file), so it stays consistent with the existing format.
-
-The result will be:
-```
-Space 1 content lines:   ["Rule 1...\r\n", "Rule 2...\r\n"]
-Separator:               ["\r\n"]
-Space 2 content lines:   ["Rule A...\r\n", "Rule B...\r\n"]
-
-Merged:                  ["Rule 1...\r\n", "Rule 2...\r\n", "\r\n", "Rule A...\r\n", "Rule B...\r\n"]
-```
-
-So in the Genie UI it renders as:
-```
-Rule 1
-Rule 2
-             ← blank line here
-Rule A
-Rule B
+if len(already_merged) == len(ss1_identifiers) and len(ss1_identifiers) > 0:
+    print("⚠️  WARNING: Space 2 already contains ALL tables from Space 1.")
+    print("   Space 2 may have already been patched previously.")
+    print("   Re-merging will DUPLICATE Space 1 content.")
+    print("   If you already ran PATCH successfully, DO NOT re-run this cell.")
+    print("   Reload the ORIGINAL Space 2 (before patching) if you need to re-merge.")
+elif already_merged:
+    print(f"⚠️  WARNING: {len(already_merged)} Space 1 table(s) already exist in Space 2:")
+    for t in already_merged:
+        print(f"   • {t}")
+    print("   This may indicate Space 2 was already partially merged.")
+else:
+    print("✅ Safe to merge — no overlap between Space 1 and Space 2 tables.")
