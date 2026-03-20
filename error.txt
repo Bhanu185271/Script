@@ -1,80 +1,107 @@
-# ── 2. TEXT INSTRUCTIONS ──────────────────────────────────────────────────
-    # API allows ONLY ONE item.
-    # Uses a MARKER to detect if Space 2 was already merged — no line comparison.
-    # Run once or many times → same result. Nothing skipped. Nothing missed.
+# ==============================================================================
+# GENIE SPACE — TABLE ACCESS CHECKER
+# ==============================================================================
+# Fetches all tables from a Genie space and runs SELECT * LIMIT 10
+# on each one to verify the service principal has access.
+# ==============================================================================
 
-    MERGE_MARKER = "=== Additional Instructions ==="
 
-    txt1_list = inst1.setdefault("text_instructions", [])
-    txt2_list = inst2.get("text_instructions", [])
+# ─────────────────────────────────────────────────────────────────────────────
+# CELL 1 — CONFIG
+# ─────────────────────────────────────────────────────────────────────────────
 
-    if txt2_list:
-        # Get Space 1 base content — all lines, nothing dropped
-        if txt1_list:
-            base_content = txt1_list[0].get("content", [])
-            if isinstance(base_content, str):
-                base_content = [base_content]
-            base_content = list(base_content)   # full copy, nothing lost
-        else:
-            base_content = []
+DATABRICKS_HOST = "https://<your-workspace>.cloud.databricks.com"  # No trailing slash
+TOKEN           = "<your-personal-access-token>"
+SPACE_ID        = "<your-genie-space-id>"
 
-        # Collect ALL lines from Space 2 — no filtering, no comparison, nothing skipped
-        incoming_content = []
-        for ti in txt2_list:
-            if not isinstance(ti, dict):
-                continue
-            c = ti.get("content", [])
-            if isinstance(c, str):  c = [c]
-            if isinstance(c, list): incoming_content.extend(c)
 
-        # Check if Space 2 content was already merged using the marker
-        already_merged = any(
-            MERGE_MARKER in str(line)
-            for line in base_content
-        )
+# ─────────────────────────────────────────────────────────────────────────────
+# CELL 2 — FETCH TABLES + RUN ACCESS CHECK
+# ─────────────────────────────────────────────────────────────────────────────
 
-        if not already_merged:
-            # First time — append ALL Space 2 lines after the marker
-            merged_content = (
-                base_content                        # ALL Space 1 lines
-                + ["\r\n"]                          # blank line separator
-                + [MERGE_MARKER + "\r\n"]           # marker — prevents re-merge on re-run
-                + incoming_content                  # ALL Space 2 lines, untouched
-            )
-            added_msg = f"{len(incoming_content)} line(s) added from Space 2"
-        else:
-            # Already merged — do nothing at all
-            merged_content = base_content
-            added_msg = "Space 2 already merged — skipped (marker found, re-run safe)"
+import requests, json
+from pyspark.sql import SparkSession
 
-        # Write back into the single item (Space 1's item is updated in place)
-        if txt1_list:
-            txt1_list[0]["content"] = merged_content
-        else:
-            # Space 1 had no instruction — create from Space 2's item
-            new_item = copy.deepcopy(txt2_list[0])
-            new_item["content"] = merged_content
-            txt1_list.append(new_item)
+spark = SparkSession.builder.getOrCreate()
 
-        report["text_instructions"] = {
-            "added"  : [added_msg],
-            "skipped": []
-        }
+HEADERS = {
+    "Authorization": f"Bearer {TOKEN}",
+    "Content-Type" : "application/json",
+}
 
-    else:
-        # Space 2 has no text instructions — nothing to merge
-        report["text_instructions"] = {"added": [], "skipped": []}
-```
+# ── Step 1: Fetch the Genie space ─────────────────────────────────────────────
+print("⏳ Fetching Genie space...")
 
----
+resp = requests.get(
+    f"{DATABRICKS_HOST}/api/2.0/genie/spaces/{SPACE_ID}",
+    headers=HEADERS,
+    params={"include_serialized_space": "true"},
+    timeout=30,
+)
 
-## What the merged instruction looks like in Genie
-```
-[Space 1 Rule 1]
-[Space 1 Rule 2]
-...all Space 1 lines...
+if resp.status_code != 200:
+    raise Exception(f"Failed to fetch space: {resp.status_code} {resp.text[:300]}")
 
-=== Additional Instructions ===
-[Space 2 Rule A]
-[Space 2 Rule B]
-...all Space 2 lines, nothing missed...
+outer = resp.json()
+raw   = outer.get("serialized_space")
+
+if raw is None:
+    raise KeyError("'serialized_space' missing in response.")
+
+ss     = json.loads(raw) if isinstance(raw, str) else raw
+tables = ss.get("data_sources", {}).get("tables", [])
+
+print(f"✅ Space loaded: '{outer.get('title','?')}'")
+print(f"   Tables found : {len(tables)}")
+print("=" * 60)
+
+# ── Step 2: Run SELECT * LIMIT 10 on each table ───────────────────────────────
+passed  = []
+failed  = []
+
+for t in tables:
+    if not isinstance(t, dict):
+        continue
+
+    identifier = t.get("identifier", "")
+    if not identifier:
+        continue
+
+    query = f"SELECT * FROM {identifier} LIMIT 10"
+    print(f"\n  Testing : {identifier}")
+
+    try:
+        df = spark.sql(query)
+        row_count = len(df.take(10))
+        print(f"  ✅ PASS — {row_count} row(s) returned")
+        passed.append(identifier)
+
+    except Exception as e:
+        error_msg = str(e).splitlines()[0][:120]   # first line of error only
+        print(f"  ❌ FAIL — {error_msg}")
+        failed.append({"table": identifier, "error": error_msg})
+
+# ── Step 3: Summary ───────────────────────────────────────────────────────────
+print("\n" + "=" * 60)
+print("  ACCESS CHECK SUMMARY")
+print("=" * 60)
+print(f"\n  Total tables : {len(tables)}")
+print(f"  ✅ Passed    : {len(passed)}")
+print(f"  ❌ Failed    : {len(failed)}")
+
+if passed:
+    print(f"\n  Tables with access:")
+    for t in passed:
+        print(f"    ✅  {t}")
+
+if failed:
+    print(f"\n  Tables WITHOUT access:")
+    for f in failed:
+        print(f"    ❌  {f['table']}")
+        print(f"        Error: {f['error']}")
+
+if not failed:
+    print("\n🎉 Service principal has access to ALL tables in this Genie space.")
+else:
+    print(f"\n⚠️  Grant SELECT privilege on the {len(failed)} failed table(s) above.")
+    print("   Run:  GRANT SELECT ON TABLE <catalog>.<schema>.<table> TO `<service-principal>`")
