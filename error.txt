@@ -1,18 +1,23 @@
 # ==============================================================================
-# GENIE SPACE MERGER — Final Fixed Version
+# GENIE SPACE MERGER — Clean Rewrite
 # ==============================================================================
-# Root cause of all "Invalid JSON" errors was ID handling:
-#   - IDs from Space 1 don't belong to Space 2
-#   - IDs from Space 2 don't belong to Space 1
-#   - Any ID we generate ourselves fails Databricks internal Protobuf validation
-#   FIX: Strip ALL IDs before sending. Databricks regenerates valid ones.
+# Lessons from all previous attempts:
 #
-# Other fixes applied:
-#   - data= instead of json= in requests (prevents double encoding)
-#   - ensure_ascii=True in json.dumps (prevents hidden unicode issues)
-#   - JSON round-trip validation before every API call
-#   - descriptions sanitized to ["string"] format
-#   - all lists sorted as API requires
+#   1. NEVER add custom keys like "_raw" — Databricks schema rejects them
+#   2. NEVER transform item structure — copy items exactly as they came from API
+#   3. IDs from Space 2 items must be STRIPPED when adding to merged space
+#      because IDs are space-specific — cross-space IDs fail Protobuf validation
+#   4. Space 1 items keep their IDs since Space 1 is the base
+#   5. serialized_space must be json.dumps(dict) — a string inside the payload
+#      Use requests json=payload (correct) — it handles encoding properly
+#   6. description must always be ["string"] array, never plain "string"
+#   7. Tables sorted by identifier, all other lists sorted by id
+#
+# NEW in this version:
+#   - Cell 4: Preview the exact merged JSON before sending anything to API
+#   - Cell 5: Prepare + validate (sanitize, sort, strip IDs) — separate from save
+#   - Cell 6: POST — create new space  (recommended)
+#   - Cell 7: PATCH — update Space 2 in place
 # ==============================================================================
 
 
@@ -20,20 +25,21 @@
 # CELL 1 — CONFIG
 # ─────────────────────────────────────────────────────────────────────────────
 
-DATABRICKS_HOST  = "https://<your-workspace>.cloud.databricks.com"  # No trailing slash
-TOKEN            = "<your-personal-access-token>"
-SPACE_ID_1       = "<space-id-1>"    # Source space  (e.g. Sales)
-SPACE_ID_2       = "<space-id-2>"    # Target space  (e.g. Revenue)
+DATABRICKS_HOST = "https://<your-workspace>.cloud.databricks.com"  # No trailing slash
+TOKEN           = "<your-personal-access-token>"
+SPACE_ID_1      = "<space-id-1>"    # Base space  (e.g. Sales)
+SPACE_ID_2      = "<space-id-2>"    # Second space (e.g. Revenue)
 
-# Used only for Option A — Create new space
-WAREHOUSE_ID     = "<your-warehouse-id>"
-NEW_SPACE_TITLE  = "Sales + Revenue (Merged)"
-NEW_SPACE_DESC   = "Merged Genie space combining Sales and Revenue"
-PARENT_PATH      = "/Workspace/Users/<your-email>"
+# Used only for Cell 6 — Create new space
+WAREHOUSE_ID    = "<your-warehouse-id>"
+NEW_TITLE       = "Sales + Revenue (Merged)"
+NEW_DESC        = "Merged Genie space combining Sales and Revenue"
+PARENT_PATH     = "/Workspace/Users/<your-email>"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CELL 2 — HELPERS + LOAD BOTH SPACES
+# CELL 2 — LOAD BOTH SPACES
+# Run once. Loads both spaces and prints a summary.
 # ─────────────────────────────────────────────────────────────────────────────
 
 import requests, json, copy
@@ -43,41 +49,8 @@ HEADERS = {
     "Content-Type" : "application/json",
 }
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
-def safe_str(val):
-    """Always returns a clean string — handles None, list, dict, str."""
-    if val is None:           return ""
-    if isinstance(val, list): return str(val[0]) if val else ""
-    if isinstance(val, dict): return str(list(val.values())[0]) if val else ""
-    return str(val)
-
-def safe_list(val):
-    """Always returns description as ['string'] — API requirement."""
-    if val is None or val == "": return []
-    if isinstance(val, list):    return [str(val[0])] if val else []
-    return [str(val)]
-
-def as_dict(item):
-    """Normalise any item to a dict — handles str/list/dict gracefully."""
-    if isinstance(item, dict): return item
-    if isinstance(item, str):  return {"_raw": item}
-    if isinstance(item, list): return {"_raw": safe_str(item)}
-    return {}
-
-def extract_text(item, *keys):
-    """Pull text from a dict-or-string item, trying each key in order."""
-    d = as_dict(item)
-    for key in keys:
-        val = d.get(key)
-        if val is not None:
-            return safe_str(val)
-    raw = d.get("_raw")
-    if raw: return str(raw)
-    return safe_str(item)
-
 def fetch_space(space_id):
-    """Fetch a Genie space and return (space_data dict, serialized_space dict)."""
+    """Fetch a Genie space. Returns (space_meta dict, serialized_space dict)."""
     resp = requests.get(
         f"{DATABRICKS_HOST}/api/2.0/genie/spaces/{space_id}",
         headers=HEADERS,
@@ -85,416 +58,253 @@ def fetch_space(space_id):
         timeout=30,
     )
     if resp.status_code != 200:
-        raise Exception(f"Failed to fetch {space_id}: {resp.status_code} {resp.text}")
-    data = resp.json()
-    raw  = data.get("serialized_space")
+        raise Exception(f"HTTP {resp.status_code} fetching {space_id}: {resp.text}")
+
+    meta = resp.json()
+    raw  = meta.get("serialized_space")
     if raw is None:
-        print("Keys returned:", list(data.keys()))
-        raise KeyError(f"serialized_space missing for space {space_id}")
-    parsed = json.loads(raw) if isinstance(raw, str) else raw
-    return data, parsed
-
-# ── THE KEY FIX 1 — Strip all IDs ────────────────────────────────────────────
-# IDs in serialized_space are space-specific — they belong to the space they
-# came from. When merging two spaces, mixing IDs from both causes Databricks
-# Protobuf validation to fail silently with "Invalid JSON".
-# Any ID we generate ourselves also fails because Databricks uses a specific
-# internal ULID format (32-char hex with timestamp prefix).
-# Solution: remove every "id" field — Databricks regenerates valid ones on save.
-
-def strip_all_ids(ss):
-    """
-    Recursively remove every 'id' key from the serialized_space dict.
-    Databricks will auto-generate fresh valid IDs when the space is saved.
-    This fixes ALL ID-related "Invalid JSON" errors.
-    """
-    s = copy.deepcopy(ss)
-
-    def _strip(obj):
-        if isinstance(obj, dict):
-            obj.pop("id", None)        # remove id at this level
-            for v in obj.values():
-                _strip(v)              # recurse into all values
-        elif isinstance(obj, list):
-            for item in obj:
-                _strip(item)           # recurse into list items
-
-    _strip(s)
-    return s
-
-# ── THE KEY FIX 2 — sanitize_and_sort ────────────────────────────────────────
-# API requires specific sort orders and description format.
-
-def sanitize_and_sort(ss):
-    """
-    Applies all API-required sorts and fixes description format.
-    Must be called on merged_ss before strip_all_ids and before saving.
-    """
-    s = copy.deepcopy(ss)
-
-    def sort_by(lst, key, default=""):
-        return sorted(
-            lst,
-            key=lambda x: x.get(key, default) if isinstance(x, dict) else default
+        raise KeyError(
+            f"'serialized_space' not in response for {space_id}.\n"
+            f"Keys returned: {list(meta.keys())}\n"
+            f"Make sure include_serialized_space=true is supported on your workspace."
         )
+    ss = json.loads(raw) if isinstance(raw, str) else raw
+    return meta, ss
 
-    def fix_desc(val):
-        """Ensure description is always ['string'] not 'string' or None."""
-        if val is None:           return None
-        if isinstance(val, list): return [str(val[0])] if val else None
-        if isinstance(val, str) and val.strip(): return [val]
-        return None
+def safe_str(val):
+    """Safely convert any value to a plain string."""
+    if val is None:           return ""
+    if isinstance(val, list): return str(val[0]) if val else ""
+    return str(val)
 
-    # ── data_sources ──────────────────────────────────────────────────────────
-    ds     = s.setdefault("data_sources", {})
-    tables = ds.get("tables", [])
-
-    for t in tables:
-        if not isinstance(t, dict): continue
-        if "description" in t:
-            fixed = fix_desc(t["description"])
-            if fixed: t["description"] = fixed
-            else:     del t["description"]
-        for c in t.get("column_configs", []):
-            if not isinstance(c, dict): continue
-            if "description" in c:
-                fixed = fix_desc(c["description"])
-                if fixed: c["description"] = fixed
-                else:     del c["description"]
-
-    # Sort tables by identifier — API strict requirement
-    ds["tables"] = sort_by(tables, "identifier")
-
-    if "metric_views" in ds:
-        ds["metric_views"] = sort_by(ds["metric_views"], "identifier")
-
-    # ── instructions ──────────────────────────────────────────────────────────
-    inst = s.setdefault("instructions", {})
-
-    for key in ("join_specs", "text_instructions", "example_question_sqls"):
-        if key in inst:
-            inst[key] = sort_by(inst[key], "id")
-
-    snip = inst.setdefault("sql_snippets", {})
-    for key in ("filters", "expressions", "measures"):
-        if key in snip:
-            snip[key] = sort_by(snip[key], "id")
-
-    # ── benchmarks + sample_questions ─────────────────────────────────────────
-    if "benchmarks" in s:
-        s["benchmarks"] = sort_by(s["benchmarks"], "id")
-
-    cfg = s.setdefault("config", {})
-    if "sample_questions" in cfg:
-        cfg["sample_questions"] = sort_by(cfg["sample_questions"], "id")
-
-    return s
-
-# ── THE KEY FIX 3 — build_raw_payload ────────────────────────────────────────
-# serialized_space must be a JSON string nested inside the outer JSON object.
-# Using json= in requests double-encodes it, breaking the inner structure.
-# We build the full payload as a raw string and use data= instead of json=.
-
-def build_raw_payload(fields, ready_ss):
-    """
-    Builds the complete API payload as a raw JSON string.
-    ensure_ascii=True converts all unicode chars to safe ASCII sequences,
-    preventing hidden character issues in Databricks Protobuf parser.
-    """
-    inner   = json.dumps(ready_ss, ensure_ascii=True)
-    payload = {**fields, "serialized_space": inner}
-    return json.dumps(payload, ensure_ascii=True)
-
-def validate_json(ss):
-    """Round-trip test — catches bad values locally before wasting an API call."""
-    try:
-        result = json.loads(json.dumps(ss, ensure_ascii=True))
-        return True, len(json.dumps(result))
-    except Exception as e:
-        return False, str(e)
-
-def print_space_summary(label, space_data, ss):
-    tables      = ss.get("data_sources", {}).get("tables", [])
-    mv          = ss.get("data_sources", {}).get("metric_views", [])
-    joins       = ss.get("instructions", {}).get("join_specs", [])
-    txt         = ss.get("instructions", {}).get("text_instructions", [])
-    ex_sqls     = ss.get("instructions", {}).get("example_question_sqls", [])
-    filters     = ss.get("instructions", {}).get("sql_snippets", {}).get("filters", [])
-    expressions = ss.get("instructions", {}).get("sql_snippets", {}).get("expressions", [])
-    measures    = ss.get("instructions", {}).get("sql_snippets", {}).get("measures", [])
-    benchmarks  = ss.get("benchmarks", [])
-    sample_qs   = ss.get("config", {}).get("sample_questions", [])
-
-    print(f"\n  {label}: '{space_data['title']}'")
-    print(f"  {'─' * 54}")
-    print(f"    Tables            : {len(tables)}")
-    for t in tables:
+def summarize(label, meta, ss):
+    ds   = ss.get("data_sources", {})
+    inst = ss.get("instructions", {})
+    snip = inst.get("sql_snippets", {})
+    print(f"\n  {label}: '{meta['title']}'")
+    print(f"  {'─' * 52}")
+    print(f"    Tables            : {len(ds.get('tables', []))}")
+    for t in ds.get("tables", []):
         if isinstance(t, dict):
-            cols = len(t.get("column_configs", []))
-            print(f"      • {t.get('identifier','?')}  ({cols} columns)")
-    print(f"    Metric Views      : {len(mv)}")
-    print(f"    Joins             : {len(joins)}")
-    print(f"    Text Instructions : {len(txt)}")
-    print(f"    Example SQLs      : {len(ex_sqls)}")
-    print(f"    Filters           : {len(filters)}")
-    print(f"    Expressions       : {len(expressions)}")
-    print(f"    Measures          : {len(measures)}")
-    print(f"    Benchmarks        : {len(benchmarks)}")
-    print(f"    Sample Questions  : {len(sample_qs)}")
+            print(f"      • {t.get('identifier','?')}  ({len(t.get('column_configs',[]))} cols)")
+    print(f"    Metric Views      : {len(ds.get('metric_views', []))}")
+    print(f"    Joins             : {len(inst.get('join_specs', []))}")
+    print(f"    Text Instructions : {len(inst.get('text_instructions', []))}")
+    print(f"    Example SQLs      : {len(inst.get('example_question_sqls', []))}")
+    print(f"    Filters           : {len(snip.get('filters', []))}")
+    print(f"    Expressions       : {len(snip.get('expressions', []))}")
+    print(f"    Measures          : {len(snip.get('measures', []))}")
+    print(f"    Benchmarks        : {len(ss.get('benchmarks', []))}")
+    print(f"    Sample Questions  : {len(ss.get('config', {}).get('sample_questions', []))}")
 
-# ── Load both spaces ──────────────────────────────────────────────────────────
 print("⏳ Loading spaces...")
-space_data_1, ss1 = fetch_space(SPACE_ID_1)
-space_data_2, ss2 = fetch_space(SPACE_ID_2)
+meta1, ss1 = fetch_space(SPACE_ID_1)
+meta2, ss2 = fetch_space(SPACE_ID_2)
 
 print("\n" + "=" * 60)
-print("  Both Spaces Loaded")
+print("  Both Spaces Loaded Successfully")
 print("=" * 60)
-print_space_summary("Space 1", space_data_1, ss1)
-print_space_summary("Space 2", space_data_2, ss2)
+summarize("Space 1 (base)", meta1, ss1)
+summarize("Space 2", meta2, ss2)
 print("\n✅ Ready. Run Cell 3 to merge.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CELL 3 — MERGE
 # ─────────────────────────────────────────────────────────────────────────────
+#
+# Rules:
+#   - Space 1 is the BASE. Space 1 always wins on conflicts.
+#   - Items from Space 2 are copied VERBATIM (no transformation, no new keys)
+#   - Only proper dict items are merged — non-dict items are skipped safely
+#   - IDs are handled in Cell 5 (prepare step) not here
+#
+# ─────────────────────────────────────────────────────────────────────────────
 
-def merge_column_configs(base_cols, incoming_cols):
-    """Merge columns from Space 2 into Space 1 list. Space 1 wins on conflict."""
-    base_map = {c["column_name"]: c for c in base_cols if isinstance(c, dict)}
+def get_dedup_key(section, item):
+    """
+    Returns the deduplication key for an item based on which section it's in.
+    Used to avoid adding duplicates from Space 2 that already exist in Space 1.
+    """
+    if not isinstance(item, dict):
+        return None
+    keys = {
+        "tables"               : lambda x: x.get("identifier", ""),
+        "metric_views"         : lambda x: x.get("identifier", ""),
+        "join_specs"           : lambda x: tuple(sorted([
+                                    x.get("left",  {}).get("identifier", "") if isinstance(x.get("left"),  dict) else "",
+                                    x.get("right", {}).get("identifier", "") if isinstance(x.get("right"), dict) else "",
+                                 ])),
+        "text_instructions"    : lambda x: safe_str(x.get("content", "")),
+        "example_question_sqls": lambda x: safe_str(x.get("question", "")),
+        "filters"              : lambda x: x.get("display_name", ""),
+        "expressions"          : lambda x: x.get("alias", ""),
+        "measures"             : lambda x: x.get("alias", ""),
+        "benchmarks"           : lambda x: safe_str(x.get("question", "")),
+        "sample_questions"     : lambda x: safe_str(x.get("question", "")),
+    }
+    fn = keys.get(section)
+    return fn(item) if fn else None
+
+
+def merge_column_configs(base_list, inc_list):
+    """
+    Merge column_configs from Space 2 into Space 1.
+    Space 1 wins: existing columns are enriched with missing fields only.
+    New columns are appended as-is.
+    """
+    base_map = {c["column_name"]: c for c in base_list if isinstance(c, dict) and "column_name" in c}
     added, enriched = [], []
-    for inc_col in incoming_cols:
-        if not isinstance(inc_col, dict): continue
-        col_name = inc_col.get("column_name")
-        if not col_name: continue
-        if col_name not in base_map:
-            base_cols.append(copy.deepcopy(inc_col))
-            base_map[col_name] = base_cols[-1]
-            added.append(col_name)
+
+    for col in inc_list:
+        if not isinstance(col, dict) or "column_name" not in col:
+            continue
+        name = col["column_name"]
+        if name not in base_map:
+            # New column — add it exactly as it came from Space 2
+            base_list.append(copy.deepcopy(col))
+            base_map[name] = base_list[-1]
+            added.append(name)
         else:
-            base_col = base_map[col_name]
+            # Existing column — only fill in fields that Space 1 doesn't have
+            base_col = base_map[name]
             changed  = False
-            for field in ["description", "synonyms",
-                          "get_example_values", "build_value_dictionary"]:
-                if field not in base_col and field in inc_col:
-                    base_col[field] = copy.deepcopy(inc_col[field])
+            for field in ["description", "synonyms", "get_example_values",
+                          "build_value_dictionary", "enable_entity_matching", "exclude"]:
+                if field not in base_col and field in col:
+                    base_col[field] = copy.deepcopy(col[field])
                     changed = True
             if changed:
-                enriched.append(col_name)
-    return base_cols, added, enriched
+                enriched.append(name)
+
+    return added, enriched
 
 
-def merge_spaces(ss1, ss2):
+def merge_list(merged_list, inc_list, section):
     """
-    Full merge of ss2 into ss1. Space 1 always wins on conflicts.
-    IDs are NOT touched here — strip_all_ids() handles them before save.
+    Generic merge for a list of items (joins, measures, benchmarks, etc.)
+    Deduplicates using get_dedup_key(). Copies items verbatim from Space 2.
+    """
+    existing_keys = set()
+    for item in merged_list:
+        key = get_dedup_key(section, item)
+        if key is not None:
+            existing_keys.add(key)
+
+    added, skipped = [], []
+    for item in inc_list:
+        if not isinstance(item, dict):
+            continue
+        key = get_dedup_key(section, item)
+        if key is None:
+            continue
+        if key not in existing_keys:
+            # Copy item VERBATIM — no transformation, no extra keys
+            merged_list.append(copy.deepcopy(item))
+            existing_keys.add(key)
+            added.append(str(key)[:70])
+        else:
+            skipped.append(str(key)[:70])
+
+    return added, skipped
+
+
+def do_merge(ss1, ss2):
+    """
+    Full merge of ss2 into ss1.
+    Returns (merged_dict, report_dict).
     """
     merged = copy.deepcopy(ss1)
     report = {}
 
-    # ── 1. TABLES ─────────────────────────────────────────────────────────────
+    ds1   = merged.setdefault("data_sources", {})
+    inst1 = merged.setdefault("instructions", {})
+    snip1 = inst1.setdefault("sql_snippets", {})
+    ds2   = ss2.get("data_sources", {})
+    inst2 = ss2.get("instructions", {})
+    snip2 = inst2.get("sql_snippets", {})
+
+    # ── TABLES ────────────────────────────────────────────────────────────────
+    tbl_list = ds1.setdefault("tables", [])
     existing_tables = {
         t.get("identifier", ""): t
-        for t in merged.setdefault("data_sources", {}).setdefault("tables", [])
-        if isinstance(t, dict)
+        for t in tbl_list if isinstance(t, dict)
     }
-    tbl_added, tbl_enriched, col_added, col_enriched = [], [], {}, {}
+    tbl_added, tbl_enriched = [], []
+    col_added, col_enriched = {}, {}
 
-    for inc_t in ss2.get("data_sources", {}).get("tables", []):
-        if not isinstance(inc_t, dict): continue
-        ident = inc_t.get("identifier", "")
-        if not ident: continue
+    for t in ds2.get("tables", []):
+        if not isinstance(t, dict) or not t.get("identifier"):
+            continue
+        ident = t["identifier"]
         if ident not in existing_tables:
-            merged["data_sources"]["tables"].append(copy.deepcopy(inc_t))
-            existing_tables[ident] = merged["data_sources"]["tables"][-1]
+            tbl_list.append(copy.deepcopy(t))
+            existing_tables[ident] = tbl_list[-1]
             tbl_added.append(ident)
         else:
             base_t = existing_tables[ident]
-            if not base_t.get("description") and inc_t.get("description"):
-                base_t["description"] = safe_list(inc_t["description"])
-                tbl_enriched.append(f"{ident} (description filled)")
-            base_cols = base_t.setdefault("column_configs", [])
-            inc_cols  = inc_t.get("column_configs", [])
-            if inc_cols:
-                _, ca, ce = merge_column_configs(base_cols, inc_cols)
+            # Fill missing table description
+            if not base_t.get("description") and t.get("description"):
+                base_t["description"] = copy.deepcopy(t["description"])
+                tbl_enriched.append(f"{ident} (description added)")
+            # Merge column_configs
+            if t.get("column_configs"):
+                ca, ce = merge_column_configs(
+                    base_t.setdefault("column_configs", []),
+                    t["column_configs"]
+                )
                 if ca: col_added[ident]    = ca
                 if ce: col_enriched[ident] = ce
 
     report["tables"] = {
         "added": tbl_added, "enriched": tbl_enriched,
-        "columns_added": col_added, "cols_enriched": col_enriched,
+        "cols_added": col_added, "cols_enriched": col_enriched
     }
 
-    # ── 2. METRIC VIEWS ───────────────────────────────────────────────────────
-    existing_mv = {
-        mv.get("identifier", "")
-        for mv in merged["data_sources"].setdefault("metric_views", [])
-        if isinstance(mv, dict)
-    }
-    mv_added = []
-    for mv in ss2.get("data_sources", {}).get("metric_views", []):
-        if not isinstance(mv, dict): continue
-        ident = mv.get("identifier", "")
-        if ident and ident not in existing_mv:
-            merged["data_sources"]["metric_views"].append(copy.deepcopy(mv))
-            existing_mv.add(ident)
-            mv_added.append(ident)
-    report["metric_views"] = {"added": mv_added}
+    # ── METRIC VIEWS ──────────────────────────────────────────────────────────
+    mv_list = ds1.setdefault("metric_views", [])
+    added, skipped = merge_list(mv_list, ds2.get("metric_views", []), "metric_views")
+    report["metric_views"] = {"added": added, "skipped": skipped}
 
-    # ── 3. JOINS ──────────────────────────────────────────────────────────────
-    def join_key(j):
-        if not isinstance(j, dict): return ("", "")
-        l = j.get("left",  {}).get("identifier", "") if isinstance(j.get("left"),  dict) else ""
-        r = j.get("right", {}).get("identifier", "") if isinstance(j.get("right"), dict) else ""
-        return tuple(sorted([l, r]))
+    # ── JOINS ─────────────────────────────────────────────────────────────────
+    join_list = inst1.setdefault("join_specs", [])
+    added, skipped = merge_list(join_list, inst2.get("join_specs", []), "join_specs")
+    report["joins"] = {"added": added, "skipped": skipped}
 
-    existing_joins = {
-        join_key(j)
-        for j in merged.setdefault("instructions", {}).setdefault("join_specs", [])
-        if isinstance(j, dict)
-    }
-    joins_added, joins_skipped = [], []
-    for j in ss2.get("instructions", {}).get("join_specs", []):
-        if not isinstance(j, dict): continue
-        jk = join_key(j)
-        if jk not in existing_joins:
-            merged["instructions"]["join_specs"].append(copy.deepcopy(j))
-            existing_joins.add(jk)
-            joins_added.append(f"{jk[0]} ↔ {jk[1]}")
-        else:
-            joins_skipped.append(f"{jk[0]} ↔ {jk[1]}")
-    report["joins"] = {"added": joins_added, "skipped": joins_skipped}
+    # ── TEXT INSTRUCTIONS ─────────────────────────────────────────────────────
+    txt_list = inst1.setdefault("text_instructions", [])
+    added, skipped = merge_list(txt_list, inst2.get("text_instructions", []), "text_instructions")
+    report["text_instructions"] = {"added": added, "skipped": skipped}
 
-    # ── 4. TEXT INSTRUCTIONS ──────────────────────────────────────────────────
-    existing_txt = {
-        extract_text(ti, "content")
-        for ti in merged["instructions"].setdefault("text_instructions", [])
-    }
-    txt_added, txt_skipped = [], []
-    for ti in ss2.get("instructions", {}).get("text_instructions", []):
-        content = extract_text(ti, "content")
-        if content not in existing_txt:
-            new_ti = copy.deepcopy(as_dict(ti))
-            if "content" not in new_ti and "_raw" in new_ti:
-                new_ti["content"] = new_ti.pop("_raw")
-            merged["instructions"]["text_instructions"].append(new_ti)
-            existing_txt.add(content)
-            txt_added.append(content[:70])
-        else:
-            txt_skipped.append(content[:70])
-    report["text_instructions"] = {"added": txt_added, "skipped": txt_skipped}
+    # ── EXAMPLE SQLs ──────────────────────────────────────────────────────────
+    ex_list = inst1.setdefault("example_question_sqls", [])
+    added, skipped = merge_list(ex_list, inst2.get("example_question_sqls", []), "example_question_sqls")
+    report["example_sqls"] = {"added": added, "skipped": skipped}
 
-    # ── 5. EXAMPLE SQLs ───────────────────────────────────────────────────────
-    existing_ex = {
-        extract_text(ex, "question")
-        for ex in merged["instructions"].setdefault("example_question_sqls", [])
-    }
-    ex_added, ex_skipped = [], []
-    for ex in ss2.get("instructions", {}).get("example_question_sqls", []):
-        q = extract_text(ex, "question")
-        if q not in existing_ex:
-            new_ex = copy.deepcopy(as_dict(ex))
-            if "question" not in new_ex and "_raw" in new_ex:
-                new_ex["question"] = new_ex.pop("_raw")
-            merged["instructions"]["example_question_sqls"].append(new_ex)
-            existing_ex.add(q)
-            ex_added.append(q[:70])
-        else:
-            ex_skipped.append(q[:70])
-    report["example_sqls"] = {"added": ex_added, "skipped": ex_skipped}
+    # ── FILTERS ───────────────────────────────────────────────────────────────
+    flt_list = snip1.setdefault("filters", [])
+    added, skipped = merge_list(flt_list, snip2.get("filters", []), "filters")
+    report["filters"] = {"added": added, "skipped": skipped}
 
-    # ── 6. FILTERS ────────────────────────────────────────────────────────────
-    snippets = merged["instructions"].setdefault("sql_snippets", {})
-    existing_filters = {
-        f.get("display_name", "")
-        for f in snippets.setdefault("filters", [])
-        if isinstance(f, dict)
-    }
-    filters_added, filters_skipped = [], []
-    for f in ss2.get("instructions", {}).get("sql_snippets", {}).get("filters", []):
-        if not isinstance(f, dict): continue
-        name = f.get("display_name", "")
-        if name not in existing_filters:
-            snippets["filters"].append(copy.deepcopy(f))
-            existing_filters.add(name)
-            filters_added.append(name)
-        else:
-            filters_skipped.append(name)
-    report["filters"] = {"added": filters_added, "skipped": filters_skipped}
+    # ── EXPRESSIONS ───────────────────────────────────────────────────────────
+    exp_list = snip1.setdefault("expressions", [])
+    added, skipped = merge_list(exp_list, snip2.get("expressions", []), "expressions")
+    report["expressions"] = {"added": added, "skipped": skipped}
 
-    # ── 7. EXPRESSIONS ────────────────────────────────────────────────────────
-    existing_exprs = {
-        e.get("alias", "")
-        for e in snippets.setdefault("expressions", [])
-        if isinstance(e, dict)
-    }
-    exprs_added, exprs_skipped = [], []
-    for e in ss2.get("instructions", {}).get("sql_snippets", {}).get("expressions", []):
-        if not isinstance(e, dict): continue
-        alias = e.get("alias", "")
-        if alias not in existing_exprs:
-            snippets["expressions"].append(copy.deepcopy(e))
-            existing_exprs.add(alias)
-            exprs_added.append(alias)
-        else:
-            exprs_skipped.append(alias)
-    report["expressions"] = {"added": exprs_added, "skipped": exprs_skipped}
+    # ── MEASURES ──────────────────────────────────────────────────────────────
+    msr_list = snip1.setdefault("measures", [])
+    added, skipped = merge_list(msr_list, snip2.get("measures", []), "measures")
+    report["measures"] = {"added": added, "skipped": skipped}
 
-    # ── 8. MEASURES ───────────────────────────────────────────────────────────
-    existing_measures = {
-        m.get("alias", "")
-        for m in snippets.setdefault("measures", [])
-        if isinstance(m, dict)
-    }
-    measures_added, measures_skipped = [], []
-    for m in ss2.get("instructions", {}).get("sql_snippets", {}).get("measures", []):
-        if not isinstance(m, dict): continue
-        alias = m.get("alias", "")
-        if alias not in existing_measures:
-            snippets["measures"].append(copy.deepcopy(m))
-            existing_measures.add(alias)
-            measures_added.append(alias)
-        else:
-            measures_skipped.append(alias)
-    report["measures"] = {"added": measures_added, "skipped": measures_skipped}
+    # ── BENCHMARKS ────────────────────────────────────────────────────────────
+    bm_list = merged.setdefault("benchmarks", [])
+    added, skipped = merge_list(bm_list, ss2.get("benchmarks", []), "benchmarks")
+    report["benchmarks"] = {"added": added, "skipped": skipped}
 
-    # ── 9. BENCHMARKS ─────────────────────────────────────────────────────────
-    existing_bm = {
-        extract_text(b, "question")
-        for b in merged.setdefault("benchmarks", [])
-    }
-    bm_added, bm_skipped = [], []
-    for b in ss2.get("benchmarks", []):
-        q = extract_text(b, "question")
-        if q not in existing_bm:
-            new_b = copy.deepcopy(as_dict(b))
-            if "question" not in new_b and "_raw" in new_b:
-                new_b["question"] = new_b.pop("_raw")
-            merged["benchmarks"].append(new_b)
-            existing_bm.add(q)
-            bm_added.append(q[:70])
-        else:
-            bm_skipped.append(q[:70])
-    report["benchmarks"] = {"added": bm_added, "skipped": bm_skipped}
-
-    # ── 10. SAMPLE QUESTIONS ──────────────────────────────────────────────────
-    existing_sq = {
-        extract_text(sq, "question")
-        for sq in merged.setdefault("config", {}).setdefault("sample_questions", [])
-    }
-    sq_added, sq_skipped = [], []
-    for sq in ss2.get("config", {}).get("sample_questions", []):
-        q = extract_text(sq, "question")
-        if q not in existing_sq:
-            new_sq = copy.deepcopy(as_dict(sq))
-            if "question" not in new_sq and "_raw" in new_sq:
-                new_sq["question"] = new_sq.pop("_raw")
-            merged["config"]["sample_questions"].append(new_sq)
-            existing_sq.add(q)
-            sq_added.append(q[:70])
-        else:
-            sq_skipped.append(q[:70])
-    report["sample_questions"] = {"added": sq_added, "skipped": sq_skipped}
+    # ── SAMPLE QUESTIONS ──────────────────────────────────────────────────────
+    sq_list = merged.setdefault("config", {}).setdefault("sample_questions", [])
+    added, skipped = merge_list(sq_list, ss2.get("config", {}).get("sample_questions", []), "sample_questions")
+    report["sample_questions"] = {"added": added, "skipped": skipped}
 
     # Preserve highest version
     merged["version"] = max(ss1.get("version", 1), ss2.get("version", 1))
@@ -503,8 +313,8 @@ def merge_spaces(ss1, ss2):
 
 
 # ── Run ───────────────────────────────────────────────────────────────────────
-print("\n⏳ Merging...")
-merged_ss, report = merge_spaces(ss1, ss2)
+print("⏳ Merging...")
+merged_ss, report = do_merge(ss1, ss2)
 
 # ── Print report ──────────────────────────────────────────────────────────────
 LABELS = {
@@ -527,36 +337,39 @@ print("=" * 60)
 total_added = total_skipped = 0
 for key, label in LABELS.items():
     r        = report.get(key, {})
-    added    = r.get("added",   [])
-    skipped  = r.get("skipped", [])
+    added    = r.get("added",    [])
+    skipped  = r.get("skipped",  [])
     enriched = r.get("enriched", [])
-    c_added  = r.get("columns_added", {})
-    c_enr    = r.get("cols_enriched", {})
+    ca       = r.get("cols_added",    {})
+    ce       = r.get("cols_enriched", {})
     total_added   += len(added)
     total_skipped += len(skipped)
 
     print(f"\n  {label}")
-    for item in added:    print(f"    +  {item}")
-    for item in enriched: print(f"    ~  {item}  (filled missing fields)")
-    for tbl, cols in c_added.items():
-        for col in cols: print(f"    +  {tbl} → column: {col}")
-    for tbl, cols in c_enr.items():
-        for col in cols: print(f"    ~  {tbl} → column: {col}  (enriched)")
-    for item in skipped:  print(f"    =  {item}  (Space 1 version kept)")
-    if not added and not enriched and not c_added and not c_enr and not skipped:
-        print(f"    (nothing to merge in this section)")
+    for x in added:    print(f"    +  {x}")
+    for x in enriched: print(f"    ~  {x}")
+    for t, cols in ca.items():
+        for c in cols: print(f"    +  {t} → col: {c}")
+    for t, cols in ce.items():
+        for c in cols: print(f"    ~  {t} → col: {c}  (enriched)")
+    for x in skipped:  print(f"    =  {x}  (Space 1 version kept)")
+    if not added and not enriched and not ca and not ce and not skipped:
+        print(f"    (nothing to merge)")
 
-# ── Counts ────────────────────────────────────────────────────────────────────
+# ── Counts table ──────────────────────────────────────────────────────────────
 def count_all(ss):
+    ds   = ss.get("data_sources", {})
+    inst = ss.get("instructions", {})
+    snip = inst.get("sql_snippets", {})
     return {
-        "Tables"      : len(ss.get("data_sources", {}).get("tables", [])),
-        "Metric Views": len(ss.get("data_sources", {}).get("metric_views", [])),
-        "Joins"       : len(ss.get("instructions", {}).get("join_specs", [])),
-        "Text Inst"   : len(ss.get("instructions", {}).get("text_instructions", [])),
-        "Example SQLs": len(ss.get("instructions", {}).get("example_question_sqls", [])),
-        "Filters"     : len(ss.get("instructions", {}).get("sql_snippets", {}).get("filters", [])),
-        "Expressions" : len(ss.get("instructions", {}).get("sql_snippets", {}).get("expressions", [])),
-        "Measures"    : len(ss.get("instructions", {}).get("sql_snippets", {}).get("measures", [])),
+        "Tables"      : len(ds.get("tables", [])),
+        "Metric Views": len(ds.get("metric_views", [])),
+        "Joins"       : len(inst.get("join_specs", [])),
+        "Text Inst"   : len(inst.get("text_instructions", [])),
+        "Example SQLs": len(inst.get("example_question_sqls", [])),
+        "Filters"     : len(snip.get("filters", [])),
+        "Expressions" : len(snip.get("expressions", [])),
+        "Measures"    : len(snip.get("measures", [])),
         "Benchmarks"  : len(ss.get("benchmarks", [])),
         "Sample Qs"   : len(ss.get("config", {}).get("sample_questions", [])),
     }
@@ -568,255 +381,347 @@ cm = count_all(merged_ss)
 print(f"\n{'=' * 60}")
 print(f"  {'Field':<18}  {'Space 1':>8}  {'Space 2':>8}  {'Merged':>8}")
 print(f"  {'─' * 50}")
-for field in c1:
-    print(f"  {field:<18}  {c1[field]:>8}  {c2[field]:>8}  {cm[field]:>8}")
+for f in c1:
+    print(f"  {f:<18}  {c1[f]:>8}  {c2[f]:>8}  {cm[f]:>8}")
 print(f"{'=' * 60}")
 print(f"\n  + {total_added} items added from Space 2")
 print(f"  = {total_skipped} items already existed — Space 1 version kept")
-print(f"\n✅ Merge complete (in memory — not saved yet)")
-print("   ▶  Run Cell 4 to inspect merged content")
-print("   ▶  Run Cell 5 for Option A — Create a NEW space  (recommended)")
-print("   ▶  Run Cell 6 for Option B — Merge INTO Space 2")
+print("\n✅ Merge done (in memory).")
+print("   ▶  Run Cell 4 to preview the exact JSON being sent")
+print("   ▶  Run Cell 5 to prepare (sanitize + strip IDs)")
+print("   ▶  Run Cell 6 to CREATE a new space  (recommended)")
+print("   ▶  Run Cell 7 to UPDATE Space 2 in place")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CELL 4 — INSPECT  (optional, run anytime)
+# CELL 4 — PREVIEW MERGED JSON
+# See the exact JSON before anything is sent to the API.
+# Use the widget to drill into a specific section or view all.
 # ─────────────────────────────────────────────────────────────────────────────
 
 dbutils.widgets.text(
-    name         = "inspect_section",
-    defaultValue = "tables",
-    label        = "Inspect: tables / joins / measures / filters / expressions / benchmarks / sample_questions / example_sqls / all"
+    name         = "preview_section",
+    defaultValue = "summary",
+    label        = "Preview: summary / tables / joins / measures / filters / expressions / benchmarks / sample_questions / example_sqls / raw"
 )
 
-section = dbutils.widgets.get("inspect_section").strip().lower()
+section = dbutils.widgets.get("preview_section").strip().lower()
 
 print("=" * 60)
-print(f"  CELL 4 — Inspect Merged Content: '{section}'")
+print(f"  CELL 4 — Preview Merged JSON: '{section}'")
 print("=" * 60)
 
-def show_tables(ss):
-    tables = ss.get("data_sources", {}).get("tables", [])
-    print(f"\n  TABLES ({len(tables)}):")
-    for t in tables:
+ds   = merged_ss.get("data_sources", {})
+inst = merged_ss.get("instructions", {})
+snip = inst.get("sql_snippets", {})
+
+if section == "summary":
+    counts = count_all(merged_ss)
+    print(f"\n  Version : {merged_ss.get('version', '?')}")
+    for f, v in counts.items():
+        print(f"    {f:<18} : {v}")
+    print(f"\n  Run with 'tables', 'joins', 'measures', etc. to drill in.")
+    print(f"  Run with 'raw' to see the full JSON string that will be sent.")
+
+elif section == "tables":
+    for t in ds.get("tables", []):
         if not isinstance(t, dict): continue
-        desc = safe_str(t.get("description"))
-        cols = t.get("column_configs", [])
-        print(f"\n    • {t.get('identifier','?')}")
-        print(f"        Desc    : {desc[:80] or '(none)'}")
-        print(f"        Columns : {len(cols)}")
-        for c in cols:
-            if isinstance(c, dict):
-                cdesc = safe_str(c.get("description"))
-                print(f"          - {c.get('column_name','?'):<28} {cdesc[:50] or '(no desc)'}")
+        print(f"\n  • {t.get('identifier','?')}")
+        print(f"      id          : {t.get('id', '(none)')}")
+        print(f"      description : {safe_str(t.get('description'))[:80] or '(none)'}")
+        for c in t.get("column_configs", []):
+            if not isinstance(c, dict): continue
+            desc = safe_str(c.get("description", ""))
+            print(f"      col: {c.get('column_name','?'):<30} {desc[:50] or ''}")
 
-def show_joins(ss):
-    joins = ss.get("instructions", {}).get("join_specs", [])
-    print(f"\n  JOINS ({len(joins)}):")
-    for j in joins:
+elif section == "joins":
+    for j in inst.get("join_specs", []):
         if not isinstance(j, dict): continue
         l   = j.get("left",  {}).get("identifier", "") if isinstance(j.get("left"),  dict) else ""
         r   = j.get("right", {}).get("identifier", "") if isinstance(j.get("right"), dict) else ""
         sql = "".join(j.get("sql", []))
-        print(f"    • {l}  ↔  {r}")
-        print(f"        ON : {sql}")
+        print(f"\n  • {l}  ↔  {r}")
+        print(f"    id : {j.get('id','(none)')}")
+        print(f"    ON : {sql}")
 
-def show_snippets(ss, kind):
-    items = ss.get("instructions", {}).get("sql_snippets", {}).get(kind, [])
-    print(f"\n  {kind.upper()} ({len(items)}):")
-    for item in items:
+elif section in ("measures", "filters", "expressions"):
+    for item in snip.get(section, []):
         if not isinstance(item, dict): continue
         sql  = "".join(item.get("sql", []))
-        syns = ", ".join(item.get("synonyms", []))
         name = item.get("display_name") or item.get("alias", "")
-        print(f"    • {name:<28}  SQL: {sql[:60]}")
-        if syns: print(f"        synonyms: {syns}")
+        syns = ", ".join(item.get("synonyms", []))
+        print(f"\n  • {name}")
+        print(f"    id   : {item.get('id','(none)')}")
+        print(f"    sql  : {sql[:80]}")
+        if syns: print(f"    syns : {syns}")
 
-def show_benchmarks(ss):
-    bms = ss.get("benchmarks", [])
-    print(f"\n  BENCHMARKS ({len(bms)}):")
-    for b in bms:
-        q   = extract_text(b, "question")
-        sql = "".join(as_dict(b).get("sql", [])) if isinstance(b, dict) else ""
-        print(f"    • Q  : {q[:80]}")
-        if sql: print(f"      SQL: {sql[:80]}")
+elif section == "benchmarks":
+    for b in merged_ss.get("benchmarks", []):
+        if not isinstance(b, dict): continue
+        q   = safe_str(b.get("question", ""))
+        sql = "".join(b.get("sql", []) if isinstance(b.get("sql"), list) else [])
+        print(f"\n  • Q  : {q[:80]}")
+        print(f"    id  : {b.get('id','(none)')}")
+        if sql: print(f"    SQL : {sql[:80]}")
 
-def show_sample_qs(ss):
-    sqs = ss.get("config", {}).get("sample_questions", [])
-    print(f"\n  SAMPLE QUESTIONS ({len(sqs)}):")
-    for sq in sqs:
-        print(f"    • {extract_text(sq, 'question')[:80]}")
+elif section == "sample_questions":
+    for sq in merged_ss.get("config", {}).get("sample_questions", []):
+        if not isinstance(sq, dict): continue
+        q = safe_str(sq.get("question", ""))
+        print(f"  • id={sq.get('id','(none)'):<36}  Q: {q[:60]}")
 
-def show_example_sqls(ss):
-    exs = ss.get("instructions", {}).get("example_question_sqls", [])
-    print(f"\n  EXAMPLE SQLs ({len(exs)}):")
-    for ex in exs:
-        q   = extract_text(ex, "question")
-        sql = "".join(as_dict(ex).get("sql", [])) if isinstance(ex, dict) else ""
-        print(f"    • Q  : {q[:70]}")
-        if sql: print(f"      SQL: {sql[:80]}")
+elif section == "example_sqls":
+    for ex in inst.get("example_question_sqls", []):
+        if not isinstance(ex, dict): continue
+        q   = safe_str(ex.get("question", ""))
+        sql = "".join(ex.get("sql", []))
+        print(f"\n  • Q  : {q[:70]}")
+        print(f"    id  : {ex.get('id','(none)')}")
+        if sql: print(f"    SQL : {sql[:80]}")
 
-dispatch = {
-    "tables"           : lambda: show_tables(merged_ss),
-    "joins"            : lambda: show_joins(merged_ss),
-    "measures"         : lambda: show_snippets(merged_ss, "measures"),
-    "filters"          : lambda: show_snippets(merged_ss, "filters"),
-    "expressions"      : lambda: show_snippets(merged_ss, "expressions"),
-    "benchmarks"       : lambda: show_benchmarks(merged_ss),
-    "sample_questions" : lambda: show_sample_qs(merged_ss),
-    "example_sqls"     : lambda: show_example_sqls(merged_ss),
+elif section == "raw":
+    # Show the exact JSON string that will be sent to the API
+    raw_json = json.dumps(merged_ss, indent=2, ensure_ascii=False)
+    # Print in chunks so notebook doesn't truncate
+    chunk = 3000
+    total = len(raw_json)
+    print(f"\n  Total JSON length: {total:,} chars\n")
+    print(f"  {'─' * 56}")
+    for i in range(0, min(total, 9000), chunk):
+        print(raw_json[i:i+chunk])
+    if total > 9000:
+        print(f"\n  ... (truncated — {total - 9000:,} more chars) ...")
+        print(f"  Change widget to a specific section for focused view.")
+
+else:
+    print(f"  ⚠️  Unknown section '{section}'")
+    print("     Valid: summary, tables, joins, measures, filters,")
+    print("            expressions, benchmarks, sample_questions, example_sqls, raw")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CELL 5 — PREPARE: Sanitize, Sort, Strip IDs
+# Run this ONCE after Cell 3. Creates ready_ss — the final payload.
+# Both Cell 6 and Cell 7 use ready_ss.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def fix_description(val):
+    """
+    Ensure description is always ["string"] array.
+    API rejects plain strings and empty lists.
+    """
+    if isinstance(val, list):
+        clean = [str(v) for v in val if v]
+        return clean if clean else None
+    if isinstance(val, str) and val.strip():
+        return [val.strip()]
+    return None
+
+def sanitize_descriptions(ss):
+    """Fix all description fields to ['string'] format throughout the space."""
+    for t in ss.get("data_sources", {}).get("tables", []):
+        if not isinstance(t, dict): continue
+        if "description" in t:
+            fixed = fix_description(t["description"])
+            if fixed: t["description"] = fixed
+            else:     del t["description"]
+        for c in t.get("column_configs", []):
+            if not isinstance(c, dict): continue
+            if "description" in c:
+                fixed = fix_description(c["description"])
+                if fixed: c["description"] = fixed
+                else:     del c["description"]
+
+def sort_all_lists(ss):
+    """
+    Sort all lists as the API strictly requires.
+    Tables → by identifier
+    Everything else → by id
+    """
+    def by_key(lst, key, fallback=""):
+        return sorted(lst, key=lambda x: (x.get(key, fallback) if isinstance(x, dict) else fallback))
+
+    ds   = ss.get("data_sources", {})
+    inst = ss.get("instructions", {})
+    snip = inst.get("sql_snippets", {})
+
+    if "tables"      in ds:   ds["tables"]      = by_key(ds["tables"],      "identifier")
+    if "metric_views" in ds:  ds["metric_views"] = by_key(ds["metric_views"], "identifier")
+
+    for k in ("join_specs", "text_instructions", "example_question_sqls"):
+        if k in inst: inst[k] = by_key(inst[k], "id")
+
+    for k in ("filters", "expressions", "measures"):
+        if k in snip: snip[k] = by_key(snip[k], "id")
+
+    if "benchmarks" in ss:
+        ss["benchmarks"] = by_key(ss["benchmarks"], "id")
+
+    cfg = ss.get("config", {})
+    if "sample_questions" in cfg:
+        cfg["sample_questions"] = by_key(cfg["sample_questions"], "id")
+
+def strip_ids_from_space2_items(ss, ss1_original):
+    """
+    Strip IDs only from items that CAME FROM Space 2 (i.e. items whose ID
+    does not exist in the original Space 1).
+
+    Why: IDs are space-specific. Space 2 IDs don't belong to a new or merged
+    space. Databricks rejects cross-space IDs with "Invalid JSON".
+    Space 1 IDs are kept because Space 1 is the base.
+    """
+    # Collect all IDs that originally existed in Space 1
+    def collect_ids(ss):
+        ids = set()
+        def walk(obj):
+            if isinstance(obj, dict):
+                if "id" in obj and isinstance(obj["id"], str):
+                    ids.add(obj["id"])
+                for v in obj.values():
+                    walk(v)
+            elif isinstance(obj, list):
+                for item in obj:
+                    walk(item)
+        walk(ss)
+        return ids
+
+    space1_ids = collect_ids(ss1_original)
+
+    def strip_foreign_ids(obj):
+        if isinstance(obj, dict):
+            if "id" in obj and isinstance(obj["id"], str):
+                if obj["id"] not in space1_ids:
+                    del obj["id"]   # strip — this ID came from Space 2
+            for v in obj.values():
+                strip_foreign_ids(v)
+        elif isinstance(obj, list):
+            for item in obj:
+                strip_foreign_ids(item)
+
+    strip_foreign_ids(ss)
+
+# ── Run preparation ───────────────────────────────────────────────────────────
+print("=" * 60)
+print("  CELL 5 — Preparing merged space for API")
+print("=" * 60)
+
+ready_ss = copy.deepcopy(merged_ss)
+
+print("\n  Step 1: Sanitizing descriptions...")
+sanitize_descriptions(ready_ss)
+print("  ✅ All descriptions are now ['string'] arrays")
+
+print("\n  Step 2: Sorting all lists...")
+sort_all_lists(ready_ss)
+print("  ✅ Tables sorted by identifier")
+print("  ✅ All other lists sorted by id")
+
+print("\n  Step 3: Stripping Space 2 IDs...")
+strip_ids_from_space2_items(ready_ss, ss1)
+print("  ✅ Space 2 IDs removed — Databricks will assign new ones")
+print("  ✅ Space 1 IDs preserved")
+
+print("\n  Step 4: Validating JSON...")
+try:
+    test_str = json.dumps(ready_ss, ensure_ascii=False)
+    json.loads(test_str)   # round-trip check
+    print(f"  ✅ Valid JSON — {len(test_str):,} characters")
+except Exception as e:
+    print(f"  ❌ JSON error: {e}")
+    raise
+
+print("\n✅ ready_ss is prepared.")
+print("   ▶  Run Cell 6 to CREATE a new merged space  (recommended)")
+print("   ▶  Run Cell 7 to UPDATE Space 2 in place")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CELL 6 — OPTION A: POST — Create a Brand New Merged Space  (RECOMMENDED)
+# Space 1 and Space 2 are NOT touched.
+# ─────────────────────────────────────────────────────────────────────────────
+
+print("=" * 60)
+print("  CELL 6 — Create New Merged Space (POST)")
+print("=" * 60)
+print(f"\n  Title     : {NEW_TITLE}")
+print(f"  Location  : {PARENT_PATH}")
+print(f"  Warehouse : {WAREHOUSE_ID}")
+print(f"\n  Space 1 '{meta1['title']}' — untouched")
+print(f"  Space 2 '{meta2['title']}' — untouched")
+
+# Build payload
+# serialized_space must be a JSON string — json.dumps(ready_ss) converts it.
+# requests json= parameter correctly encodes the string as an escaped value
+# inside the outer JSON object. This is the correct way to send it.
+payload = {
+    "title"           : NEW_TITLE,
+    "description"     : NEW_DESC,
+    "warehouse_id"    : WAREHOUSE_ID,
+    "parent_path"     : PARENT_PATH,
+    "serialized_space": json.dumps(ready_ss, ensure_ascii=False),
 }
 
-if section == "all":
-    for fn in dispatch.values(): fn()
-elif section in dispatch:
-    dispatch[section]()
-else:
-    print(f"  ⚠️  Unknown: '{section}'")
-    print("     Valid: tables, joins, measures, filters, expressions,")
-    print("            benchmarks, sample_questions, example_sqls, all")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# CELL 5 — OPTION A: Create a Brand New Merged Space  (RECOMMENDED)
-# Uses POST — creates a brand new space. Space 1 and Space 2 untouched.
-# ─────────────────────────────────────────────────────────────────────────────
-
-print("=" * 60)
-print("  OPTION A — Creating New Merged Genie Space  (POST)")
-print("=" * 60)
-print(f"\n  Title      : {NEW_SPACE_TITLE}")
-print(f"  Description: {NEW_SPACE_DESC}")
-print(f"  Location   : {PARENT_PATH}")
-print(f"  Warehouse  : {WAREHOUSE_ID}")
-
-# ── Step 1: Sanitize + sort ───────────────────────────────────────────────────
-print(f"\n  Step 1: Sanitizing and sorting...")
-ready_ss = sanitize_and_sort(merged_ss)
-print("  ✅ Tables sorted by identifier")
-print("  ✅ All instruction lists sorted by id")
-print("  ✅ Descriptions sanitized to ['string'] format")
-
-# ── Step 2: Strip ALL IDs — the critical fix ──────────────────────────────────
-print(f"\n  Step 2: Stripping all IDs...")
-ready_ss = strip_all_ids(ready_ss)
-print("  ✅ All IDs removed — Databricks will regenerate valid ones on save")
-
-# ── Step 3: Validate JSON locally ────────────────────────────────────────────
-print(f"\n  Step 3: Validating JSON...")
-ok, info = validate_json(ready_ss)
-if ok:
-    print(f"  ✅ Valid JSON — {info:,} chars")
-else:
-    print(f"  ❌ JSON validation failed: {info}")
-    print("     Fix the data issue before sending. Run Cell 4 with 'all' to inspect.")
-    raise Exception("JSON validation failed — see above")
-
-# ── Step 4: Build raw payload — prevents double encoding ─────────────────────
-print(f"\n  Step 4: Building payload...")
-raw_payload = build_raw_payload(
-    {
-        "title"       : NEW_SPACE_TITLE,
-        "description" : NEW_SPACE_DESC,
-        "warehouse_id": WAREHOUSE_ID,
-        "parent_path" : PARENT_PATH,
-    },
-    ready_ss
-)
-print("  ✅ Payload built with ensure_ascii=True")
-
-# ── Step 5: Send POST request ─────────────────────────────────────────────────
-print(f"\n  Step 5: Sending POST to API...")
+print(f"\n  Sending POST request...")
 resp = requests.post(
     f"{DATABRICKS_HOST}/api/2.0/genie/spaces",
     headers=HEADERS,
-    data=raw_payload,          # data= not json= — prevents double encoding
+    json=payload,        # correct — requests encodes the whole payload once
     timeout=30,
 )
 
 if resp.status_code == 200:
-    new_space = resp.json()
-    print(f"\n  🎉 SUCCESS — New space created!")
-    print(f"     Title    : {new_space.get('title', '')}")
-    print(f"     Space ID : {new_space.get('space_id', '')}")
-    print(f"\n  Space 1 '{space_data_1['title']}' — untouched ✅")
-    print(f"  Space 2 '{space_data_2['title']}' — untouched ✅")
-    print(f"\n  Open Databricks → Genie to find '{NEW_SPACE_TITLE}'")
+    result = resp.json()
+    print(f"\n  🎉 SUCCESS!")
+    print(f"     Title    : {result.get('title', '')}")
+    print(f"     Space ID : {result.get('space_id', '')}")
+    print(f"\n  Open Databricks → Genie to find '{NEW_TITLE}'")
 else:
     print(f"\n  ❌ Error {resp.status_code}")
-    print(f"     {resp.text[:800]}")
-    print("\n  Common causes:")
-    print("    • WAREHOUSE_ID wrong or no CAN USE permission")
-    print("    • PARENT_PATH folder does not exist")
-    print("    • Run Cell 4 with 'all' to inspect merged content")
+    print(f"  {resp.text[:800]}")
+    print("\n  Check:")
+    print("    • Did you run Cell 5 first?")
+    print("    • Is WAREHOUSE_ID correct and do you have CAN USE on it?")
+    print("    • Does PARENT_PATH folder exist?")
+    print("    • Run Cell 4 with 'raw' to inspect the exact JSON being sent")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CELL 6 — OPTION B: Merge Space 1 INTO Space 2  (PATCH — use with caution)
-# Updates Space 2 in place. Space 1 untouched.
-# ⚠️  Space 2 content will be fully replaced. Make sure you have a backup.
+# CELL 7 — OPTION B: PATCH — Update Space 2 In Place
+# Space 1 is NOT touched. Space 2 content will be REPLACED.
+# ⚠️  Make sure you are OK with Space 2 being overwritten.
 # ─────────────────────────────────────────────────────────────────────────────
 
 print("=" * 60)
-print("  OPTION B — Merging Space 1 INTO Space 2  (PATCH)")
+print("  CELL 7 — Update Space 2 In Place (PATCH)")
 print("=" * 60)
-print(f"\n  Space 1 : '{space_data_1['title']}'  →  source (read only)")
-print(f"  Space 2 : '{space_data_2['title']}'  →  will be UPDATED in place")
-print(f"\n  ⚠️  Space 2 content will be fully replaced with merged content.")
+print(f"\n  Space 1 '{meta1['title']}'  →  source (read only)")
+print(f"  Space 2 '{meta2['title']}'  →  will be REPLACED with merged content")
+print(f"\n  ⚠️  Space 2 will be fully overwritten. This cannot be undone.")
 
-# ── Step 1: Sanitize + sort ───────────────────────────────────────────────────
-print(f"\n  Step 1: Sanitizing and sorting...")
-ready_ss = sanitize_and_sort(merged_ss)
-print("  ✅ Tables sorted by identifier")
-print("  ✅ All instruction lists sorted by id")
-print("  ✅ Descriptions sanitized to ['string'] format")
+payload = {
+    "title"           : meta2["title"],
+    "description"     : meta2.get("description", ""),
+    "warehouse_id"    : meta2["warehouse_id"],
+    "serialized_space": json.dumps(ready_ss, ensure_ascii=False),
+}
 
-# ── Step 2: Strip ALL IDs — the critical fix ──────────────────────────────────
-# Even for PATCH, IDs from Space 1 must be stripped because they don't belong
-# to Space 2. Mixing IDs from two different spaces causes Protobuf failure.
-print(f"\n  Step 2: Stripping all IDs...")
-ready_ss = strip_all_ids(ready_ss)
-print("  ✅ All IDs removed — Databricks will regenerate valid ones on save")
-
-# ── Step 3: Validate JSON locally ────────────────────────────────────────────
-print(f"\n  Step 3: Validating JSON...")
-ok, info = validate_json(ready_ss)
-if ok:
-    print(f"  ✅ Valid JSON — {info:,} chars")
-else:
-    print(f"  ❌ JSON validation failed: {info}")
-    print("     Fix the data issue before sending. Run Cell 4 with 'all' to inspect.")
-    raise Exception("JSON validation failed — see above")
-
-# ── Step 4: Build raw payload — prevents double encoding ─────────────────────
-print(f"\n  Step 4: Building payload...")
-raw_payload = build_raw_payload(
-    {
-        "title"       : space_data_2["title"],
-        "description" : space_data_2.get("description", ""),
-        "warehouse_id": space_data_2["warehouse_id"],
-    },
-    ready_ss
-)
-print("  ✅ Payload built with ensure_ascii=True")
-
-# ── Step 5: Send PATCH request ────────────────────────────────────────────────
-print(f"\n  Step 5: Sending PATCH to API...")
+print(f"\n  Sending PATCH request...")
 resp = requests.patch(
     f"{DATABRICKS_HOST}/api/2.0/genie/spaces/{SPACE_ID_2}",
     headers=HEADERS,
-    data=raw_payload,          # data= not json= — prevents double encoding
+    json=payload,        # correct — requests encodes the whole payload once
     timeout=30,
 )
 
 if resp.status_code == 200:
-    print(f"\n  🎉 SUCCESS — Space 2 updated!")
-    print(f"\n  Space 2 '{space_data_2['title']}' ({SPACE_ID_2}) — updated ✅")
-    print(f"  Space 1 '{space_data_1['title']}' ({SPACE_ID_1}) — untouched ✅")
-    print(f"\n  Open Space 2 in Databricks to verify the merged content.")
+    print(f"\n  🎉 SUCCESS!")
+    print(f"     Space 2 '{meta2['title']}' ({SPACE_ID_2}) — updated ✅")
+    print(f"     Space 1 '{meta1['title']}' — untouched ✅")
+    print(f"\n  Open Space 2 in Databricks to verify.")
 else:
     print(f"\n  ❌ Error {resp.status_code}")
-    print(f"     {resp.text[:800]}")
-    print("\n  Common causes:")
-    print("    • No CAN EDIT permission on Space 2")
-    print("    • Run Cell 4 with 'all' to inspect merged content")
+    print(f"  {resp.text[:800]}")
+    print("\n  Check:")
+    print("    • Did you run Cell 5 first?")
+    print("    • Do you have CAN EDIT permission on Space 2?")
+    print("    • Run Cell 4 with 'raw' to inspect the exact JSON being sent")
