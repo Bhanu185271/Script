@@ -1,7 +1,7 @@
 dbutils.widgets.removeAll()
 
 
-cell 1
+# CELL 1
 
 
 import requests, json, copy
@@ -22,7 +22,7 @@ SNAPSHOT_FOLDER = "/Workspace/Users/chandrabhanu.x.chandrabhanu@gsk.com/Genie_Sn
 MERGED_SAVE_PATH = "/Workspace/Users/chandrabhanu.x.chandrabhanu@gsk.com/merged_genie_space.json"
 
 
-#  Widget 1: Mode 
+# Widget 1: Mode
 dbutils.widgets.dropdown(
     name         = "mode",
     defaultValue = "merge",
@@ -54,10 +54,10 @@ else:
     print("Mode : ROLLBACK")
     print(f"Snapshot folder : {SNAPSHOT_FOLDER}")
     print("Enter snapshot filename in the widget above, then run Cell 8 for Rollback")
-	
-	
-	
-	
+
+
+
+
 # CELL 2 — LOAD BOTH SPACES
 # Skipped if mode = rollback
 
@@ -128,7 +128,16 @@ if mode == "merge":
     print("=" * 60)
     print_summary("Space 1 (base)", outer1, ss1)
     print_summary("Space 2", outer2, ss2)
-    print("\nReady. Run Cell 2B.")
+
+    # Widget: choose which Genie instruction to use in the merge
+    dbutils.widgets.dropdown(
+        name         = "genie_instruction_source",
+        defaultValue = "Both",
+        choices      = ["Space 1", "Space 2", "Both"],
+        label        = "4. Genie Instruction Source"
+    )
+
+    print("\nSelect Genie Instruction Source in widget 4, then run Cell 2B.")
 
 else:
     print("Mode = rollback — Cell 2 skipped")
@@ -136,7 +145,7 @@ else:
 
 
 
-# CELL 2B —  CHECK
+# CELL 2B — CHECK
 
 mode = dbutils.widgets.get("mode")
 
@@ -159,12 +168,13 @@ if mode == "merge":
     elif already_merged:
         print(f"WARNING: {len(already_merged)} Space 1 table(s) already exist in Space 2:")
         for t in already_merged:
-            print(f"  • {t}")
+            print(f"  - {t}")
     else:
         print("Safe to merge — no overlap between Space 1 and Space 2 tables")
 
 else:
     print("Mode = rollback — Cell 2B skipped")
+
 
 
 
@@ -174,6 +184,9 @@ mode = dbutils.widgets.get("mode")
 
 if mode == "merge":
     import copy
+
+    # Read the instruction source selection from widget
+    genie_instruction_source = dbutils.widgets.get("genie_instruction_source").strip()
 
     def merge_col_configs(base_cols, inc_cols):
         base_map = {
@@ -225,13 +238,14 @@ if mode == "merge":
                 skipped.append(str(k)[:70])
         return added, skipped
 
-    def do_merge(ss1, ss2):
+    def do_merge(ss1, ss2, instruction_source):
         merged = copy.deepcopy(ss1)
         report = {}
 
         ds1   = merged.setdefault("data_sources", {})
         inst1 = merged.setdefault("instructions", {})
         snip1 = inst1.setdefault("sql_snippets", {})
+
         ds2   = ss2.get("data_sources", {})
         inst2 = ss2.get("instructions", {})
         snip2 = inst2.get("sql_snippets", {})
@@ -271,52 +285,70 @@ if mode == "merge":
         }
 
         # 2. TEXT INSTRUCTIONS
+        # Behavior is controlled by instruction_source:
+        #   "Space 1" — keep only Space 1 instructions, ignore Space 2
+        #   "Space 2" — replace with Space 2 instructions only
+        #   "Both"    — concatenate Space 2 + marker + Space 1 (original behavior)
         MERGE_MARKER = "=== Below are Additional Instructions ==="
         txt1_list = inst1.setdefault("text_instructions", [])
         txt2_list = inst2.get("text_instructions", [])
 
-        if txt2_list:
-            if txt1_list:
-                base_content = txt1_list[0].get("content", [])
-                if isinstance(base_content, str):
-                    base_content = [base_content]
-                base_content = list(base_content)
+        if instruction_source == "Space 1":
+            # Keep Space 1 instructions as-is, nothing from Space 2
+            report["text_instructions"] = {"added": ["Space 1 instructions kept — Space 2 skipped"], "skipped": []}
+
+        elif instruction_source == "Space 2":
+            # Replace with Space 2 instructions only
+            if txt2_list:
+                inst1["text_instructions"] = copy.deepcopy(txt2_list)
+                report["text_instructions"] = {"added": ["Space 2 instructions used — Space 1 replaced"], "skipped": []}
             else:
-                base_content = []
+                report["text_instructions"] = {"added": [], "skipped": ["Space 2 has no text instructions"]}
 
-            incoming_content = []
-            for ti in txt2_list:
-                if not isinstance(ti, dict):
-                    continue
-                c = ti.get("content", [])
-                if isinstance(c, str):  c = [c]
-                if isinstance(c, list): incoming_content.extend(c)
-
-            already_merged_marker = any(MERGE_MARKER in str(line) for line in base_content)
-
-            if not already_merged_marker:
-                merged_content = (
-                    incoming_content
-                    + ["\r\n"]
-                    + [MERGE_MARKER + "\r\n"]
-                    + ["\r\n"]
-                    + base_content
-                )
-                added_msg = f"{len(incoming_content)} line(s) added from Space 2"
-            else:
-                merged_content = base_content
-                added_msg = "Space 2 already merged — skipped (marker found, re-run safe)"
-
-            if txt1_list:
-                txt1_list[0]["content"] = merged_content
-            else:
-                new_item = copy.deepcopy(txt2_list[0])
-                new_item["content"] = merged_content
-                txt1_list.append(new_item)
-
-            report["text_instructions"] = {"added": [added_msg], "skipped": []}
         else:
-            report["text_instructions"] = {"added": [], "skipped": []}
+            # Both: concatenate Space 2 + marker + Space 1
+            if txt2_list:
+                if txt1_list:
+                    base_content = txt1_list[0].get("content", [])
+                    if isinstance(base_content, str):
+                        base_content = [base_content]
+                    base_content = list(base_content)
+                else:
+                    base_content = []
+
+                incoming_content = []
+                for ti in txt2_list:
+                    if not isinstance(ti, dict):
+                        continue
+                    c = ti.get("content", [])
+                    if isinstance(c, str):  c = [c]
+                    if isinstance(c, list): incoming_content.extend(c)
+
+                already_merged_marker = any(MERGE_MARKER in str(line) for line in base_content)
+
+                if not already_merged_marker:
+                    merged_content = (
+                        incoming_content
+                        + ["\r\n"]
+                        + [MERGE_MARKER + "\r\n"]
+                        + ["\r\n"]
+                        + base_content
+                    )
+                    added_msg = f"{len(incoming_content)} line(s) added from Space 2"
+                else:
+                    merged_content = base_content
+                    added_msg = "Space 2 already merged — skipped (marker found, re-run safe)"
+
+                if txt1_list:
+                    txt1_list[0]["content"] = merged_content
+                else:
+                    new_item = copy.deepcopy(txt2_list[0])
+                    new_item["content"] = merged_content
+                    txt1_list.append(new_item)
+
+                report["text_instructions"] = {"added": [added_msg], "skipped": []}
+            else:
+                report["text_instructions"] = {"added": [], "skipped": []}
 
         # 3. EXAMPLE SQLs
         ex_list = inst1.setdefault("example_question_sqls", [])
@@ -388,7 +420,7 @@ if mode == "merge":
         return merged, report
 
     print("Merging")
-    merged_ss, report = do_merge(ss1, ss2)
+    merged_ss, report = do_merge(ss1, ss2, genie_instruction_source)
 
     LABELS = {
         "tables"           : "TABLES",
@@ -404,6 +436,7 @@ if mode == "merge":
     total_added = total_skipped = 0
     print("\n" + "=" * 60)
     print("  Merge Report  (Space 1 = base, Space 1 wins on conflicts)")
+    print(f"  Genie Instruction Source : {genie_instruction_source}")
     print("=" * 60)
     for key, label in LABELS.items():
         r        = report.get(key, {})
@@ -418,9 +451,9 @@ if mode == "merge":
         for x in added:    print(f"    +  {x}")
         for x in enriched: print(f"    ~  {x}")
         for t, cols in ca.items():
-            for c in cols: print(f"    +  {t} → col: {c}")
+            for c in cols: print(f"    +  {t} -> col: {c}")
         for t, cols in ce.items():
-            for c in cols: print(f"    ~  {t} → col: {c}  (enriched)")
+            for c in cols: print(f"    ~  {t} -> col: {c}  (enriched)")
         for x in skipped:  print(f"    =  {x}  (Space 1 version kept)")
         if not added and not enriched and not ca and not ce and not skipped:
             print(f"    (nothing to merge)")
@@ -670,7 +703,7 @@ if mode == "merge":
 
     timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
 
-    #  Snapshot Space 2 (saved BEFORE patch) 
+    # Snapshot Space 2 (saved BEFORE patch)
     snapshot_name = f"snapshot_{SPACE_ID_2}_{timestamp}.json"
     snapshot_path = f"{SNAPSHOT_FOLDER}/{snapshot_name}"
 
@@ -698,7 +731,7 @@ if mode == "merge":
         print(f"\n  WARNING: Could not save snapshot: {e}")
         print(f"  Create the folder first: {SNAPSHOT_FOLDER}")
 
-    # Save merged JSON 
+    # Save merged JSON
     patch_path = MERGED_SAVE_PATH.replace(".json", f"_PATCH_{timestamp}.json")
 
     full_patch = {
@@ -852,5 +885,4 @@ if mode == "rollback":
         print("\n  Check you have CAN EDIT on Space 2.")
 
 else:
-    print("Mode = merge — Cell 8 (rollback) skipped")	
-	
+    print("Mode = merge — Cell 8 (rollback) skipped")
