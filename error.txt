@@ -1,29 +1,28 @@
-# ==============================================================================
-# GENIE SPACE — MERGE & ROLLBACK
-# ==============================================================================
-# Same cell structure as before.
-# Cell 1 has a mode dropdown (merge / rollback).
-# Each merge cell checks: if mode == "merge" → run  else → skip (pass)
-# Last cell is rollback — runs only if mode == "rollback"
-# ==============================================================================
+dbutils.widgets.removeAll()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CELL 1 — CONFIG + MODE SELECTION
-# ─────────────────────────────────────────────────────────────────────────────
+cell 1
 
-DATABRICKS_HOST  = "https://<your-workspace>.cloud.databricks.com"
-TOKEN            = "<your-personal-access-token>"
 
-NEW_SPACE_TITLE  = "Merged Space Title"
-NEW_SPACE_DESC   = "Merged Genie space"
-WAREHOUSE_ID     = "<your-warehouse-id>"
-PARENT_PATH      = "/Workspace/Users/chandrabhanu.x.chandrabhanu@gsk.com"
+import requests, json, copy
 
-SNAPSHOT_FOLDER  = "/Workspace/Users/chandrabhanu.x.chandrabhanu@gsk.com"
+DATABRICKS_HOST = "https://adb-16520.0.azuredatabricks.net"  
+TOKEN           = "-2"
+
+# The two spaces you want to merge
+# SPACE_ID_1      = ""    # Test Genie Deployment Campaign & Content, Customer Journey and ATLAS, ACE and ES Insights v2 (1)
+# SPACE_ID_2      = ""    # patient data
+
+WAREHOUSE_ID     = ""
+NEW_SPACE_TITLE  = "Test Genie Merger Campaign & Content, Customer Journey and ATLAS, ACE and ES Insights v2 (1) + patient data"
+NEW_SPACE_DESC   = "Genie space merger for Insights Navigator application"
+PARENT_PATH      = "/Shared/iNavi_Metadata/genie/post_request_import_api"
+
+SNAPSHOT_FOLDER = "/Workspace/Users/chandrabhanu.x.chandrabhanu@gsk.com/Genie_Snapshot"
 MERGED_SAVE_PATH = "/Workspace/Users/chandrabhanu.x.chandrabhanu@gsk.com/merged_genie_space.json"
 
-# ── Widget 1: Mode ────────────────────────────────────────────────────────────
+
+#  Widget 1: Mode 
 dbutils.widgets.dropdown(
     name         = "mode",
     defaultValue = "merge",
@@ -45,31 +44,22 @@ if mode == "merge":
         label        = "3. Space ID 2  (merge target)"
     )
     print("Mode : MERGE")
-    print("Fill Space ID 1 and Space ID 2 above, then run each cell in order.")
-    print("  Cell 2  → Load spaces")
-    print("  Cell 2B → Safety check")
-    print("  Cell 3  → Merge")
-    print("  Cell 4  → Preview merged JSON")
-    print("  Cell 5  → Sanitize + sort")
-    print("  Cell 5B → Save merged JSON to disk + Snapshot Space 2")
-    print("  Cell 7  → PATCH Space 2")
-
+    print("Fill Space ID 1 and Space ID 2 above, then run the below cell")
 else:
     dbutils.widgets.text(
         name         = "rollback_file",
         defaultValue = "",
-        label        = "2. Snapshot filename  (e.g. snapshot_<space_id>_20250320_143022.json)"
+        label        = "2. Snapshot filename"
     )
     print("Mode : ROLLBACK")
     print(f"Snapshot folder : {SNAPSHOT_FOLDER}")
-    print("Enter snapshot filename in the widget above, then run Cell 8 (Rollback).")
-    print("All merge cells (2 to 7) will be skipped automatically.")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
+    print("Enter snapshot filename in the widget above, then run Cell 8 for Rollback")
+	
+	
+	
+	
 # CELL 2 — LOAD BOTH SPACES
-# Skipped automatically if mode = rollback
-# ─────────────────────────────────────────────────────────────────────────────
+# Skipped if mode = rollback
 
 mode = dbutils.widgets.get("mode")
 
@@ -121,7 +111,7 @@ if mode == "merge":
         print(f"    Tables            : {len(ds.get('tables', []))}")
         for t in ds.get("tables", []):
             if isinstance(t, dict):
-                print(f"      • {t.get('identifier','?')}  ({len(t.get('column_configs',[]))} cols)")
+                print(f"     {t.get('identifier','?')}  ({len(t.get('column_configs',[]))} cols)")
         print(f"    Text Instructions : {len(inst.get('text_instructions', []))}")
         print(f"    Example SQLs      : {len(inst.get('example_question_sqls', []))}")
         print(f"    Filters           : {len(snip.get('filters', []))}")
@@ -130,7 +120,6 @@ if mode == "merge":
         print(f"    Benchmarks        : {bm_count(inner)}")
         print(f"    Sample Questions  : {len(inner.get('config', {}).get('sample_questions', []))}")
 
-    print("Loading spaces...")
     outer1, ss1 = fetch_space(SPACE_ID_1)
     outer2, ss2 = fetch_space(SPACE_ID_2)
 
@@ -142,13 +131,12 @@ if mode == "merge":
     print("\nReady. Run Cell 2B.")
 
 else:
-    print("Mode = rollback — Cell 2 skipped.")
+    print("Mode = rollback — Cell 2 skipped")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CELL 2B — SAFETY CHECK
-# Skipped automatically if mode = rollback
-# ─────────────────────────────────────────────────────────────────────────────
+
+
+# CELL 2B —  CHECK
 
 mode = dbutils.widgets.get("mode")
 
@@ -166,23 +154,21 @@ if mode == "merge":
     already_merged = ss1_identifiers & ss2_identifiers
 
     if len(already_merged) == len(ss1_identifiers) and len(ss1_identifiers) > 0:
-        print("WARNING: Space 2 already contains ALL tables from Space 1.")
-        print("Re-merging will DUPLICATE Space 1 content.")
+        print("WARNING: Space 2 already contains ALL tables from Space 1")
+        print("Re-merging will DUPLICATE Space 1 content")
     elif already_merged:
         print(f"WARNING: {len(already_merged)} Space 1 table(s) already exist in Space 2:")
         for t in already_merged:
             print(f"  • {t}")
     else:
-        print("Safe to merge — no overlap between Space 1 and Space 2 tables.")
+        print("Safe to merge — no overlap between Space 1 and Space 2 tables")
 
 else:
-    print("Mode = rollback — Cell 2B skipped.")
+    print("Mode = rollback — Cell 2B skipped")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+
 # CELL 3 — MERGE
-# Skipped automatically if mode = rollback
-# ─────────────────────────────────────────────────────────────────────────────
 
 mode = dbutils.widgets.get("mode")
 
@@ -401,7 +387,7 @@ if mode == "merge":
         merged["version"] = max(ss1.get("version", 1), ss2.get("version", 1))
         return merged, report
 
-    print("Merging...")
+    print("Merging")
     merged_ss, report = do_merge(ss1, ss2)
 
     LABELS = {
@@ -470,18 +456,17 @@ if mode == "merge":
     txt_count  = len(merged_ss.get("instructions", {}).get("text_instructions", []))
     txt_lines  = merged_ss.get("instructions", {}).get("text_instructions", [])
     line_count = len(txt_lines[0].get("content", [])) if txt_lines else 0
-    print(f"\n  text_instructions count : {txt_count}  {'✅' if txt_count == 1 else '❌ must be 1'}")
+    print(f"\n  text_instructions count : {txt_count}  {'' if txt_count == 1 else 'must be 1'}")
     print(f"  text_instructions lines : {line_count}")
     print("\nMerge complete. Run Cell 4 to preview.")
 
 else:
-    print("Mode = rollback — Cell 3 skipped.")
+    print("Mode = rollback — Cell 3 skipped")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+
+
 # CELL 4 — PREVIEW MERGED JSON
-# Skipped automatically if mode = rollback
-# ─────────────────────────────────────────────────────────────────────────────
 
 mode = dbutils.widgets.get("mode")
 
@@ -584,10 +569,9 @@ else:
     print("Mode = rollback — Cell 4 skipped.")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CELL 5 — FINAL PREPARE: Sanitize + Sort
-# Skipped automatically if mode = rollback
-# ─────────────────────────────────────────────────────────────────────────────
+
+
+# CELL 5 — FINAL PREPARE: Clean + Sort
 
 mode = dbutils.widgets.get("mode")
 
@@ -646,18 +630,16 @@ if mode == "merge":
 
     ready_ss = copy.deepcopy(merged_ss)
 
-    print("\n  Step 1: Sanitizing descriptions...")
+    print("\n  Step 1: Preparing descriptions")
     sanitize_descriptions(ready_ss)
-    print("  All descriptions are ['string'] arrays")
-
-    print("\n  Step 2: Sorting all lists...")
+    print("\n  Step 2: Sorting all lists")
     sort_lists(ready_ss)
     print("  Tables sorted by identifier")
     print("  example_question_sqls sorted by id")
     print("  filters / expressions / measures sorted by id")
     print("  benchmarks.questions sorted by id")
 
-    print("\n  Step 3: Validating JSON...")
+    print("\n  Step 3: Validating JSON")
     try:
         test_str = json.dumps(ready_ss, ensure_ascii=False)
         json.loads(test_str)
@@ -670,19 +652,16 @@ if mode == "merge":
     ex_ids    = [x.get("id","") for x in ready_ss.get("instructions",{}).get("example_question_sqls",[]) if isinstance(x,dict)]
     ex_sorted = ex_ids == sorted(ex_ids)
     print(f"\n  Checks:")
-    print(f"    text_instructions count : {txt_count}  {'✅' if txt_count <= 1 else '❌ must be 1'}")
-    print(f"    example_question_sqls   : {'✅ sorted' if ex_sorted else '❌ NOT sorted'}")
-    print("\n  ready_ss prepared. Run Cell 5B.")
+    print(f"    text_instructions count : {txt_count}  {'' if txt_count <= 1 else 'must be 1'}")
+    print(f"    example_question_sqls   : {'sorted' if ex_sorted else 'NOT sorted'}")
 
 else:
     print("Mode = rollback — Cell 5 skipped.")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CELL 5B — SNAPSHOT SPACE 2 + SAVE MERGED JSON
-# Snapshot is taken HERE — right before patch — so it's always fresh.
-# Skipped automatically if mode = rollback
-# ─────────────────────────────────────────────────────────────────────────────
+
+
+# CELL 5B — Prepare Snapshot SPACE 2 + SAVE MERGED JSON
 
 mode = dbutils.widgets.get("mode")
 
@@ -691,7 +670,7 @@ if mode == "merge":
 
     timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
 
-    # ── Snapshot Space 2 (saved BEFORE patch) ─────────────────────────────────
+    #  Snapshot Space 2 (saved BEFORE patch) 
     snapshot_name = f"snapshot_{SPACE_ID_2}_{timestamp}.json"
     snapshot_path = f"{SNAPSHOT_FOLDER}/{snapshot_name}"
 
@@ -719,7 +698,7 @@ if mode == "merge":
         print(f"\n  WARNING: Could not save snapshot: {e}")
         print(f"  Create the folder first: {SNAPSHOT_FOLDER}")
 
-    # ── Save merged JSON ───────────────────────────────────────────────────────
+    # Save merged JSON 
     patch_path = MERGED_SAVE_PATH.replace(".json", f"_PATCH_{timestamp}.json")
 
     full_patch = {
@@ -742,13 +721,12 @@ if mode == "merge":
     print("\n  Run Cell 7 to PATCH Space 2.")
 
 else:
-    print("Mode = rollback — Cell 5B skipped.")
+    print("Mode = rollback — Cell 5B skipped")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+
+
 # CELL 7 — PATCH SPACE 2
-# Skipped automatically if mode = rollback
-# ─────────────────────────────────────────────────────────────────────────────
 
 mode = dbutils.widgets.get("mode")
 
@@ -778,7 +756,7 @@ if mode == "merge":
     if resp.status_code == 200:
         print(f"\n  SUCCESS — Space 2 updated!")
         print(f"  Space 2 '{outer2['title']}' ({SPACE_ID_2}) — updated")
-        print(f"  Space 1 '{outer1['title']}' — untouched")
+        print(f"  Space 1 '{outer1['title']}' — No Change")
         print(f"\n  To rollback if needed:")
         print(f"    1. Set mode widget to 'rollback'")
         print(f"    2. Enter filename : {snapshot_name}")
@@ -794,10 +772,7 @@ else:
     print("Mode = rollback — Cell 7 skipped.")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # CELL 8 — ROLLBACK
-# Runs only if mode = rollback. Skipped if mode = merge.
-# ─────────────────────────────────────────────────────────────────────────────
 
 mode = dbutils.widgets.get("mode")
 
@@ -877,4 +852,5 @@ if mode == "rollback":
         print("\n  Check you have CAN EDIT on Space 2.")
 
 else:
-    print("Mode = merge — Cell 8 (rollback) skipped.")
+    print("Mode = merge — Cell 8 (rollback) skipped")	
+	
