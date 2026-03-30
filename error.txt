@@ -493,114 +493,63 @@ def MDTRMergeLogic(country,cleanedDF,enrichDF,columnsDict,partitionList,enriched
 
 
 
+def MDTRMergeLogic(country,cleanedDF,enrichDF,columnsDict,partitionList,enrichedLayerPath):
+  if country=='ARG':
+    cleanedDF=cleanedDF.withColumn('SkuCode', lit('NA'))
+    
+  cleanedDF = cleanedDF.select(requiredColumnsForEnrichedLayer)
+  cleanedDF = renameColumns(cleanedDF,data).na.replace({'':None, 'null': None})
+  # if country == 'MYS':
+  #   cleanedDF = cleanedDF.withColumn("Period", to_date(cleanedDF["Period"],"yyyyMMdd"))
+  cleanedDF=withColumnsQuarterAndYear(cleanedDF, columnsDict)
+  
+  if country!='TUR' and country!="MYS":
+    cleanedDF=cleanedDF.groupBy("Period","PharmacyId","Brand","SkuCode","Quarter",
+                                                "Year","IngestFileName","IngestedAt","Version").sum("SalesQty")
+    cleanedDF=cleanedDF.withColumnRenamed("sum(SalesQty)", "SalesQty").dropDuplicates()
+    cleanedDF=cleanedDF.select('Period','PharmacyId','Brand','SkuCode','SalesQty','Quarter',
+                               'Year','IngestFileName','IngestedAt','Version')
+    cnt=cleanedDF.count()
+    
+  if country=='TUR':
+    cleanedDF=cleanedDF.withColumn('Brand', lit('NA'))
+    print("Adding Brand")
+    cleanedDF=cleanedDF.withColumn('DiscountPrincipal', lit(0))
+    print("Adding DiscountPrincipal")
+    cleanedDF=cleanedDF.select('PharmacyId','Brand','SkuCode','Period','SalesQty','InvoiceNumber',
+                           'Bonus','DiscountPrincipal','Quarter','Year','IngestFileName','IngestedAt','Version')
+    print("selecting all columns")
+    
+  if country=='MYS':
+    cleanedDF=cleanedDF.withColumn('Brand', lit('NA'))
+    cleanedDF=cleanedDF.select('Period','PharmacyId','AccountCode','AccountChannel','Brand', 'SkuCode', 'SalesQty', 'IngestFileName', 'IngestedAt', 'Version','Quarter','Year')
+    print("selecting all columns")
+  
+  max_value_cleaned=cleanedDF.select(date_format(col("Period"),"yyyyMMdd")).agg({'date_format(Period, yyyyMMdd)': 'max'})
+  #display(max_value_cleaned)
+  max_time_cleaned=int(max_value_cleaned.collect()[0]['max(date_format(Period, yyyyMMdd))']) 
+  print(max_time_cleaned)
+  print(error)
+  max_value_enrich=enrichDF.select(date_format(col("Period"),"yyyyMMdd")).agg({'date_format(Period, yyyyMMdd)': 'max'})
+  #display(max_value_cleaned)
+  max_time_enrich=int(max_value_enrich.collect()[0]['max(date_format(Period, yyyyMMdd))']) 
+  print(max_time_enrich)
 
-def MDTRMergeLogic(country, cleanedDF, enrichDF, columnsDict, partitionList, enrichedLayerPath):
+  if max_time_enrich>max_time_cleaned:
+    return_res=json.dumps({"Status": 0,"Counts": cnt,"Result": "BackDated records obtained for MDTR Foundation Layer","code":traceback.print_exc()})
+    return return_res
+  else:
+    min_value=cleanedDF.agg({'Period': 'min'})        
+    initial_value=str(min_value.collect()[0]['min(Period)'])
+    mainDF=enrichDF.filter(enrichDF.Period < initial_value)
 
-    # --- Step 1: Country specific changes ---
-    if country == 'ARG':
-        cleanedDF = cleanedDF.withColumn('SkuCode', lit('NA'))
+    enrichnewDF = mainDF.union(cleanedDF)
+    incrementalLoadOverwrite(partitionList,enrichnewDF,enrichedLayerPath)
+    #incrementalLoadAppend(partitionList,cleanedDF,enrichedLayerPath)
+    cnt=enrichnewDF.count()
+    return_res=json.dumps({"Status": 1,"Counts": cnt,"Result": "Success","code":"NA"})
+    return return_res
 
-    # --- Step 2: Standard transformations ---
-    cleanedDF = cleanedDF.select(requiredColumnsForEnrichedLayer)
-    cleanedDF = renameColumns(cleanedDF, data).na.replace({'': None, 'null': None})
-    cleanedDF = withColumnsQuarterAndYear(cleanedDF, columnsDict)
-
-    cnt = 0  # initialize
-
-    # --- Step 3: Aggregation logic ---
-    if country != 'TUR' and country != "MYS":
-        cleanedDF = cleanedDF.groupBy(
-            "Period", "PharmacyId", "Brand", "SkuCode",
-            "Quarter", "Year", "IngestFileName", "IngestedAt", "Version"
-        ).sum("SalesQty")
-
-        cleanedDF = cleanedDF.withColumnRenamed("sum(SalesQty)", "SalesQty").dropDuplicates()
-
-        cleanedDF = cleanedDF.select(
-            'Period', 'PharmacyId', 'Brand', 'SkuCode', 'SalesQty',
-            'Quarter', 'Year', 'IngestFileName', 'IngestedAt', 'Version'
-        )
-
-        cnt = cleanedDF.count()
-
-    # --- Step 4: TUR logic ---
-    if country == 'TUR':
-        cleanedDF = cleanedDF.withColumn('Brand', lit('NA'))
-        cleanedDF = cleanedDF.withColumn('DiscountPrincipal', lit(0))
-
-        cleanedDF = cleanedDF.select(
-            'PharmacyId', 'Brand', 'SkuCode', 'Period', 'SalesQty',
-            'InvoiceNumber', 'Bonus', 'DiscountPrincipal',
-            'Quarter', 'Year', 'IngestFileName', 'IngestedAt', 'Version'
-        )
-
-        cnt = cleanedDF.count()
-
-    # --- Step 5: MYS logic ---
-    if country == 'MYS':
-        cleanedDF = cleanedDF.withColumn('Brand', lit('NA'))
-
-        cleanedDF = cleanedDF.select(
-            'Period', 'PharmacyId', 'AccountCode', 'AccountChannel',
-            'Brand', 'SkuCode', 'SalesQty',
-            'IngestFileName', 'IngestedAt', 'Version',
-            'Quarter', 'Year'
-        )
-
-        cnt = cleanedDF.count()
-
-    # --- Step 6: Max date checks ---
-    max_value_cleaned = cleanedDF.select(
-        date_format(col("Period"), "yyyyMMdd")
-    ).agg({'date_format(Period, yyyyMMdd)': 'max'})
-
-    max_time_cleaned = int(
-        max_value_cleaned.collect()[0]['max(date_format(Period, yyyyMMdd))']
-    )
-
-    print("Max Cleaned:", max_time_cleaned)
-
-    max_value_enrich = enrichDF.select(
-        date_format(col("Period"), "yyyyMMdd")
-    ).agg({'date_format(Period, yyyyMMdd)': 'max'})
-
-    max_time_enrich = int(
-        max_value_enrich.collect()[0]['max(date_format(Period, yyyyMMdd))']
-    )
-
-    print("Max Enrich:", max_time_enrich)
-
-    # --- Step 7: Validation ---
-    if max_time_enrich > max_time_cleaned:
-        return_res = json.dumps({
-            "Status": 0,
-            "Counts": cnt,
-            "Result": "BackDated records obtained for MDTR Foundation Layer",
-            "code": "NA"
-        })
-
-        return return_res, cleanedDF   # ✅ returning DF
-
-    else:
-        min_value = cleanedDF.agg({'Period': 'min'})
-        initial_value = str(min_value.collect()[0]['min(Period)'])
-
-        mainDF = enrichDF.filter(enrichDF.Period < initial_value)
-
-        enrichnewDF = mainDF.union(cleanedDF)
-
-        incrementalLoadOverwrite(partitionList, enrichnewDF, enrichedLayerPath)
-
-        cnt = enrichnewDF.count()
-
-        return_res = json.dumps({
-            "Status": 1,
-            "Counts": cnt,
-            "Result": "Success",
-            "code": "NA"
-        })
-
-        return return_res, cleanedDF  
 
 
 
