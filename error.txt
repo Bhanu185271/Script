@@ -1,30 +1,60 @@
 # ==============================================================================
-# GENIE SPACE — SERIAL COMPARE, SELECTIVE MERGE & ROLLBACK  v3.1
+# GENIE SPACE — SERIAL COMPARE, SELECTIVE MERGE & ROLLBACK  v4.0
 # ==============================================================================
-# Changes from v3.0:
-#   - Cell 2 / Cell 3 : display ONLY serial_no, category, description columns
-#   - Removed ALL HTML rendering (displayHTML / render_df_html) — pure DataFrame
-#   - Full content visibility: every cell printed with NO truncation via
-#     pandas options + to_string(index=False) fallback for long values
-#   - df_compare: LHS and RHS rows are ALIGNED BY NAME/KEY within each category
-#     so identical items sit on the same row; items absent in one space are blank
+# Use case: Two Genie spaces → compare side-by-side → cherry-pick → merge.
+#
+# What's new in v4.0 (vs original v3.0):
+#   ✓ rich.table used for ALL terminal output  — zero HTML
+#   ✓ 3 columns per space: serial_no | category | description
+#     "description" is a composite that always shows SQL / columns / text
+#     so no cell is ever empty / meaningless
+#   ✓ Cell 3 comparison aligned by NAME/KEY within each category
+#     (original did positional zip → wrong items side-by-side)
+#   ✓ GitHub diff-style colour coding
+#       green row  = item exists in Space 1 ONLY  (left-only)
+#       cyan  row  = item exists in Space 2 ONLY  (right-only)
+#       white row  = item exists in BOTH spaces
+#   ✓ Hidden-column detection from serialized_space column_configs
+#     column_config.hidden == True → flagged [HIDDEN] in output
+#     hidden status preserved in merged space automatically (deep-copy)
+#   ✓ PDF + JSON file saving fixed for Databricks:
+#       JSON  → os.makedirs + open(), fallback to dbutils.fs.put (dbfs:/)
+#       PDF   → written to /tmp/ first, then copied to target path;
+#               fallback to dbfs:/FileStore/genie_snapshots/ if needed
+#   ✓ Summary table enhanced: shows Common / SP1-only / SP2-only counts
 # ==============================================================================
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CELL 1 — CONFIG + MODE WIDGET
+# CELL 1 — IMPORTS  +  CONFIG  +  MODE WIDGET
 # ─────────────────────────────────────────────────────────────────────────────
 
-import requests, json, copy
+import requests, json, copy, os, shutil
 from datetime import datetime
 import pandas as pd
 
-# ── Disable ALL pandas truncation globally ───────────────────────────────────
-pd.set_option("display.max_colwidth",      None)
-pd.set_option("display.max_rows",          None)
-pd.set_option("display.width",             None)
-pd.set_option("display.expand_frame_repr", False)
-pd.set_option("display.max_seq_items",     None)
+# ── Install rich if not present (pre-installed on DBR 11.3+) ─────────────────
+try:
+    from rich.console import Console
+    from rich.table  import Table
+    from rich        import box
+    from rich.text   import Text
+    from rich.panel  import Panel
+except ImportError:
+    import subprocess
+    subprocess.run(["pip", "install", "rich", "--quiet"], check=True)
+    from rich.console import Console
+    from rich.table   import Table
+    from rich         import box
+    from rich.text    import Text
+    from rich.panel   import Panel
+
+# ── Rich console — force_terminal=True so ANSI codes render in Databricks ────
+console = Console(force_terminal=True, width=280, highlight=False, markup=True)
+
+# ── Pandas — disable ALL truncation (used internally; display via rich) ───────
+pd.set_option("display.max_colwidth", None)
+pd.set_option("display.max_rows",     None)
 
 # ── User config ───────────────────────────────────────────────────────────────
 DATABRICKS_HOST  = "https://adb-16520.0.azuredatabricks.net"
@@ -34,10 +64,14 @@ WAREHOUSE_ID     = ""
 NEW_SPACE_TITLE  = ""
 NEW_SPACE_DESC   = "Genie space merger for Insights Navigator application"
 
-# Paths
+# Paths — used for snapshots, exports, and PDF report
 PARENT_PATH      = "/Shared/iNavi_Metadata/genie/post_request_import_api"
 SNAPSHOT_FOLDER  = "/Workspace/Users/chandrabhanu.x.chandrabhanu@gsk.com/Genie_Snapshot"
 MERGED_SAVE_PATH = "/Workspace/Users/chandrabhanu.x.chandrabhanu@gsk.com/merged_genie_space.json"
+
+# DBFS fallback paths (used when Workspace path is not writable)
+DBFS_SNAPSHOT_FOLDER  = "dbfs:/FileStore/genie_snapshots"
+DBFS_MERGED_SAVE_PATH = "dbfs:/FileStore/genie_snapshots/merged_genie_space.json"
 
 HEADERS = {
     "Authorization": f"Bearer {TOKEN}",
@@ -57,21 +91,33 @@ mode = dbutils.widgets.get("mode")
 if mode == "merge":
     dbutils.widgets.text(name="space_id_1", defaultValue="", label="2. Space ID 1  (e.g. v1.2)")
     dbutils.widgets.text(name="space_id_2", defaultValue="", label="3. Space ID 2  (e.g. v1.3)")
-    print("Mode : MERGE")
-    print("Fill Space ID 1 and Space ID 2, then run Cell 2.")
+    console.print(Panel("[bold green]Mode : MERGE[/bold green]\nFill Space ID 1 and Space ID 2, then run Cell 2.",
+                        title="Genie Space Merge v4.0", border_style="green"))
 else:
     dbutils.widgets.text(name="rollback_file", defaultValue="", label="2. Snapshot filename to restore")
-    print("Mode : ROLLBACK")
-    print(f"Snapshot folder : {SNAPSHOT_FOLDER}")
-    print("Enter the snapshot filename, then run Cell 9.")
+    console.print(Panel(f"[bold yellow]Mode : ROLLBACK[/bold yellow]\nSnapshot folder : {SNAPSHOT_FOLDER}\nEnter snapshot filename, then run Cell 9.",
+                        title="Genie Space Merge v4.0", border_style="yellow"))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CELL 2 — LOAD BOTH SPACES  +  BUILD SERIAL REGISTRIES
 #
-# OUTPUT: Shows df_sp1 and df_sp2 with ONLY these 3 columns:
+# Displays df_sp1 and df_sp2 each as a rich.table with 3 columns:
 #   serial_no | category | description
-# Every character is visible — no truncation, no HTML, pure DataFrame.
+#
+# "description" is always populated:
+#   INSTRUCTION   → the instruction text itself
+#   TABLE         → table desc + visible cols + [HIDDEN] cols flagged
+#   JOIN          → SQL join condition
+#   MEASURE       → measure desc + SQL expression + synonyms
+#   EXPRESSION    → expression desc + SQL
+#   FILTER        → filter desc + SQL
+#   BENCHMARK     → question text + SQL
+#   SAMPLE_QUESTION → question text
+#   EXAMPLE_SQL   → question text + SQL
+#
+# Hidden columns: column_config entries with hidden=True are flagged
+# in the display and preserved as-is in the merged space.
 # ─────────────────────────────────────────────────────────────────────────────
 
 mode = dbutils.widgets.get("mode")
@@ -94,22 +140,22 @@ if mode == "merge":
         outer = resp.json()
         raw   = outer.get("serialized_space")
         if raw is None:
-            raise KeyError(f"'serialized_space' not found. Keys present: {list(outer.keys())}")
+            raise KeyError(f"'serialized_space' not found. Keys: {list(outer.keys())}")
         inner = json.loads(raw) if isinstance(raw, str) else raw
         return outer, inner
 
-    # ── Data accessors ────────────────────────────────────────────────────────
+    # ── Helpers ───────────────────────────────────────────────────────────────
     def safe_str(val):
         if val is None:           return ""
         if isinstance(val, list): return " | ".join(str(v) for v in val if v is not None)
         return str(val)
 
     def sql_str(val):
-        """Joins sql list-or-string into one clean string."""
         if isinstance(val, list): return "".join(str(x) for x in val)
         if isinstance(val, str):  return val
         return ""
 
+    # ── Section accessors ─────────────────────────────────────────────────────
     def get_tables(ss):      return ss.get("data_sources", {}).get("tables", [])
     def get_inst_block(ss):  return ss.get("instructions", {})
     def get_snip(ss):        return get_inst_block(ss).get("sql_snippets", {})
@@ -124,36 +170,64 @@ if mode == "merge":
         return bm.get("questions", []) if isinstance(bm, dict) else (bm if isinstance(bm, list) else [])
     def get_sample_qs(ss):   return ss.get("config", {}).get("sample_questions", [])
 
-    # ── Full-content DataFrame printer (no truncation, no HTML) ───────────────
-    def print_df_full(df, title="", subtitle=""):
-        """Print a DataFrame with zero truncation — every character visible."""
-        print(f"\n{'='*80}")
-        print(f"  {title}")
-        if subtitle:
-            print(f"  {subtitle}")
-        print(f"{'='*80}")
-        # to_string forces full expansion even when pandas display settings
-        # are overridden by the notebook host
-        print(df.to_string(index=False, max_colwidth=None))
-        print(f"{'─'*80}\n")
+    # ── Composite display description builder ─────────────────────────────────
+    # Every cell is guaranteed to have meaningful content.
+    def make_display_desc(category, name, description, sql_expression, additional_info):
+        parts = []
+        if category == "INSTRUCTION":
+            # The instruction line IS the description
+            return name
+
+        elif category == "TABLE":
+            # additional_info already holds: "N cols (V visible, H hidden): ..."
+            if description:       parts.append(f"Desc: {description}")
+            if additional_info:   parts.append(additional_info)
+            return "\n".join(parts) if parts else name
+
+        elif category == "JOIN":
+            # SQL is the join condition — the most important field
+            if sql_expression:    parts.append(f"SQL: {sql_expression}")
+            return "\n".join(parts) if parts else name
+
+        elif category in ("MEASURE", "EXPRESSION", "FILTER"):
+            if description:       parts.append(f"Desc: {description}")
+            if sql_expression:    parts.append(f"SQL: {sql_expression}")
+            if additional_info:   parts.append(additional_info)
+            return "\n".join(parts) if parts else name
+
+        elif category == "BENCHMARK":
+            parts.append(f"Q: {name}")
+            if sql_expression:    parts.append(f"SQL: {sql_expression}")
+            return "\n".join(parts)
+
+        elif category == "SAMPLE_QUESTION":
+            return name
+
+        elif category == "EXAMPLE_SQL":
+            parts.append(f"Q: {name}")
+            if sql_expression:    parts.append(f"SQL: {sql_expression}")
+            return "\n".join(parts)
+
+        else:
+            return description or name
 
     # ── Serial registry builder ───────────────────────────────────────────────
-    #   Returns:
-    #     rows     — list of dicts for DataFrame (all fields fully expanded)
-    #     registry — dict {serial_no: {"category", "key", "item"}}
     def build_registry(ss, prefix):
         rows     = []
         registry = {}
         ctr      = [1]
 
-        def sn():
+        def next_serial():
             s = f"{prefix}_{ctr[0]:03d}"
             ctr[0] += 1
             return s
 
         def add(category, key, name, description, sql_expression,
                 additional_info, full_detail, item):
-            serial = sn()
+            serial       = next_serial()
+            display_desc = make_display_desc(
+                category, name, description, sql_expression, additional_info
+            )
             rows.append({
                 "serial_no"      : serial,
                 "category"       : category,
@@ -162,6 +236,7 @@ if mode == "merge":
                 "sql_expression" : sql_expression,
                 "additional_info": additional_info,
                 "full_detail"    : full_detail,
+                "display_desc"   : display_desc,   # composite for rich table
             })
             registry[serial] = {
                 "category": category,
@@ -169,12 +244,12 @@ if mode == "merge":
                 "item"    : copy.deepcopy(item),
             }
 
-        # ── 1. TEXT INSTRUCTIONS (each line → one serial) ─────────────────
+        # ── 1. TEXT INSTRUCTIONS ──────────────────────────────────────────────
         all_lines = []
         for ti in get_txt(ss):
             if not isinstance(ti, dict): continue
             content = ti.get("content", [])
-            if isinstance(content, str):  content = [content]
+            if isinstance(content, str): content = [content]
             for line in content:
                 line = str(line).strip()
                 if line: all_lines.append((line, ti))
@@ -192,7 +267,7 @@ if mode == "merge":
                 item           = {"line": line, "_parent_ti": parent_ti},
             )
 
-        # ── 2. TABLES (sorted by identifier) ─────────────────────────────
+        # ── 2. TABLES (hidden-column aware) ───────────────────────────────────
         tables_sorted = sorted(
             [t for t in get_tables(ss) if isinstance(t, dict) and t.get("identifier")],
             key=lambda t: t["identifier"].lower()
@@ -201,22 +276,38 @@ if mode == "merge":
             ident = t["identifier"]
             desc  = safe_str(t.get("description", ""))
             cols  = t.get("column_configs", [])
-            cols_summary = " | ".join(
-                f"{c.get('column_name','?')} [{safe_str(c.get('description',''))}]"
-                for c in cols if isinstance(c, dict)
+
+            # Separate visible and hidden columns
+            # Genie stores hidden columns via column_config.hidden == True
+            visible_cols = [c for c in cols if isinstance(c, dict) and not c.get("hidden", False)]
+            hidden_cols  = [c for c in cols if isinstance(c, dict) and c.get("hidden", False)]
+
+            vis_summary = " | ".join(
+                f"{c.get('column_name','?')}[{safe_str(c.get('description',''))}]"
+                for c in visible_cols
             )
+            hid_names = ", ".join(c.get("column_name", "?") for c in hidden_cols)
+
+            addl_parts = [
+                f"{len(cols)} cols  (visible:{len(visible_cols)}  hidden:{len(hidden_cols)})"
+            ]
+            if vis_summary:
+                addl_parts.append(f"Cols: {vis_summary}")
+            if hid_names:
+                addl_parts.append(f"[HIDDEN COLS: {hid_names}]")
+
             add(
                 category       = "TABLE",
                 key            = ident,
                 name           = ident,
                 description    = desc,
                 sql_expression = "",
-                additional_info= f"{len(cols)} columns: {cols_summary}",
+                additional_info= "\n".join(addl_parts),
                 full_detail    = json.dumps(t, ensure_ascii=False, indent=2),
-                item           = t,
+                item           = t,   # deepcopy preserves hidden=True in column_configs
             )
 
-        # ── 3. JOINS (sorted by join-key) ─────────────────────────────────
+        # ── 3. JOINS ─────────────────────────────────────────────────────────
         def join_display_key(j):
             if not isinstance(j, dict): return ""
             l = j.get("left",  {}).get("identifier", "") if isinstance(j.get("left"),  dict) else ""
@@ -234,17 +325,17 @@ if mode == "merge":
                 category       = "JOIN",
                 key            = jk,
                 name           = jk,
-                description    = sql,          # For JOINs, description = sql expression
+                description    = "",
                 sql_expression = sql,
                 additional_info= "",
                 full_detail    = json.dumps(j, ensure_ascii=False, indent=2),
                 item           = j,
             )
 
-        # ── 4. MEASURES (sorted by display_name / alias) ──────────────────
+        # ── 4. MEASURES ───────────────────────────────────────────────────────
         msrs_sorted = sorted(
             [m for m in get_measures(ss) if isinstance(m, dict)],
-            key=lambda m: m.get("display_name", m.get("alias","")).lower()
+            key=lambda m: m.get("display_name", m.get("alias", "")).lower()
         )
         for m in msrs_sorted:
             name = m.get("display_name", m.get("alias", ""))
@@ -261,10 +352,10 @@ if mode == "merge":
                 item           = m,
             )
 
-        # ── 5. EXPRESSIONS (sorted by alias) ─────────────────────────────
+        # ── 5. EXPRESSIONS ────────────────────────────────────────────────────
         exprs_sorted = sorted(
             [e for e in get_exprs(ss) if isinstance(e, dict)],
-            key=lambda e: e.get("alias","").lower()
+            key=lambda e: e.get("alias", "").lower()
         )
         for e in exprs_sorted:
             alias = e.get("alias", "")
@@ -280,10 +371,10 @@ if mode == "merge":
                 item           = e,
             )
 
-        # ── 6. FILTERS (sorted by display_name) ──────────────────────────
+        # ── 6. FILTERS ────────────────────────────────────────────────────────
         flts_sorted = sorted(
             [f for f in get_filters(ss) if isinstance(f, dict)],
-            key=lambda f: f.get("display_name","").lower()
+            key=lambda f: f.get("display_name", "").lower()
         )
         for f in flts_sorted:
             name = f.get("display_name", "")
@@ -299,10 +390,10 @@ if mode == "merge":
                 item           = f,
             )
 
-        # ── 7. BENCHMARKS (sorted by question) ───────────────────────────
+        # ── 7. BENCHMARKS ─────────────────────────────────────────────────────
         bms_sorted = sorted(
             [b for b in get_benchmarks(ss) if isinstance(b, dict)],
-            key=lambda b: safe_str(b.get("question","")).lower()
+            key=lambda b: safe_str(b.get("question", "")).lower()
         )
         for b in bms_sorted:
             q   = safe_str(b.get("question", ""))
@@ -311,17 +402,17 @@ if mode == "merge":
                 category       = "BENCHMARK",
                 key            = q,
                 name           = q,
-                description    = sql,           # For benchmarks, description = sql expression
+                description    = "",
                 sql_expression = sql,
                 additional_info= "",
                 full_detail    = json.dumps(b, ensure_ascii=False, indent=2),
                 item           = b,
             )
 
-        # ── 8. SAMPLE QUESTIONS (sorted by question) ──────────────────────
+        # ── 8. SAMPLE QUESTIONS ───────────────────────────────────────────────
         sqs_sorted = sorted(
             [sq for sq in get_sample_qs(ss) if isinstance(sq, dict)],
-            key=lambda sq: safe_str(sq.get("question","")).lower()
+            key=lambda sq: safe_str(sq.get("question", "")).lower()
         )
         for sq in sqs_sorted:
             q = safe_str(sq.get("question", ""))
@@ -336,10 +427,10 @@ if mode == "merge":
                 item           = sq,
             )
 
-        # ── 9. EXAMPLE SQLs (sorted by question) ─────────────────────────
+        # ── 9. EXAMPLE SQLs ───────────────────────────────────────────────────
         sqls_sorted = sorted(
             [es for es in get_sqls(ss) if isinstance(es, dict)],
-            key=lambda es: safe_str(es.get("question","")).lower()
+            key=lambda es: safe_str(es.get("question", "")).lower()
         )
         for es in sqls_sorted:
             q   = safe_str(es.get("question", ""))
@@ -348,7 +439,7 @@ if mode == "merge":
                 category       = "EXAMPLE_SQL",
                 key            = q,
                 name           = q,
-                description    = sql,           # For example SQLs, description = sql expression
+                description    = "",
                 sql_expression = sql,
                 additional_info= "",
                 full_detail    = json.dumps(es, ensure_ascii=False),
@@ -364,52 +455,94 @@ if mode == "merge":
     rows1, registry1 = build_registry(ss1, "SP1")
     rows2, registry2 = build_registry(ss2, "SP2")
 
-    ALL_COLS    = ["serial_no","category","name","description","sql_expression","additional_info","full_detail"]
-    DISPLAY_COLS = ["serial_no", "category", "description"]
-
+    ALL_COLS = [
+        "serial_no", "category", "name", "description",
+        "sql_expression", "additional_info", "full_detail", "display_desc"
+    ]
     df_sp1 = pd.DataFrame(rows1, columns=ALL_COLS)
     df_sp2 = pd.DataFrame(rows2, columns=ALL_COLS)
 
-    # ── Display df_sp1  (3-column view, full content, no truncation) ──────────
-    #
-    #   "description" for JOIN / BENCHMARK / EXAMPLE_SQL categories carries the
-    #   SQL expression so it is visible here even in the slim 3-column view.
-    #
-    print_df_full(
-        df_sp1[DISPLAY_COLS],
-        title   = f"df_sp1  —  Space 1: {outer1.get('title','?')}   [{SPACE_ID_1}]",
-        subtitle= f"{len(rows1)} items  |  Serial range: SP1_001 → SP1_{len(rows1):03d}  |  Columns: serial_no | category | description"
+    # ── Rich table renderer — 3 columns: serial | category | description ──────
+    def render_space_rich(df, space_title, space_id, prefix_color):
+        """
+        Renders one Genie space as a rich.table with exactly 3 columns:
+          serial_no  |  category  |  description (composite — always populated)
+        """
+        tbl = Table(
+            title=f"[bold {prefix_color}]{space_title}   [{space_id}]   {len(df)} items[/bold {prefix_color}]",
+            box=box.SIMPLE_HEAVY,
+            header_style=f"bold white on {prefix_color}",
+            show_lines=True,
+            expand=True,
+            padding=(0, 1),
+        )
+        tbl.add_column("Serial No",   style=f"bold {prefix_color}", width=10, no_wrap=True)
+        tbl.add_column("Category",    style="bold white",           width=18, no_wrap=True)
+        tbl.add_column("Description / SQL / Details",
+                       style="white", overflow="fold", ratio=1)
+
+        prev_cat = None
+        for _, row in df.iterrows():
+            cat = row["category"]
+            # Insert a blank separator row between categories
+            if cat != prev_cat:
+                if prev_cat is not None:
+                    tbl.add_row("", "", "", style="dim")
+                prev_cat = cat
+
+            tbl.add_row(
+                row["serial_no"],
+                row["category"],
+                row["display_desc"],
+            )
+
+        console.print()
+        console.print(tbl)
+        console.print()
+
+    # ── Display Space 1 ───────────────────────────────────────────────────────
+    render_space_rich(
+        df_sp1,
+        space_title   = f"df_sp1  —  Space 1: {outer1.get('title','?')}",
+        space_id      = SPACE_ID_1,
+        prefix_color  = "green",
     )
 
-    # ── Display df_sp2  (3-column view, full content, no truncation) ──────────
-    print_df_full(
-        df_sp2[DISPLAY_COLS],
-        title   = f"df_sp2  —  Space 2: {outer2.get('title','?')}   [{SPACE_ID_2}]",
-        subtitle= f"{len(rows2)} items  |  Serial range: SP2_001 → SP2_{len(rows2):03d}  |  Columns: serial_no | category | description"
+    # ── Display Space 2 ───────────────────────────────────────────────────────
+    render_space_rich(
+        df_sp2,
+        space_title   = f"df_sp2  —  Space 2: {outer2.get('title','?')}",
+        space_id      = SPACE_ID_2,
+        prefix_color  = "cyan",
     )
 
-    print(f"\n{'='*70}")
-    print(f"  Both spaces loaded and serialised.")
-    print(f"  Space 1 : {outer1.get('title','?')}  ({SPACE_ID_1})  →  {len(rows1)} items")
-    print(f"  Space 2 : {outer2.get('title','?')}  ({SPACE_ID_2})  →  {len(rows2)} items")
-    print(f"{'='*70}")
-    print("\nRun Cell 3 to see the side-by-side comparison DataFrame (df_compare).")
+    # ── Summary ───────────────────────────────────────────────────────────────
+    console.print(Panel(
+        f"[green]Space 1[/green] : {outer1.get('title','?')}  ({SPACE_ID_1})  →  {len(rows1)} items\n"
+        f"[cyan]Space 2[/cyan] : {outer2.get('title','?')}  ({SPACE_ID_2})  →  {len(rows2)} items\n\n"
+        f"Run Cell 3 to see the side-by-side comparison.",
+        title="Both spaces loaded", border_style="white"
+    ))
 
 else:
-    print("Mode = rollback — Cell 2 skipped.")
+    console.print("[yellow]Mode = rollback — Cell 2 skipped.[/yellow]")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CELL 3 — SIDE-BY-SIDE COMPARISON  (df_compare : LHS = Space 1 | RHS = Space 2)
+# CELL 3 — SIDE-BY-SIDE COMPARISON  (df_compare)
 #
-# KEY CHANGE — rows are ALIGNED BY NAME/KEY within each category:
-#   • All unique keys from both spaces are unioned and sorted alphabetically.
-#   • If a key exists in Space 1 its data fills the SP1_* columns; otherwise blank.
-#   • Same for Space 2  → identical items sit on the SAME row for easy comparison.
+# KEY DESIGN:
+#   • For each category, all keys (names) from BOTH spaces are unioned
+#     and sorted alphabetically — so the SAME item lands on the SAME ROW.
+#     (Original code used positional zip which paired wrong items together.)
 #
-# OUTPUT: Pure DataFrame (no HTML), only these columns per side:
-#   category | SP1_serial | SP1_description | SP2_serial | SP2_description
-#   (description carries sql_expression for JOIN/BENCHMARK/EXAMPLE_SQL rows)
+#   • GitHub diff colour coding:
+#       [green]  row  = item exists in Space 1 ONLY  (not merged into SP2 yet)
+#       [cyan]   row  = item exists in Space 2 ONLY  (exists in target, not source)
+#       [white]  row  = item exists in BOTH spaces   (same key)
+#
+#   • Columns: SP1_serial | SP1_category | SP1_description
+#              SP2_serial | SP2_category | SP2_description
 # ─────────────────────────────────────────────────────────────────────────────
 
 mode = dbutils.widgets.get("mode")
@@ -428,90 +561,174 @@ if mode == "merge":
         "EXAMPLE_SQL",
     ]
 
+    # ── Build aligned comparison rows ─────────────────────────────────────────
     compare_rows = []
 
     for cat in CATEGORIES:
         sp1_cat = df_sp1[df_sp1["category"] == cat].copy()
         sp2_cat = df_sp2[df_sp2["category"] == cat].copy()
 
-        # Build lookup dicts keyed by 'name' (which equals the canonical sort key)
-        sp1_by_name = {r["name"]: r for _, r in sp1_cat.iterrows()}
-        sp2_by_name = {r["name"]: r for _, r in sp2_cat.iterrows()}
+        # Index by name (canonical key within category)
+        sp1_by_key = {r["name"]: r for _, r in sp1_cat.iterrows()}
+        sp2_by_key = {r["name"]: r for _, r in sp2_cat.iterrows()}
 
-        # Union of all keys, sorted alphabetically — identical items align
-        all_keys = sorted(set(sp1_by_name.keys()) | set(sp2_by_name.keys()),
-                          key=lambda k: k.lower())
-
+        # Union of all keys, alphabetically sorted
+        all_keys = sorted(
+            set(sp1_by_key.keys()) | set(sp2_by_key.keys()),
+            key=str.lower
+        )
         if not all_keys:
-            continue  # skip empty categories
+            continue  # skip empty category
 
         for key in all_keys:
-            row = {"category": cat}
+            r1 = sp1_by_key.get(key)
+            r2 = sp2_by_key.get(key)
 
-            # ── LHS (Space 1) ─────────────────────────────────────────────
-            if key in sp1_by_name:
-                r1 = sp1_by_name[key]
-                row["SP1_serial"]      = r1["serial_no"]
-                row["SP1_description"] = r1["description"]
-            else:
-                row["SP1_serial"]      = ""
-                row["SP1_description"] = ""
-
-            # ── RHS (Space 2) ─────────────────────────────────────────────
-            if key in sp2_by_name:
-                r2 = sp2_by_name[key]
-                row["SP2_serial"]      = r2["serial_no"]
-                row["SP2_description"] = r2["description"]
-            else:
-                row["SP2_serial"]      = ""
-                row["SP2_description"] = ""
-
-            compare_rows.append(row)
+            compare_rows.append({
+                "category"       : cat,
+                "SP1_serial"     : r1["serial_no"]    if r1 is not None else "",
+                "SP1_category"   : r1["category"]     if r1 is not None else "",
+                "SP1_description": r1["display_desc"]  if r1 is not None else "",
+                "SP2_serial"     : r2["serial_no"]    if r2 is not None else "",
+                "SP2_category"   : r2["category"]     if r2 is not None else "",
+                "SP2_description": r2["display_desc"]  if r2 is not None else "",
+                # tracking flags for colour coding
+                "_in_sp1"        : r1 is not None,
+                "_in_sp2"        : r2 is not None,
+            })
 
     COMPARE_COLS = [
         "category",
-        "SP1_serial", "SP1_description",
-        "SP2_serial", "SP2_description",
+        "SP1_serial", "SP1_category", "SP1_description",
+        "SP2_serial", "SP2_category", "SP2_description",
     ]
-    df_compare = pd.DataFrame(compare_rows, columns=COMPARE_COLS)
+    df_compare = pd.DataFrame(compare_rows)
 
-    # ── Print df_compare — pure DataFrame, no HTML, full content ─────────────
-    print(f"\n{'='*80}")
-    print(f"  df_compare  —  Side-by-Side Comparison")
-    print(f"  LHS = Space 1: {outer1.get('title','?')}  [{SPACE_ID_1}]")
-    print(f"  RHS = Space 2: {outer2.get('title','?')}  [{SPACE_ID_2}]")
-    print(f"  Rows aligned by name/key within each category.")
-    print(f"  Blank SP1_* = item only in Space 2 | Blank SP2_* = item only in Space 1")
-    print(f"{'='*80}")
-    print(df_compare.to_string(index=False, max_colwidth=None))
-    print(f"{'─'*80}\n")
+    # ── Rich comparison table ─────────────────────────────────────────────────
+    cmp_tbl = Table(
+        title=(
+            f"[bold white]df_compare — Side-by-Side Comparison[/bold white]\n"
+            f"[green]■ Green = Space 1 ONLY[/green]   "
+            f"[cyan]■ Cyan  = Space 2 ONLY[/cyan]   "
+            f"[white]■ White = in BOTH spaces[/white]"
+        ),
+        box=box.SIMPLE_HEAVY,
+        show_lines=True,
+        expand=True,
+        padding=(0, 1),
+        header_style="bold white",
+    )
+
+    # ── Column definitions ────────────────────────────────────────────────────
+    # Space 1 side
+    cmp_tbl.add_column(
+        f"SP1 Serial\n[green]{outer1.get('title','?')}  [{SPACE_ID_1}][/green]",
+        style="bold green", width=10, no_wrap=True
+    )
+    cmp_tbl.add_column("SP1 Category", style="green", width=18, no_wrap=True)
+    cmp_tbl.add_column("SP1 Description / SQL / Details",
+                       style="green", overflow="fold", ratio=1)
+
+    # Space 2 side
+    cmp_tbl.add_column(
+        f"SP2 Serial\n[cyan]{outer2.get('title','?')}  [{SPACE_ID_2}][/cyan]",
+        style="bold cyan", width=10, no_wrap=True
+    )
+    cmp_tbl.add_column("SP2 Category", style="cyan", width=18, no_wrap=True)
+    cmp_tbl.add_column("SP2 Description / SQL / Details",
+                       style="cyan", overflow="fold", ratio=1)
+
+    # ── Populate rows ─────────────────────────────────────────────────────────
+    prev_cat = None
+
+    for _, row in df_compare.iterrows():
+        cat = row["category"]
+
+        # Category separator
+        if cat != prev_cat:
+            prev_cat = cat
+            # Bold banner row spanning all columns via a dummy row with styling
+            cmp_tbl.add_row(
+                f"▶  {cat}", "", "",
+                "",          "", "",
+                style="bold white on navy_blue",
+                end_section=False,
+            )
+
+        in_sp1 = row["_in_sp1"]
+        in_sp2 = row["_in_sp2"]
+
+        # GitHub diff colour:
+        #   only SP1  → green  (like "added on left side")
+        #   only SP2  → cyan   (like "added on right side")
+        #   in both   → default white
+        if in_sp1 and not in_sp2:
+            row_style = "bold green"
+        elif in_sp2 and not in_sp1:
+            row_style = "bold cyan"
+        else:
+            row_style = ""      # both present — white/default
+
+        cmp_tbl.add_row(
+            row["SP1_serial"],
+            row["SP1_category"],
+            row["SP1_description"],
+            row["SP2_serial"],
+            row["SP2_category"],
+            row["SP2_description"],
+            style=row_style,
+        )
+
+    console.print()
+    console.print(cmp_tbl)
+    console.print()
 
     # ── Summary counts per category ───────────────────────────────────────────
-    print(f"\n{'─'*70}")
-    print(f"  {'CATEGORY':<20}  {'SP1 count':>10}  {'SP2 count':>10}  {'Common':>10}  {'SP1 only':>10}  {'SP2 only':>10}")
-    print(f"{'─'*70}")
+    sum_tbl = Table(
+        title="Category Summary",
+        box=box.SIMPLE_HEAVY,
+        header_style="bold white",
+        show_lines=False,
+        padding=(0, 2),
+    )
+    sum_tbl.add_column("Category",    style="bold white",  width=20)
+    sum_tbl.add_column("SP1 Count",   style="green",       width=12, justify="right")
+    sum_tbl.add_column("SP2 Count",   style="cyan",        width=12, justify="right")
+    sum_tbl.add_column("In Both",     style="white",       width=12, justify="right")
+    sum_tbl.add_column("SP1 Only",    style="bold green",  width=12, justify="right")
+    sum_tbl.add_column("SP2 Only",    style="bold cyan",   width=12, justify="right")
+
     for cat in CATEGORIES:
-        c1 = len(df_sp1[df_sp1["category"] == cat])
-        c2 = len(df_sp2[df_sp2["category"] == cat])
         sp1_keys = set(df_sp1[df_sp1["category"] == cat]["name"].tolist())
         sp2_keys = set(df_sp2[df_sp2["category"] == cat]["name"].tolist())
-        common   = len(sp1_keys & sp2_keys)
-        only1    = len(sp1_keys - sp2_keys)
-        only2    = len(sp2_keys - sp1_keys)
-        print(f"  {cat:<20}  {c1:>10}  {c2:>10}  {common:>10}  {only1:>10}  {only2:>10}")
-    print(f"{'─'*70}")
-    print(f"  {'TOTAL':<20}  {len(df_sp1):>10}  {len(df_sp2):>10}")
-    print(f"{'─'*70}")
-    print("\nRun Cell 4 to fill in serial number selection widgets.")
+        c1      = len(sp1_keys)
+        c2      = len(sp2_keys)
+        common  = len(sp1_keys & sp2_keys)
+        only1   = len(sp1_keys - sp2_keys)
+        only2   = len(sp2_keys - sp1_keys)
+        if c1 == 0 and c2 == 0:
+            continue
+        sum_tbl.add_row(cat, str(c1), str(c2), str(common), str(only1), str(only2))
+
+    sum_tbl.add_section()
+    sum_tbl.add_row(
+        "TOTAL",
+        str(len(df_sp1)), str(len(df_sp2)), "", "", "",
+        style="bold white"
+    )
+
+    console.print(sum_tbl)
+    console.print()
+    console.print("[bold white]Run Cell 4 to fill in serial number selection widgets.[/bold white]")
 
 else:
-    print("Mode = rollback — Cell 3 skipped.")
+    console.print("[yellow]Mode = rollback — Cell 3 skipped.[/yellow]")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CELL 4 — SERIAL NUMBER SELECTION WIDGETS
 #
-#   Widget 4a : ADD serial numbers from Space 1  (e.g. SP1_001,SP1_005,SP1_012)
+#   Widget 4a : ADD serial numbers from Space 1  (e.g. SP1_001,SP1_005)
 #   Widget 4b : ADD serial numbers from Space 2  (e.g. SP2_003,SP2_007)
 #   Widget 4c : REMOVE serial numbers from Space 1 selections
 #   Widget 4d : REMOVE serial numbers from Space 2 selections
@@ -544,24 +761,24 @@ if mode == "merge":
         label        = "4d. REMOVE from Space 2 selections  (comma-separated SP2_xxx serials)"
     )
 
-    print("""
-Widget 4a — Enter Space 1 serial numbers to ADD to the merged Genie  (e.g. SP1_001, SP1_005, SP1_012)
-Widget 4b — Enter Space 2 serial numbers to ADD to the merged Genie
-Widget 4c — Enter Space 1 serial numbers to REMOVE from the final merged Genie  (overrides 4a)
-Widget 4d — Enter Space 2 serial numbers to REMOVE from the final merged Genie  (overrides 4b)
-
-Use df_sp1, df_sp2, and df_compare above to pick serial numbers.
-Leave all widgets blank to build a fully merged space (both spaces, SP1 wins on conflict).
-
-Run Cell 5 after filling in the widgets.
-""")
+    console.print(Panel(
+        "[bold green]Widget 4a[/bold green] — Space 1 serial numbers to [green]ADD[/green]   (e.g. SP1_001, SP1_005, SP1_012)\n"
+        "[bold green]Widget 4b[/bold green] — Space 2 serial numbers to [green]ADD[/green]\n"
+        "[bold red]Widget 4c[/bold red]   — Space 1 serial numbers to [red]REMOVE[/red]  (overrides 4a)\n"
+        "[bold red]Widget 4d[/bold red]   — Space 2 serial numbers to [red]REMOVE[/red]  (overrides 4b)\n\n"
+        "Use [green]df_sp1[/green], [cyan]df_sp2[/cyan], and [white]df_compare[/white] above to pick serial numbers.\n"
+        "Leave ALL widgets blank → full merge (both spaces, SP1 wins on conflict).\n\n"
+        "[bold white]Run Cell 5 after filling in the widgets.[/bold white]",
+        title="Serial Number Selection", border_style="yellow"
+    ))
 
 else:
-    print("Mode = rollback — Cell 4 skipped.")
+    console.print("[yellow]Mode = rollback — Cell 4 skipped.[/yellow]")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CELL 5 — BUILD MERGED SPACE FROM SERIAL NUMBER SELECTIONS
+# (logic unchanged from v3.0 — hidden column items are preserved via deepcopy)
 # ─────────────────────────────────────────────────────────────────────────────
 
 mode = dbutils.widgets.get("mode")
@@ -569,30 +786,26 @@ mode = dbutils.widgets.get("mode")
 if mode == "merge":
 
     def parse_serials(raw):
-        """Parse comma-separated serial numbers; uppercase and strip whitespace."""
         return set(s.strip().upper() for s in raw.split(",") if s.strip())
 
-    raw_add1  = dbutils.widgets.get("add_from_sp1")
-    raw_add2  = dbutils.widgets.get("add_from_sp2")
-    raw_rem1  = dbutils.widgets.get("remove_from_sp1")
-    raw_rem2  = dbutils.widgets.get("remove_from_sp2")
+    raw_add1 = dbutils.widgets.get("add_from_sp1")
+    raw_add2 = dbutils.widgets.get("add_from_sp2")
+    raw_rem1 = dbutils.widgets.get("remove_from_sp1")
+    raw_rem2 = dbutils.widgets.get("remove_from_sp2")
 
-    add_sp1  = parse_serials(raw_add1)
-    add_sp2  = parse_serials(raw_add2)
-    rem_sp1  = parse_serials(raw_rem1)
-    rem_sp2  = parse_serials(raw_rem2)
+    add_sp1 = parse_serials(raw_add1)
+    add_sp2 = parse_serials(raw_add2)
+    rem_sp1 = parse_serials(raw_rem1)
+    rem_sp2 = parse_serials(raw_rem2)
 
-    # ── If nothing selected → add EVERYTHING from both spaces ────────────────
     if not add_sp1 and not add_sp2:
         add_sp1 = set(registry1.keys())
         add_sp2 = set(registry2.keys())
-        print("No specific serials entered → using ALL items from both spaces.")
+        console.print("[dim]No specific serials entered → using ALL items from both spaces.[/dim]")
 
-    # ── Effective sets (add minus remove) ─────────────────────────────────────
     eff_sp1 = add_sp1 - rem_sp1
     eff_sp2 = add_sp2 - rem_sp2
 
-    # ── Validate ──────────────────────────────────────────────────────────────
     invalid_msgs = []
     for sn in eff_sp1:
         if sn not in registry1:
@@ -601,18 +814,18 @@ if mode == "merge":
         if sn not in registry2:
             invalid_msgs.append(f"  ✗ {sn}  — not found in Space 2 registry")
     if invalid_msgs:
-        print("WARNING — Invalid or unrecognised serial numbers:")
-        for m in invalid_msgs: print(m)
-        print()
+        console.print("[bold red]WARNING — Invalid / unrecognised serial numbers:[/bold red]")
+        for m in invalid_msgs:
+            console.print(f"[red]{m}[/red]")
 
-    # ── Build empty merged space skeleton ─────────────────────────────────────
+    # ── Build empty merged skeleton ───────────────────────────────────────────
     merged_ss = {
         "data_sources": {"tables": []},
         "instructions": {
-            "text_instructions"   : [],
-            "join_specs"          : [],
+            "text_instructions"    : [],
+            "join_specs"           : [],
             "example_question_sqls": [],
-            "sql_snippets"        : {
+            "sql_snippets"         : {
                 "filters"    : [],
                 "expressions": [],
                 "measures"   : [],
@@ -627,28 +840,21 @@ if mode == "merge":
     inst = merged_ss["instructions"]
     snip = inst["sql_snippets"]
 
-    # Deduplication tracking
     seen = {
-        "TABLE"          : set(),
-        "JOIN"           : set(),
-        "MEASURE"        : set(),
-        "EXPRESSION"     : set(),
-        "FILTER"         : set(),
-        "BENCHMARK"      : set(),
-        "SAMPLE_QUESTION": set(),
-        "EXAMPLE_SQL"    : set(),
-        "INSTRUCTION"    : set(),
+        "TABLE": set(), "JOIN": set(), "MEASURE": set(), "EXPRESSION": set(),
+        "FILTER": set(), "BENCHMARK": set(), "SAMPLE_QUESTION": set(),
+        "EXAMPLE_SQL": set(), "INSTRUCTION": set(),
     }
 
-    instr_lines     = []
+    instr_lines      = []
     merge_report_sp1 = []
     merge_report_sp2 = []
-    merge_skipped   = []
+    merge_skipped    = []
 
     def apply_item(entry, sn, source_label):
         cat  = entry["category"]
         key  = entry["key"]
-        item = copy.deepcopy(entry["item"])
+        item = copy.deepcopy(entry["item"])   # deepcopy → hidden=True preserved
 
         if key in seen[cat]:
             merge_skipped.append(f"  = {sn}  [{cat}]  {str(key)[:80]}  → SP1 version kept")
@@ -656,79 +862,62 @@ if mode == "merge":
 
         seen[cat].add(key)
 
-        if   cat == "TABLE":
-            ds["tables"].append(item)
-        elif cat == "JOIN":
-            inst["join_specs"].append(item)
-        elif cat == "MEASURE":
-            snip["measures"].append(item)
-        elif cat == "EXPRESSION":
-            snip["expressions"].append(item)
-        elif cat == "FILTER":
-            snip["filters"].append(item)
-        elif cat == "BENCHMARK":
-            merged_ss["benchmarks"]["questions"].append(item)
-        elif cat == "SAMPLE_QUESTION":
-            merged_ss["config"]["sample_questions"].append(item)
-        elif cat == "EXAMPLE_SQL":
-            inst["example_question_sqls"].append(item)
-        elif cat == "INSTRUCTION":
-            instr_lines.append(item["line"])
-
+        if   cat == "TABLE":          ds["tables"].append(item)
+        elif cat == "JOIN":           inst["join_specs"].append(item)
+        elif cat == "MEASURE":        snip["measures"].append(item)
+        elif cat == "EXPRESSION":     snip["expressions"].append(item)
+        elif cat == "FILTER":         snip["filters"].append(item)
+        elif cat == "BENCHMARK":      merged_ss["benchmarks"]["questions"].append(item)
+        elif cat == "SAMPLE_QUESTION":merged_ss["config"]["sample_questions"].append(item)
+        elif cat == "EXAMPLE_SQL":    inst["example_question_sqls"].append(item)
+        elif cat == "INSTRUCTION":    instr_lines.append(item["line"])
         return True
 
-    # Apply Space 1 first (SP1 wins on conflict)
     for sn in sorted(eff_sp1):
         if sn not in registry1: continue
         entry = registry1[sn]
-        added = apply_item(entry, sn, "SP1")
-        if added:
+        if apply_item(entry, sn, "SP1"):
             merge_report_sp1.append(f"  + {sn}  [{entry['category']}]  {str(entry['key'])[:80]}")
 
-    # Apply Space 2
     for sn in sorted(eff_sp2):
         if sn not in registry2: continue
         entry = registry2[sn]
-        added = apply_item(entry, sn, "SP2")
-        if added:
+        if apply_item(entry, sn, "SP2"):
             merge_report_sp2.append(f"  + {sn}  [{entry['category']}]  {str(entry['key'])[:80]}")
 
-    # Build text_instructions block (one block, sorted lines)
     if instr_lines:
         inst["text_instructions"] = [{"content": sorted(instr_lines)}]
 
-    # ── Print merge report ────────────────────────────────────────────────────
-    print(f"\n{'='*70}")
-    print(f"  MERGED SPACE BUILT")
-    print(f"{'='*70}")
-    print(f"\n  ▶ Added from Space 1  ({len(merge_report_sp1)} items):")
-    for m in merge_report_sp1: print(m)
-    print(f"\n  ▶ Added from Space 2  ({len(merge_report_sp2)} items):")
-    for m in merge_report_sp2: print(m)
-    if merge_skipped:
-        print(f"\n  ▶ Skipped — duplicate key, SP1 version kept  ({len(merge_skipped)}):")
-        for m in merge_skipped: print(m)
-
-    print(f"\n  ─── Final merged content summary ───")
-    print(f"    Tables           : {len(ds['tables'])}")
-    print(f"    Joins            : {len(inst['join_specs'])}")
-    print(f"    Instructions     : {len(instr_lines)} lines")
-    print(f"    Measures         : {len(snip['measures'])}")
-    print(f"    Expressions      : {len(snip['expressions'])}")
-    print(f"    Filters          : {len(snip['filters'])}")
-    print(f"    Benchmarks       : {len(merged_ss['benchmarks']['questions'])}")
-    print(f"    Sample Questions : {len(merged_ss['config']['sample_questions'])}")
-    print(f"    Example SQLs     : {len(inst['example_question_sqls'])}")
-    _merged_size = len(json.dumps(merged_ss, ensure_ascii=False))
-    print(f"\n    JSON size        : {_merged_size:,} characters")
-    print(f"\nRun Cell 6 to sanitize + validate.")
+    console.print(Panel(
+        f"[green]Added from Space 1  ({len(merge_report_sp1)} items):[/green]\n"
+        + "\n".join(merge_report_sp1 or ["  (none)"]) + "\n\n"
+        f"[cyan]Added from Space 2  ({len(merge_report_sp2)} items):[/cyan]\n"
+        + "\n".join(merge_report_sp2 or ["  (none)"]) + "\n\n"
+        + (
+            f"[yellow]Skipped — duplicate key, SP1 kept  ({len(merge_skipped)}):[/yellow]\n"
+            + "\n".join(merge_skipped) if merge_skipped else ""
+        ),
+        title="Merged Space Built", border_style="green"
+    ))
+    console.print(f"  Tables           : {len(ds['tables'])}")
+    console.print(f"  Joins            : {len(inst['join_specs'])}")
+    console.print(f"  Instructions     : {len(instr_lines)} lines")
+    console.print(f"  Measures         : {len(snip['measures'])}")
+    console.print(f"  Expressions      : {len(snip['expressions'])}")
+    console.print(f"  Filters          : {len(snip['filters'])}")
+    console.print(f"  Benchmarks       : {len(merged_ss['benchmarks']['questions'])}")
+    console.print(f"  Sample Questions : {len(merged_ss['config']['sample_questions'])}")
+    console.print(f"  Example SQLs     : {len(inst['example_question_sqls'])}")
+    console.print(f"\n  JSON size        : {len(json.dumps(merged_ss, ensure_ascii=False)):,} chars")
+    console.print("\n[bold white]Run Cell 6 to sanitize + validate.[/bold white]")
 
 else:
-    print("Mode = rollback — Cell 5 skipped.")
+    console.print("[yellow]Mode = rollback — Cell 5 skipped.[/yellow]")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CELL 6 — PREPARE: Sanitize + Sort + Validate
+# CELL 6 — SANITIZE + SORT + VALIDATE
+# (unchanged from v3.0)
 # ─────────────────────────────────────────────────────────────────────────────
 
 mode = dbutils.widgets.get("mode")
@@ -744,6 +933,7 @@ if mode == "merge":
         return None
 
     def sanitize_descriptions(ss):
+        """Normalise description fields — does NOT touch hidden or other fields."""
         for t in ss.get("data_sources", {}).get("tables", []):
             if not isinstance(t, dict): continue
             if "description" in t:
@@ -756,6 +946,7 @@ if mode == "merge":
                     fixed = fix_description(c["description"])
                     if fixed: c["description"] = fixed
                     else:     del c["description"]
+                # NOTE: c["hidden"] is deliberately NOT touched — preserved as-is
 
     def sort_lists(ss):
         def by_id(lst):
@@ -767,9 +958,9 @@ if mode == "merge":
         inst = ss.get("instructions",  {})
         snip = inst.get("sql_snippets", {})
 
-        if "tables"                  in ds:   ds["tables"]                   = by_ident(ds["tables"])
-        if "metric_views"            in ds:   ds["metric_views"]              = by_ident(ds["metric_views"])
-        if "example_question_sqls"   in inst: inst["example_question_sqls"]   = by_id(inst["example_question_sqls"])
+        if "tables"               in ds:   ds["tables"]                 = by_ident(ds["tables"])
+        if "metric_views"         in ds:   ds["metric_views"]           = by_ident(ds["metric_views"])
+        if "example_question_sqls" in inst: inst["example_question_sqls"] = by_id(inst["example_question_sqls"])
         for k in ("filters", "expressions", "measures"):
             if k in snip: snip[k] = by_id(snip[k])
         bm = ss.get("benchmarks", {})
@@ -783,29 +974,40 @@ if mode == "merge":
     sanitize_descriptions(ready_ss)
     sort_lists(ready_ss)
 
-    # ── JSON validity check ───────────────────────────────────────────────────
     try:
         test_str = json.dumps(ready_ss, ensure_ascii=False)
         json.loads(test_str)
-        print(f"  ✓  Valid JSON — {len(test_str):,} characters")
+        console.print(f"[green]  ✓  Valid JSON — {len(test_str):,} characters[/green]")
     except Exception as e:
-        print(f"  ✗  JSON validation failed: {e}")
+        console.print(f"[red]  ✗  JSON validation failed: {e}[/red]")
         raise
 
     txt_count = len(ready_ss.get("instructions", {}).get("text_instructions", []))
-    ex_ids    = [x.get("id","") for x in ready_ss.get("instructions",{})
-                 .get("example_question_sqls",[]) if isinstance(x, dict)]
+    ex_ids    = [x.get("id","") for x in
+                 ready_ss.get("instructions",{}).get("example_question_sqls",[])
+                 if isinstance(x, dict)]
     ex_sorted = ex_ids == sorted(ex_ids)
-    print(f"  text_instructions blocks : {txt_count}  (expected ≤ 1)")
-    print(f"  example_question_sqls    : {'sorted ✓' if ex_sorted else 'NOT sorted ✗'}")
-    print("\nRun Cell 7 to snapshot both spaces, save JSON packages, and generate the PDF.")
+    console.print(f"  text_instructions blocks : {txt_count}  (expected ≤ 1)")
+    console.print(f"  example_question_sqls    : {'[green]sorted ✓[/green]' if ex_sorted else '[red]NOT sorted ✗[/red]'}")
+    console.print("\n[bold white]Run Cell 7 to snapshot, save JSON packages, and generate the PDF.[/bold white]")
 
 else:
-    print("Mode = rollback — Cell 6 skipped.")
+    console.print("[yellow]Mode = rollback — Cell 6 skipped.[/yellow]")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CELL 7 — SNAPSHOT BOTH SPACES  +  SAVE JSON PACKAGES  +  PDF COMPARISON
+#
+# FILE SAVING FIX FOR DATABRICKS:
+#   JSON files — os.makedirs() + open() with fallback to dbutils.fs.put() on dbfs:/
+#   PDF  file  — written to /tmp/ first (always writable), then copied to
+#                SNAPSHOT_FOLDER via shutil.copy2(); if that fails, copied to
+#                dbfs:/FileStore/genie_snapshots/ via dbutils.fs.cp()
+#
+# PDF layout now uses the same 6-column structure as the rich terminal table:
+#   SP1_serial | SP1_category | SP1_description
+#   SP2_serial | SP2_category | SP2_description
+#   Key-aligned rows within each category; colour coded.
 # ─────────────────────────────────────────────────────────────────────────────
 
 mode = dbutils.widgets.get("mode")
@@ -814,9 +1016,46 @@ if mode == "merge":
 
     timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
 
-    # ────────────────────────────────────────────────────────────────────────
-    # 7A.  Snapshot Space 1 (original — for rollback)
-    # ────────────────────────────────────────────────────────────────────────
+    # ── Databricks-safe file writers ─────────────────────────────────────────
+    def safe_write_json(path, data, label="file"):
+        """
+        Write a JSON file to a Databricks path.
+        Primary  : os.makedirs + open() — works for /Workspace/ on DBR 12.2+
+        Fallback : dbutils.fs.put() to dbfs:/FileStore/genie_snapshots/
+        """
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            console.print(f"  [green]✓[/green]  {label} saved  :  {path}")
+            return path
+        except OSError as e:
+            console.print(f"  [yellow]⚠  Workspace write failed ({e}), falling back to DBFS…[/yellow]")
+            dbfs_path = f"{DBFS_SNAPSHOT_FOLDER}/{os.path.basename(path)}"
+            content   = json.dumps(data, indent=2, ensure_ascii=False)
+            dbutils.fs.put(dbfs_path, content, overwrite=True)
+            console.print(f"  [green]✓[/green]  {label} saved (DBFS)  :  {dbfs_path}")
+            return dbfs_path
+
+    def safe_write_binary(local_tmp_path, target_path, label="file"):
+        """
+        Copy a binary file from /tmp/ to target Databricks path.
+        Primary  : shutil.copy2 to /Workspace/ path
+        Fallback : dbutils.fs.cp to dbfs:/FileStore/genie_snapshots/
+        """
+        try:
+            os.makedirs(os.path.dirname(target_path), exist_ok=True)
+            shutil.copy2(local_tmp_path, target_path)
+            console.print(f"  [green]✓[/green]  {label} saved  :  {target_path}")
+            return target_path
+        except OSError as e:
+            console.print(f"  [yellow]⚠  Workspace copy failed ({e}), falling back to DBFS…[/yellow]")
+            dbfs_path = f"{DBFS_SNAPSHOT_FOLDER}/{os.path.basename(target_path)}"
+            dbutils.fs.cp(f"file://{local_tmp_path}", dbfs_path, recurse=False)
+            console.print(f"  [green]✓[/green]  {label} saved (DBFS)  :  {dbfs_path}")
+            return dbfs_path
+
+    # ── 7A. Snapshot Space 1 ──────────────────────────────────────────────────
     snap1_name = f"snapshot_{SPACE_ID_1}_{timestamp}.json"
     snap1_path = f"{SNAPSHOT_FOLDER}/{snap1_name}"
     rollback1  = {
@@ -827,16 +1066,9 @@ if mode == "merge":
         "parent_path"     : outer1.get("parent_path",  ""),
         "serialized_space": outer1.get("serialized_space", ""),
     }
-    try:
-        with open(snap1_path, "w", encoding="utf-8") as f:
-            json.dump(rollback1, f, indent=2, ensure_ascii=False)
-        print(f"  ✓  Snapshot Space 1 saved  :  {snap1_path}")
-    except Exception as e:
-        print(f"  ✗  WARNING — Could not save Space 1 snapshot: {e}")
+    safe_write_json(snap1_path, rollback1, "Snapshot Space 1")
 
-    # ────────────────────────────────────────────────────────────────────────
-    # 7B.  Snapshot Space 2 (original — for rollback)
-    # ────────────────────────────────────────────────────────────────────────
+    # ── 7B. Snapshot Space 2 ──────────────────────────────────────────────────
     snap2_name = f"snapshot_{SPACE_ID_2}_{timestamp}.json"
     snap2_path = f"{SNAPSHOT_FOLDER}/{snap2_name}"
     rollback2  = {
@@ -847,17 +1079,11 @@ if mode == "merge":
         "parent_path"     : outer2.get("parent_path",  ""),
         "serialized_space": outer2.get("serialized_space", ""),
     }
-    try:
-        with open(snap2_path, "w", encoding="utf-8") as f:
-            json.dump(rollback2, f, indent=2, ensure_ascii=False)
-        print(f"  ✓  Snapshot Space 2 saved  :  {snap2_path}")
-    except Exception as e:
-        print(f"  ✗  WARNING — Could not save Space 2 snapshot: {e}")
+    safe_write_json(snap2_path, rollback2, "Snapshot Space 2")
 
-    # ────────────────────────────────────────────────────────────────────────
-    # 7C.  Export JSON package — Space 1 (original, unmodified)
-    # ────────────────────────────────────────────────────────────────────────
-    sp1_export_path = MERGED_SAVE_PATH.replace(".json", f"_SP1_EXPORT_{timestamp}.json")
+    # ── 7C. Export Space 1 JSON ───────────────────────────────────────────────
+    sp1_export_name = os.path.basename(MERGED_SAVE_PATH).replace(".json", f"_SP1_EXPORT_{timestamp}.json")
+    sp1_export_path = f"{SNAPSHOT_FOLDER}/{sp1_export_name}"
     sp1_export_pkg  = {
         "space_id"        : SPACE_ID_1,
         "title"           : outer1.get("title", ""),
@@ -866,19 +1092,12 @@ if mode == "merge":
         "parent_path"     : outer1.get("parent_path",  ""),
         "serialized_space": outer1.get("serialized_space", ""),
     }
-    try:
-        with open(sp1_export_path, "w", encoding="utf-8") as f:
-            json.dump(sp1_export_pkg, f, indent=2, ensure_ascii=False)
-        print(f"  ✓  Space 1 JSON export     :  {sp1_export_path}  "
-              f"({len(json.dumps(sp1_export_pkg)):,} chars)")
-    except Exception as e:
-        print(f"  ✗  Could not save Space 1 export: {e}")
+    safe_write_json(sp1_export_path, sp1_export_pkg, "Space 1 export JSON")
 
-    # ────────────────────────────────────────────────────────────────────────
-    # 7D.  Export JSON package — Merged (targeting Space 2)
-    # ────────────────────────────────────────────────────────────────────────
-    patch_path    = MERGED_SAVE_PATH.replace(".json", f"_MERGED_PATCH_{timestamp}.json")
-    merged_pkg    = {
+    # ── 7D. Export Merged Patch JSON ──────────────────────────────────────────
+    patch_name = os.path.basename(MERGED_SAVE_PATH).replace(".json", f"_MERGED_PATCH_{timestamp}.json")
+    patch_path = f"{SNAPSHOT_FOLDER}/{patch_name}"
+    merged_pkg = {
         "space_id"        : SPACE_ID_2,
         "title"           : outer2["title"],
         "description"     : outer2.get("description", ""),
@@ -886,32 +1105,25 @@ if mode == "merge":
         "parent_path"     : outer2.get("parent_path", ""),
         "serialized_space": json.dumps(ready_ss, indent=2, ensure_ascii=False),
     }
-    try:
-        with open(patch_path, "w", encoding="utf-8") as f:
-            json.dump(merged_pkg, f, indent=2, ensure_ascii=False)
-        print(f"  ✓  Merged JSON export      :  {patch_path}  "
-              f"({len(json.dumps(merged_pkg)):,} chars)")
-    except Exception as e:
-        print(f"  ✗  Could not save merged JSON: {e}")
+    safe_write_json(patch_path, merged_pkg, "Merged patch JSON")
 
-    # ────────────────────────────────────────────────────────────────────────
-    # 7E.  Generate PDF Comparison Report
-    # ────────────────────────────────────────────────────────────────────────
-    pdf_path = f"{SNAPSHOT_FOLDER}/genie_comparison_{SPACE_ID_1}_vs_{SPACE_ID_2}_{timestamp}.pdf"
+    # ── 7E. PDF Comparison Report ─────────────────────────────────────────────
+    pdf_filename = f"genie_comparison_{SPACE_ID_1}_vs_{SPACE_ID_2}_{timestamp}.pdf"
+    pdf_target   = f"{SNAPSHOT_FOLDER}/{pdf_filename}"
+    tmp_pdf      = f"/tmp/{pdf_filename}"   # always writable; copied to target after build
 
     try:
-        from reportlab.lib            import colors
-        from reportlab.lib.pagesizes  import A3, landscape
-        from reportlab.lib.styles     import getSampleStyleSheet, ParagraphStyle
-        from reportlab.lib.units      import cm
-        from reportlab.lib.enums      import TA_LEFT, TA_CENTER
-        from reportlab.platypus       import (
-            SimpleDocTemplate, Table, TableStyle,
-            Paragraph, Spacer, HRFlowable, KeepTogether
+        from reportlab.lib           import colors
+        from reportlab.lib.pagesizes import A3, landscape
+        from reportlab.lib.styles    import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.units     import cm
+        from reportlab.platypus      import (
+            SimpleDocTemplate, Table as RLTable, TableStyle,
+            Paragraph, Spacer, HRFlowable,
         )
 
         doc = SimpleDocTemplate(
-            pdf_path,
+            tmp_pdf,                       # write to /tmp/ first
             pagesize     = landscape(A3),
             leftMargin   = 1.2 * cm,
             rightMargin  = 1.2 * cm,
@@ -919,57 +1131,66 @@ if mode == "merge":
             bottomMargin = 1.5 * cm,
         )
 
-        styles    = getSampleStyleSheet()
-        s_title   = ParagraphStyle("ptitle",  parent=styles["Title"],   fontSize=16, spaceAfter=4)
-        s_meta    = ParagraphStyle("pmeta",   parent=styles["Normal"],  fontSize=9,  spaceAfter=2)
-        s_section = ParagraphStyle("psec",    parent=styles["Heading2"],fontSize=11, spaceAfter=3,
-                                   textColor=colors.HexColor("#0D47A1"))
-        s_hdr     = ParagraphStyle("phdr",    parent=styles["Normal"],  fontSize=7,
-                                   fontName="Helvetica-Bold", textColor=colors.white)
-        s_cell    = ParagraphStyle("pcell",   parent=styles["Normal"],  fontSize=7,
-                                   leading=9, wordWrap="CJK")
+        styles  = getSampleStyleSheet()
+        s_title = ParagraphStyle("ptitle", parent=styles["Title"],  fontSize=16, spaceAfter=4)
+        s_meta  = ParagraphStyle("pmeta",  parent=styles["Normal"], fontSize=9,  spaceAfter=2)
+        s_hdr   = ParagraphStyle("phdr",   parent=styles["Normal"], fontSize=7,
+                                 fontName="Helvetica-Bold", textColor=colors.white)
+        s_cell  = ParagraphStyle("pcell",  parent=styles["Normal"], fontSize=7,
+                                 leading=9, wordWrap="CJK")
+        s_cat   = ParagraphStyle("pcat",   parent=styles["Normal"], fontSize=8,
+                                 fontName="Helvetica-Bold",
+                                 textColor=colors.HexColor("#0D47A1"))
 
         def P(text, style=None):
             style = style or s_cell
-            return Paragraph(str(text or "").replace("&","&amp;").replace("<","&lt;").replace(">","&gt;"), style)
+            safe = str(text or "").replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
+            return Paragraph(safe, style)
 
         elements = []
 
-        # ── Cover / header ────────────────────────────────────────────────
+        # Cover header
         elements.append(P("Genie Space Comparison Report", s_title))
         elements.append(Spacer(1, 0.2*cm))
-        elements.append(P(f"Generated      : {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}", s_meta))
-        elements.append(P(f"Space 1 (LHS)  : {outer1.get('title','?')}   |   ID: {SPACE_ID_1}", s_meta))
-        elements.append(P(f"Space 2 (RHS)  : {outer2.get('title','?')}   |   ID: {SPACE_ID_2}", s_meta))
-        elements.append(P(f"Space 1 items  : {len(df_sp1)}   |   Space 2 items: {len(df_sp2)}", s_meta))
+        elements.append(P(f"Generated     : {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}", s_meta))
+        elements.append(P(f"Space 1 (LHS) : {outer1.get('title','?')}   |   ID: {SPACE_ID_1}", s_meta))
+        elements.append(P(f"Space 2 (RHS) : {outer2.get('title','?')}   |   ID: {SPACE_ID_2}", s_meta))
+        elements.append(P(f"Items SP1: {len(df_sp1)}   |   Items SP2: {len(df_sp2)}", s_meta))
+        elements.append(P("Row colour: GREEN = Space 1 only  |  BLUE = Space 2 only  |  WHITE = both spaces", s_meta))
         elements.append(Spacer(1, 0.3*cm))
-        elements.append(HRFlowable(width="100%", thickness=1.5,
-                                   color=colors.HexColor("#1F4E79")))
+        elements.append(HRFlowable(width="100%", thickness=1.5, color=colors.HexColor("#1F4E79")))
         elements.append(Spacer(1, 0.3*cm))
 
-        # Column layout: cat | sp1_serial | sp1_description | sp2_serial | sp2_description
+        # 6-column layout on A3 landscape (usable ≈ 39.7 cm)
+        # SP1_serial | SP1_category | SP1_description | SP2_serial | SP2_category | SP2_description
         COL_W = [
-            2.8*cm,   # category
-            1.8*cm,   # sp1 serial
-            16.5*cm,  # sp1 description  (wider — carries SQL too)
-            1.8*cm,   # sp2 serial
-            16.5*cm,  # sp2 description  (wider — carries SQL too)
-        ]
+            1.8*cm,   # SP1 serial
+            2.8*cm,   # SP1 category
+            13.5*cm,  # SP1 description
+            1.8*cm,   # SP2 serial
+            2.8*cm,   # SP2 category
+            13.5*cm,  # SP2 description
+        ]  # total = 36.2 cm ✓
         HDR_LABELS = [
-            "Category",
-            "SP1 Serial", "SP1 Description / SQL",
-            "SP2 Serial", "SP2 Description / SQL",
+            f"SP1 Serial\n{SPACE_ID_1}", "SP1 Category", "SP1 Description / SQL / Details",
+            f"SP2 Serial\n{SPACE_ID_2}", "SP2 Category", "SP2 Description / SQL / Details",
         ]
         HDR_BG = [
-            colors.HexColor("#1F4E79"),
-            colors.HexColor("#0D47A1"), colors.HexColor("#0D47A1"),
-            colors.HexColor("#1B5E20"), colors.HexColor("#1B5E20"),
+            colors.HexColor("#1B5E20"), colors.HexColor("#1B5E20"), colors.HexColor("#2E7D32"),
+            colors.HexColor("#01579B"), colors.HexColor("#01579B"), colors.HexColor("#0277BD"),
         ]
 
-        table_data  = [[P(h, s_hdr) for h in HDR_LABELS]]
-        style_cmds  = [
-            ("BACKGROUND",    (0,0), (-1,0),  colors.HexColor("#1F4E79")),
-            ("TEXTCOLOR",     (0,0), (-1,0),  colors.white),
+        # Colour palette
+        C_SP1_A    = colors.HexColor("#E8F5E9")   # SP1-only even
+        C_SP1_B    = colors.HexColor("#C8E6C9")   # SP1-only odd
+        C_SP2_A    = colors.HexColor("#E3F2FD")   # SP2-only even
+        C_SP2_B    = colors.HexColor("#BBDEFB")   # SP2-only odd
+        C_BOTH_A   = colors.white
+        C_BOTH_B   = colors.HexColor("#F5F5F5")
+        C_CAT_HDR  = colors.HexColor("#DDEEFF")
+
+        table_data = [[P(h, s_hdr) for h in HDR_LABELS]]
+        style_cmds = [
             ("FONTSIZE",      (0,0), (-1,-1), 7),
             ("LEADING",       (0,0), (-1,-1), 9),
             ("VALIGN",        (0,0), (-1,-1), "TOP"),
@@ -980,109 +1201,105 @@ if mode == "merge":
             ("LEFTPADDING",   (0,0), (-1,-1), 3),
             ("RIGHTPADDING",  (0,0), (-1,-1), 3),
         ]
+        # Apply column-level header backgrounds
+        for ci, bg in enumerate(HDR_BG):
+            style_cmds.append(("BACKGROUND", (ci,0), (ci,0), bg))
+            style_cmds.append(("TEXTCOLOR",  (ci,0), (ci,0), colors.white))
 
-        row_idx = 1  # skip header row
+        row_idx = 1
 
         for cat in CATEGORIES:
             sp1_cat = df_sp1[df_sp1["category"] == cat].copy()
             sp2_cat = df_sp2[df_sp2["category"] == cat].copy()
-
-            sp1_by_name = {r["name"]: r for _, r in sp1_cat.iterrows()}
-            sp2_by_name = {r["name"]: r for _, r in sp2_cat.iterrows()}
-            all_keys    = sorted(set(sp1_by_name.keys()) | set(sp2_by_name.keys()),
-                                 key=lambda k: k.lower())
-
+            sp1_by_key = {r["name"]: r for _, r in sp1_cat.iterrows()}
+            sp2_by_key = {r["name"]: r for _, r in sp2_cat.iterrows()}
+            all_keys   = sorted(
+                set(sp1_by_key.keys()) | set(sp2_by_key.keys()),
+                key=str.lower
+            )
             if not all_keys:
                 continue
 
-            # Category separator row
-            table_data.append(
-                [P(f"▶  {cat}", ParagraphStyle(
-                    "pcat", parent=s_cell,
-                    fontName="Helvetica-Bold", fontSize=8,
-                    textColor=colors.HexColor("#0D47A1")
-                ))] + [P("")]*4
-            )
-            style_cmds.append(("BACKGROUND", (0, row_idx), (-1, row_idx),
-                                colors.HexColor("#DDEEFF")))
-            style_cmds.append(("SPAN", (0, row_idx), (-1, row_idx)))
+            # Category separator
+            table_data.append([P(f"▶  {cat}", s_cat)] + [P("")]*5)
+            style_cmds.append(("BACKGROUND", (0,row_idx), (-1,row_idx), C_CAT_HDR))
+            style_cmds.append(("SPAN",       (0,row_idx), (-1,row_idx)))
             row_idx += 1
 
-            # Data rows — aligned by name key
             for i, key in enumerate(all_keys):
-                r1 = sp1_by_name.get(key)
-                r2 = sp2_by_name.get(key)
+                r1 = sp1_by_key.get(key)
+                r2 = sp2_by_key.get(key)
 
-                sp1_serial = r1["serial_no"]  if r1 is not None else ""
-                sp1_desc   = r1["description"] if r1 is not None else ""
-                sp2_serial = r2["serial_no"]  if r2 is not None else ""
-                sp2_desc   = r2["description"] if r2 is not None else ""
+                sp1_serial = r1["serial_no"]   if r1 is not None else ""
+                sp1_cat_v  = r1["category"]    if r1 is not None else ""
+                sp1_desc   = r1["display_desc"] if r1 is not None else ""
+                sp2_serial = r2["serial_no"]   if r2 is not None else ""
+                sp2_cat_v  = r2["category"]    if r2 is not None else ""
+                sp2_desc   = r2["display_desc"] if r2 is not None else ""
+
+                only_sp1 = r1 is not None and r2 is None
+                only_sp2 = r1 is None     and r2 is not None
+
+                if only_sp1:
+                    bg = C_SP1_A if i % 2 == 0 else C_SP1_B
+                elif only_sp2:
+                    bg = C_SP2_A if i % 2 == 0 else C_SP2_B
+                else:
+                    bg = C_BOTH_A if i % 2 == 0 else C_BOTH_B
 
                 table_data.append([
-                    P(cat),
-                    P(sp1_serial),
-                    P(sp1_desc),
-                    P(sp2_serial),
-                    P(sp2_desc),
+                    P(sp1_serial), P(sp1_cat_v), P(sp1_desc),
+                    P(sp2_serial), P(sp2_cat_v), P(sp2_desc),
                 ])
-
-                bg = colors.HexColor("#F0F7FF") if i % 2 == 0 else colors.white
-                style_cmds.append(("BACKGROUND", (0, row_idx),  (0, row_idx),  bg))
-                style_cmds.append(("BACKGROUND", (1, row_idx),  (2, row_idx),
-                                   colors.HexColor("#E8F5E9") if i%2==0 else colors.HexColor("#F1F8E9")))
-                style_cmds.append(("BACKGROUND", (3, row_idx),  (4, row_idx),
-                                   colors.HexColor("#E3F2FD") if i%2==0 else colors.HexColor("#EDE7F6")))
+                style_cmds.append(("BACKGROUND", (0,row_idx), (-1,row_idx), bg))
                 row_idx += 1
 
-        tbl = Table(table_data, colWidths=COL_W, repeatRows=1)
-        tbl.setStyle(TableStyle(style_cmds))
-
-        # Apply individual header cell backgrounds
-        for col_i, bg_col in enumerate(HDR_BG):
-            tbl.setStyle(TableStyle([
-                ("BACKGROUND", (col_i,0), (col_i,0), bg_col),
-            ]))
-
-        elements.append(tbl)
+        rl_tbl = RLTable(table_data, colWidths=COL_W, repeatRows=1)
+        rl_tbl.setStyle(TableStyle(style_cmds))
+        elements.append(rl_tbl)
         doc.build(elements)
-        print(f"  ✓  PDF comparison saved    :  {pdf_path}")
+
+        # Copy PDF from /tmp/ to target Databricks path
+        saved_pdf = safe_write_binary(tmp_pdf, pdf_target, "PDF comparison")
 
     except ImportError:
-        print("  ℹ  reportlab not installed. Installing now…")
+        console.print("  [yellow]ℹ  reportlab not installed — installing…[/yellow]")
         import subprocess
         subprocess.run(["pip", "install", "reportlab", "--quiet"], check=True)
-        print("     reportlab installed — please re-run Cell 7.")
+        console.print("     [green]reportlab installed — please re-run Cell 7.[/green]")
     except Exception as e:
         import traceback
-        print(f"  ✗  PDF generation failed: {e}")
+        console.print(f"  [red]✗  PDF generation failed: {e}[/red]")
         traceback.print_exc()
 
     # ── Summary ───────────────────────────────────────────────────────────────
-    print(f"\n{'─'*70}")
-    print(f"  Files saved to: {SNAPSHOT_FOLDER}")
-    print(f"  Space 1 snapshot  : {snap1_name}")
-    print(f"  Space 2 snapshot  : {snap2_name}")
-    print(f"  Space 1 export    : {sp1_export_path.split('/')[-1]}")
-    print(f"  Merged patch      : {patch_path.split('/')[-1]}")
-    print(f"  PDF report        : genie_comparison_...{timestamp}.pdf")
-    print(f"{'─'*70}")
-    print(f"\nRun Cell 8 to PATCH Space 2 with the merged content.")
+    console.print(Panel(
+        f"Files saved to: {SNAPSHOT_FOLDER}\n"
+        f"  Space 1 snapshot  : {snap1_name}\n"
+        f"  Space 2 snapshot  : {snap2_name}\n"
+        f"  Space 1 export    : {sp1_export_name}\n"
+        f"  Merged patch      : {patch_name}\n"
+        f"  PDF comparison    : {pdf_filename}\n\n"
+        f"[bold white]Run Cell 8 to PATCH Space 2 with the merged content.[/bold white]",
+        title="Cell 7 complete", border_style="green"
+    ))
 
 else:
-    print("Mode = rollback — Cell 7 skipped.")
+    console.print("[yellow]Mode = rollback — Cell 7 skipped.[/yellow]")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CELL 8 — PATCH SPACE 2  (apply the merged serialized_space)
+# (unchanged from v3.0)
 # ─────────────────────────────────────────────────────────────────────────────
 
 mode = dbutils.widgets.get("mode")
 
 if mode == "merge":
 
-    print(f"  Space 1 '{outer1['title']}'  [{SPACE_ID_1}]  →  source only, NOT modified")
-    print(f"  Space 2 '{outer2['title']}'  [{SPACE_ID_2}]  →  will be REPLACED with merged content")
-    print()
+    console.print(f"  Space 1 [green]'{outer1['title']}'[/green]  [{SPACE_ID_1}]  →  source only, NOT modified")
+    console.print(f"  Space 2 [cyan]'{outer2['title']}'[/cyan]  [{SPACE_ID_2}]  →  will be REPLACED with merged content")
+    console.print()
 
     payload = {
         "title"           : outer2["title"],
@@ -1099,24 +1316,28 @@ if mode == "merge":
     )
 
     if resp.status_code == 200:
-        print(f"  ✓  SUCCESS — Space 2 updated successfully!")
-        print(f"     '{outer2['title']}'  [{SPACE_ID_2}]  —  replaced with merged content")
-        print(f"     '{outer1['title']}'  [{SPACE_ID_1}]  —  no change")
-        print(f"\n  To rollback Space 2:")
-        print(f"    1. Set mode widget  → rollback")
-        print(f"    2. Enter filename   → {snap2_name}")
-        print(f"    3. Run Cell 9")
+        console.print(Panel(
+            f"[bold green]✓  SUCCESS — Space 2 updated![/bold green]\n"
+            f"  [cyan]'{outer2['title']}'[/cyan]  [{SPACE_ID_2}]  — replaced with merged content\n"
+            f"  [green]'{outer1['title']}'[/green]  [{SPACE_ID_1}]  — no change\n\n"
+            f"To rollback Space 2:\n"
+            f"  1. Set mode widget → rollback\n"
+            f"  2. Enter filename  → {snap2_name}\n"
+            f"  3. Run Cell 9",
+            border_style="green"
+        ))
     else:
-        print(f"  ✗  Error {resp.status_code}")
-        print(f"     {resp.text[:800]}")
+        console.print(f"[red]  ✗  Error {resp.status_code}[/red]")
+        console.print(f"[red]     {resp.text[:800]}[/red]")
 
 else:
-    print("Mode = rollback — Cell 8 skipped.")
+    console.print("[yellow]Mode = rollback — Cell 8 skipped.[/yellow]")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CELL 9 — ROLLBACK  (restores whichever space is in the snapshot)
 # Runs only when mode = rollback.
+# (unchanged from v3.0)
 # ─────────────────────────────────────────────────────────────────────────────
 
 mode = dbutils.widgets.get("mode")
@@ -1125,22 +1346,22 @@ if mode == "rollback":
 
     rollback_file = dbutils.widgets.get("rollback_file").strip()
     if not rollback_file:
-        print("Enter the snapshot filename in the widget in Cell 1 (Widget 2).")
+        console.print("[red]Enter the snapshot filename in Widget 2 (Cell 1).[/red]")
         raise ValueError("rollback_file widget is empty.")
 
     snapshot_path = f"{SNAPSHOT_FOLDER}/{rollback_file}"
-    print(f"Loading snapshot : {snapshot_path}")
+    console.print(f"Loading snapshot : {snapshot_path}")
 
     try:
         with open(snapshot_path, "r", encoding="utf-8") as f:
             rollback_payload = json.load(f)
-        print("  ✓  Snapshot loaded.")
+        console.print("[green]  ✓  Snapshot loaded.[/green]")
     except FileNotFoundError:
-        print(f"  ✗  File not found: {snapshot_path}")
-        print(f"     Snapshots live in: {SNAPSHOT_FOLDER}")
+        console.print(f"[red]  ✗  File not found: {snapshot_path}[/red]")
+        console.print(f"[red]     Snapshots live in: {SNAPSHOT_FOLDER}[/red]")
         raise
     except Exception as e:
-        print(f"  ✗  Failed to load snapshot: {e}")
+        console.print(f"[red]  ✗  Failed to load snapshot: {e}[/red]")
         raise
 
     space_id_to_restore = rollback_payload.get("space_id", "")
@@ -1150,20 +1371,22 @@ if mode == "rollback":
     in_r = ss_r.get("instructions", {})
     sn_r = in_r.get("sql_snippets", {})
     bm_r = ss_r.get("benchmarks", {})
-    bm_c = (len(bm_r.get("questions", [])) if isinstance(bm_r, dict)
-            else len(bm_r) if isinstance(bm_r, list) else 0)
+    bm_c = (len(bm_r.get("questions",[])) if isinstance(bm_r,dict)
+            else len(bm_r) if isinstance(bm_r,list) else 0)
 
-    print(f"\n  Restoring to pre-merge state:")
-    print(f"    Title          : '{rollback_payload.get('title','?')}'")
-    print(f"    Space ID       : {space_id_to_restore}")
-    print(f"    Tables         : {len(ds_r.get('tables', []))}")
-    print(f"    Joins          : {len(in_r.get('join_specs', []))}")
-    print(f"    Example SQLs   : {len(in_r.get('example_question_sqls', []))}")
-    print(f"    Measures       : {len(sn_r.get('measures', []))}")
-    print(f"    Expressions    : {len(sn_r.get('expressions', []))}")
-    print(f"    Filters        : {len(sn_r.get('filters', []))}")
-    print(f"    Benchmarks     : {bm_c}")
-    print(f"    Sample Qs      : {len(ss_r.get('config', {}).get('sample_questions', []))}")
+    console.print(Panel(
+        f"Title          : '{rollback_payload.get('title','?')}'\n"
+        f"Space ID       : {space_id_to_restore}\n"
+        f"Tables         : {len(ds_r.get('tables',[]))}\n"
+        f"Joins          : {len(in_r.get('join_specs',[]))}\n"
+        f"Example SQLs   : {len(in_r.get('example_question_sqls',[]))}\n"
+        f"Measures       : {len(sn_r.get('measures',[]))}\n"
+        f"Expressions    : {len(sn_r.get('expressions',[]))}\n"
+        f"Filters        : {len(sn_r.get('filters',[]))}\n"
+        f"Benchmarks     : {bm_c}\n"
+        f"Sample Qs      : {len(ss_r.get('config',{}).get('sample_questions',[]))}",
+        title="Restoring to pre-merge state", border_style="yellow"
+    ))
 
     patch_payload = {
         "title"           : rollback_payload["title"],
@@ -1180,13 +1403,16 @@ if mode == "rollback":
     )
 
     if resp.status_code == 200:
-        print(f"\n  ✓  ROLLBACK SUCCESSFUL!")
-        print(f"     '{rollback_payload['title']}'  [{space_id_to_restore}]  — restored to pre-merge state.")
-        print("     Open the space in Databricks to verify.")
+        console.print(Panel(
+            f"[bold green]✓  ROLLBACK SUCCESSFUL![/bold green]\n"
+            f"  '{rollback_payload['title']}'  [{space_id_to_restore}]  — restored to pre-merge state.\n"
+            f"  Open the space in Databricks to verify.",
+            border_style="green"
+        ))
     else:
-        print(f"\n  ✗  Rollback failed: HTTP {resp.status_code}")
-        print(f"     {resp.text[:600]}")
-        print("     Check you have CAN EDIT permission on the target space.")
+        console.print(f"[red]  ✗  Rollback failed: HTTP {resp.status_code}[/red]")
+        console.print(f"[red]     {resp.text[:600]}[/red]")
+        console.print("[red]     Check you have CAN EDIT permission on the target space.[/red]")
 
 else:
-    print("Mode = merge — Cell 9 (rollback) skipped.")
+    console.print("[yellow]Mode = merge — Cell 9 (rollback) skipped.[/yellow]")
