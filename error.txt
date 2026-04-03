@@ -1,15 +1,13 @@
 # ==============================================================================
-# GENIE SPACE — SERIAL COMPARE, SELECTIVE MERGE & ROLLBACK  v3.0
+# GENIE SPACE — SERIAL COMPARE, SELECTIVE MERGE & ROLLBACK  v3.1
 # ==============================================================================
-# Use case: You have two Genie spaces. This notebook lets you:
-#   - Load both spaces and display FULL details in DataFrames (no truncation)
-#   - Assign serial numbers to EVERY item  (SP1_001 … SP2_NNN)
-#   - Compare them side by side in df_sp1 / df_sp2 / df_compare (LHS vs RHS)
-#   - Both spaces are sorted ALPHABETICALLY inside each category
-#   - 4 widgets let you cherry-pick what to ADD or REMOVE by serial number
-#   - Build a custom merged Genie and export JSON for BOTH spaces
-#   - Generate a side-by-side PDF comparison saved to the shared Databricks path
-#   - Rollback either space to its pre-merge snapshot
+# Changes from v3.0:
+#   - Cell 2 / Cell 3 : display ONLY serial_no, category, description columns
+#   - Removed ALL HTML rendering (displayHTML / render_df_html) — pure DataFrame
+#   - Full content visibility: every cell printed with NO truncation via
+#     pandas options + to_string(index=False) fallback for long values
+#   - df_compare: LHS and RHS rows are ALIGNED BY NAME/KEY within each category
+#     so identical items sit on the same row; items absent in one space are blank
 # ==============================================================================
 
 
@@ -17,15 +15,16 @@
 # CELL 1 — CONFIG + MODE WIDGET
 # ─────────────────────────────────────────────────────────────────────────────
 
-import requests, json, copy, html as _html_mod
+import requests, json, copy
 from datetime import datetime
 import pandas as pd
 
 # ── Disable ALL pandas truncation globally ───────────────────────────────────
-pd.set_option("display.max_colwidth", None)
-pd.set_option("display.max_rows",     None)
-pd.set_option("display.width",        None)
+pd.set_option("display.max_colwidth",      None)
+pd.set_option("display.max_rows",          None)
+pd.set_option("display.width",             None)
 pd.set_option("display.expand_frame_repr", False)
+pd.set_option("display.max_seq_items",     None)
 
 # ── User config ───────────────────────────────────────────────────────────────
 DATABRICKS_HOST  = "https://adb-16520.0.azuredatabricks.net"
@@ -69,7 +68,10 @@ else:
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CELL 2 — LOAD BOTH SPACES  +  BUILD SERIAL REGISTRIES
-# df_sp1 and df_sp2 are built here with every item assigned a serial number.
+#
+# OUTPUT: Shows df_sp1 and df_sp2 with ONLY these 3 columns:
+#   serial_no | category | description
+# Every character is visible — no truncation, no HTML, pure DataFrame.
 # ─────────────────────────────────────────────────────────────────────────────
 
 mode = dbutils.widgets.get("mode")
@@ -122,32 +124,18 @@ if mode == "merge":
         return bm.get("questions", []) if isinstance(bm, dict) else (bm if isinstance(bm, list) else [])
     def get_sample_qs(ss):   return ss.get("config", {}).get("sample_questions", [])
 
-    # ── HTML table renderer (full content, no truncation) ─────────────────────
-    def render_df_html(df, title="", subtitle=""):
-        esc = _html_mod.escape
-        rows_html = ""
-        for _, row in df.iterrows():
-            rows_html += "<tr>"
-            for val in row:
-                rows_html += f"<td>{esc(str(val) if val is not None else '')}</td>"
-            rows_html += "</tr>"
-        headers_html = "".join(f"<th>{esc(c)}</th>" for c in df.columns)
-        return f"""
-<style>
-  .gt {{border-collapse:collapse;width:100%;font-family:Consolas,monospace;font-size:11px;}}
-  .gt th {{background:#1F4E79;color:#fff;padding:6px 8px;text-align:left;white-space:nowrap;}}
-  .gt td {{padding:4px 8px;border:1px solid #bcd;vertical-align:top;
-            white-space:pre-wrap;word-break:break-word;max-width:500px;}}
-  .gt tr:nth-child(even) {{background:#EBF3FB;}}
-  .gt tr:hover {{background:#BBDEF8;}}
-  .gt-title {{font-family:Arial,sans-serif;font-size:16px;font-weight:bold;
-               color:#1F4E79;margin:12px 0 2px 0;}}
-  .gt-sub   {{font-family:Arial,sans-serif;font-size:12px;color:#555;margin:0 0 6px 0;}}
-</style>
-<p class="gt-title">{esc(title)}</p>
-<p class="gt-sub">{esc(subtitle)}</p>
-<table class="gt"><thead><tr>{headers_html}</tr></thead><tbody>{rows_html}</tbody></table>
-"""
+    # ── Full-content DataFrame printer (no truncation, no HTML) ───────────────
+    def print_df_full(df, title="", subtitle=""):
+        """Print a DataFrame with zero truncation — every character visible."""
+        print(f"\n{'='*80}")
+        print(f"  {title}")
+        if subtitle:
+            print(f"  {subtitle}")
+        print(f"{'='*80}")
+        # to_string forces full expansion even when pandas display settings
+        # are overridden by the notebook host
+        print(df.to_string(index=False, max_colwidth=None))
+        print(f"{'─'*80}\n")
 
     # ── Serial registry builder ───────────────────────────────────────────────
     #   Returns:
@@ -246,7 +234,7 @@ if mode == "merge":
                 category       = "JOIN",
                 key            = jk,
                 name           = jk,
-                description    = "",
+                description    = sql,          # For JOINs, description = sql expression
                 sql_expression = sql,
                 additional_info= "",
                 full_detail    = json.dumps(j, ensure_ascii=False, indent=2),
@@ -323,7 +311,7 @@ if mode == "merge":
                 category       = "BENCHMARK",
                 key            = q,
                 name           = q,
-                description    = "",
+                description    = sql,           # For benchmarks, description = sql expression
                 sql_expression = sql,
                 additional_info= "",
                 full_detail    = json.dumps(b, ensure_ascii=False, indent=2),
@@ -344,7 +332,7 @@ if mode == "merge":
                 description    = "",
                 sql_expression = "",
                 additional_info= "",
-                full_detail    = json.dumps(sq, ensure_ascii=False, indent=2),
+                full_detail    = json.dumps(sq, ensure_ascii=False),
                 item           = sq,
             )
 
@@ -360,10 +348,10 @@ if mode == "merge":
                 category       = "EXAMPLE_SQL",
                 key            = q,
                 name           = q,
-                description    = "",
+                description    = sql,           # For example SQLs, description = sql expression
                 sql_expression = sql,
                 additional_info= "",
-                full_detail    = json.dumps(es, ensure_ascii=False, indent=2),
+                full_detail    = json.dumps(es, ensure_ascii=False),
                 item           = es,
             )
 
@@ -376,23 +364,29 @@ if mode == "merge":
     rows1, registry1 = build_registry(ss1, "SP1")
     rows2, registry2 = build_registry(ss2, "SP2")
 
-    COLS = ["serial_no","category","name","description","sql_expression","additional_info","full_detail"]
-    df_sp1 = pd.DataFrame(rows1, columns=COLS)
-    df_sp2 = pd.DataFrame(rows2, columns=COLS)
+    ALL_COLS    = ["serial_no","category","name","description","sql_expression","additional_info","full_detail"]
+    DISPLAY_COLS = ["serial_no", "category", "description"]
 
-    # ── Display df_sp1 (full content, no truncation) ──────────────────────────
-    displayHTML(render_df_html(
-        df_sp1,
+    df_sp1 = pd.DataFrame(rows1, columns=ALL_COLS)
+    df_sp2 = pd.DataFrame(rows2, columns=ALL_COLS)
+
+    # ── Display df_sp1  (3-column view, full content, no truncation) ──────────
+    #
+    #   "description" for JOIN / BENCHMARK / EXAMPLE_SQL categories carries the
+    #   SQL expression so it is visible here even in the slim 3-column view.
+    #
+    print_df_full(
+        df_sp1[DISPLAY_COLS],
         title   = f"df_sp1  —  Space 1: {outer1.get('title','?')}   [{SPACE_ID_1}]",
-        subtitle= f"{len(rows1)} items  |  Serial range: SP1_001 → SP1_{len(rows1):03d}  |  All columns fully expanded"
-    ))
+        subtitle= f"{len(rows1)} items  |  Serial range: SP1_001 → SP1_{len(rows1):03d}  |  Columns: serial_no | category | description"
+    )
 
-    # ── Display df_sp2 (full content, no truncation) ──────────────────────────
-    displayHTML(render_df_html(
-        df_sp2,
+    # ── Display df_sp2  (3-column view, full content, no truncation) ──────────
+    print_df_full(
+        df_sp2[DISPLAY_COLS],
         title   = f"df_sp2  —  Space 2: {outer2.get('title','?')}   [{SPACE_ID_2}]",
-        subtitle= f"{len(rows2)} items  |  Serial range: SP2_001 → SP2_{len(rows2):03d}  |  All columns fully expanded"
-    ))
+        subtitle= f"{len(rows2)} items  |  Serial range: SP2_001 → SP2_{len(rows2):03d}  |  Columns: serial_no | category | description"
+    )
 
     print(f"\n{'='*70}")
     print(f"  Both spaces loaded and serialised.")
@@ -407,7 +401,15 @@ else:
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CELL 3 — SIDE-BY-SIDE COMPARISON  (df_compare : LHS = Space 1 | RHS = Space 2)
-# Both sides are alphabetically sorted within each category.
+#
+# KEY CHANGE — rows are ALIGNED BY NAME/KEY within each category:
+#   • All unique keys from both spaces are unioned and sorted alphabetically.
+#   • If a key exists in Space 1 its data fills the SP1_* columns; otherwise blank.
+#   • Same for Space 2  → identical items sit on the SAME row for easy comparison.
+#
+# OUTPUT: Pure DataFrame (no HTML), only these columns per side:
+#   category | SP1_serial | SP1_description | SP2_serial | SP2_description
+#   (description carries sql_expression for JOIN/BENCHMARK/EXAMPLE_SQL rows)
 # ─────────────────────────────────────────────────────────────────────────────
 
 mode = dbutils.widgets.get("mode")
@@ -429,114 +431,74 @@ if mode == "merge":
     compare_rows = []
 
     for cat in CATEGORIES:
-        sp1_cat = df_sp1[df_sp1["category"] == cat].reset_index(drop=True)
-        sp2_cat = df_sp2[df_sp2["category"] == cat].reset_index(drop=True)
-        max_len = max(len(sp1_cat), len(sp2_cat))
+        sp1_cat = df_sp1[df_sp1["category"] == cat].copy()
+        sp2_cat = df_sp2[df_sp2["category"] == cat].copy()
 
-        if max_len == 0:
+        # Build lookup dicts keyed by 'name' (which equals the canonical sort key)
+        sp1_by_name = {r["name"]: r for _, r in sp1_cat.iterrows()}
+        sp2_by_name = {r["name"]: r for _, r in sp2_cat.iterrows()}
+
+        # Union of all keys, sorted alphabetically — identical items align
+        all_keys = sorted(set(sp1_by_name.keys()) | set(sp2_by_name.keys()),
+                          key=lambda k: k.lower())
+
+        if not all_keys:
             continue  # skip empty categories
 
-        for i in range(max_len):
+        for key in all_keys:
             row = {"category": cat}
 
             # ── LHS (Space 1) ─────────────────────────────────────────────
-            if i < len(sp1_cat):
-                r1 = sp1_cat.iloc[i]
+            if key in sp1_by_name:
+                r1 = sp1_by_name[key]
                 row["SP1_serial"]      = r1["serial_no"]
-                row["SP1_name"]        = r1["name"]
                 row["SP1_description"] = r1["description"]
-                row["SP1_sql"]         = r1["sql_expression"]
-                row["SP1_additional"]  = r1["additional_info"]
-                row["SP1_full_detail"] = r1["full_detail"]
             else:
-                row["SP1_serial"] = row["SP1_name"] = row["SP1_description"] = ""
-                row["SP1_sql"] = row["SP1_additional"] = row["SP1_full_detail"] = ""
+                row["SP1_serial"]      = ""
+                row["SP1_description"] = ""
 
             # ── RHS (Space 2) ─────────────────────────────────────────────
-            if i < len(sp2_cat):
-                r2 = sp2_cat.iloc[i]
+            if key in sp2_by_name:
+                r2 = sp2_by_name[key]
                 row["SP2_serial"]      = r2["serial_no"]
-                row["SP2_name"]        = r2["name"]
                 row["SP2_description"] = r2["description"]
-                row["SP2_sql"]         = r2["sql_expression"]
-                row["SP2_additional"]  = r2["additional_info"]
-                row["SP2_full_detail"] = r2["full_detail"]
             else:
-                row["SP2_serial"] = row["SP2_name"] = row["SP2_description"] = ""
-                row["SP2_sql"] = row["SP2_additional"] = row["SP2_full_detail"] = ""
+                row["SP2_serial"]      = ""
+                row["SP2_description"] = ""
 
             compare_rows.append(row)
 
     COMPARE_COLS = [
         "category",
-        "SP1_serial", "SP1_name", "SP1_description", "SP1_sql", "SP1_additional", "SP1_full_detail",
-        "SP2_serial", "SP2_name", "SP2_description", "SP2_sql", "SP2_additional", "SP2_full_detail",
+        "SP1_serial", "SP1_description",
+        "SP2_serial", "SP2_description",
     ]
     df_compare = pd.DataFrame(compare_rows, columns=COMPARE_COLS)
 
-    # ── Rich HTML table with divider between LHS and RHS ─────────────────────
-    esc = _html_mod.escape
-
-    def build_compare_html():
-        hdr_cells = ""
-        for col in COMPARE_COLS:
-            bg = "#0D47A1" if col.startswith("SP1") else ("#1B5E20" if col.startswith("SP2") else "#1F4E79")
-            hdr_cells += f'<th style="background:{bg}">{esc(col)}</th>'
-
-        body = ""
-        prev_cat = None
-        for _, row in df_compare.iterrows():
-            # Category section separator
-            if row["category"] != prev_cat:
-                prev_cat = row["category"]
-                body += (
-                    f'<tr><td colspan="{len(COMPARE_COLS)}" '
-                    f'style="background:#E3F2FD;font-weight:bold;font-size:13px;'
-                    f'padding:6px 8px;color:#0D47A1;border-top:2px solid #1565C0;">'
-                    f'▶ {esc(row["category"])}</td></tr>'
-                )
-            body += "<tr>"
-            for col in COMPARE_COLS:
-                val = str(row[col]) if row[col] is not None else ""
-                td_style = "border:1px solid #bcd;padding:4px 7px;vertical-align:top;white-space:pre-wrap;word-break:break-word;"
-                if col.startswith("SP1"):
-                    td_style += "background:#E8F5E9;"
-                elif col.startswith("SP2"):
-                    td_style += "background:#E3F2FD;"
-                body += f'<td style="{td_style}">{esc(val)}</td>'
-            body += "</tr>"
-
-        return f"""
-<style>
-.gct {{border-collapse:collapse;width:100%;font-family:Consolas,monospace;font-size:11px;}}
-.gct th {{padding:6px 8px;color:#fff;text-align:left;white-space:nowrap;}}
-.gct td {{max-width:480px;}}
-</style>
-<p style="font-family:Arial;font-size:17px;font-weight:bold;color:#1F4E79;margin:10px 0 2px 0;">
-  df_compare — Side-by-Side Comparison
-</p>
-<p style="font-family:Arial;font-size:12px;color:#555;margin:0 0 6px 0;">
-  <span style="background:#E8F5E9;padding:2px 6px;border-radius:3px">■ LHS = Space 1: {esc(outer1.get('title','?'))}  [{esc(SPACE_ID_1)}]</span>
-  &nbsp;&nbsp;
-  <span style="background:#E3F2FD;padding:2px 6px;border-radius:3px">■ RHS = Space 2: {esc(outer2.get('title','?'))}  [{esc(SPACE_ID_2)}]</span>
-  &nbsp;&nbsp;Both sides alphabetically sorted within each category.
-</p>
-<table class="gct">
-  <thead><tr>{hdr_cells}</tr></thead>
-  <tbody>{body}</tbody>
-</table>
-"""
-
-    displayHTML(build_compare_html())
+    # ── Print df_compare — pure DataFrame, no HTML, full content ─────────────
+    print(f"\n{'='*80}")
+    print(f"  df_compare  —  Side-by-Side Comparison")
+    print(f"  LHS = Space 1: {outer1.get('title','?')}  [{SPACE_ID_1}]")
+    print(f"  RHS = Space 2: {outer2.get('title','?')}  [{SPACE_ID_2}]")
+    print(f"  Rows aligned by name/key within each category.")
+    print(f"  Blank SP1_* = item only in Space 2 | Blank SP2_* = item only in Space 1")
+    print(f"{'='*80}")
+    print(df_compare.to_string(index=False, max_colwidth=None))
+    print(f"{'─'*80}\n")
 
     # ── Summary counts per category ───────────────────────────────────────────
     print(f"\n{'─'*70}")
-    print(f"  {'CATEGORY':<20}  {'SP1 count':>10}  {'SP2 count':>10}")
+    print(f"  {'CATEGORY':<20}  {'SP1 count':>10}  {'SP2 count':>10}  {'Common':>10}  {'SP1 only':>10}  {'SP2 only':>10}")
     print(f"{'─'*70}")
     for cat in CATEGORIES:
         c1 = len(df_sp1[df_sp1["category"] == cat])
         c2 = len(df_sp2[df_sp2["category"] == cat])
-        print(f"  {cat:<20}  {c1:>10}  {c2:>10}")
+        sp1_keys = set(df_sp1[df_sp1["category"] == cat]["name"].tolist())
+        sp2_keys = set(df_sp2[df_sp2["category"] == cat]["name"].tolist())
+        common   = len(sp1_keys & sp2_keys)
+        only1    = len(sp1_keys - sp2_keys)
+        only2    = len(sp2_keys - sp1_keys)
+        print(f"  {cat:<20}  {c1:>10}  {c2:>10}  {common:>10}  {only1:>10}  {only2:>10}")
     print(f"{'─'*70}")
     print(f"  {'TOTAL':<20}  {len(df_sp1):>10}  {len(df_sp2):>10}")
     print(f"{'─'*70}")
@@ -582,22 +544,16 @@ if mode == "merge":
         label        = "4d. REMOVE from Space 2 selections  (comma-separated SP2_xxx serials)"
     )
 
-    displayHTML("""
-<style>.wbox{font-family:Arial,sans-serif;background:#FFF8E1;border-left:4px solid #F9A825;
-  padding:14px 18px;border-radius:4px;margin:8px 0;line-height:1.7;}</style>
-<div class="wbox">
-<b>Widget 4a</b> — Enter <b>Space 1</b> serial numbers to <span style="color:green">ADD</span>
-  to the merged Genie (e.g. <code>SP1_001, SP1_005, SP1_012</code>)<br>
-<b>Widget 4b</b> — Enter <b>Space 2</b> serial numbers to <span style="color:green">ADD</span>
-  to the merged Genie<br>
-<b>Widget 4c</b> — Enter <b>Space 1</b> serial numbers to <span style="color:red">REMOVE</span>
-  from the final merged Genie (overrides 4a)<br>
-<b>Widget 4d</b> — Enter <b>Space 2</b> serial numbers to <span style="color:red">REMOVE</span>
-  from the final merged Genie (overrides 4b)<br><br>
-Use <b>df_sp1</b>, <b>df_sp2</b>, and <b>df_compare</b> above to pick serial numbers.<br>
-Leave all widgets blank to build a fully merged space (both spaces, SP1 wins on conflict).<br><br>
-<b>Run Cell 5</b> after filling in the widgets.
-</div>
+    print("""
+Widget 4a — Enter Space 1 serial numbers to ADD to the merged Genie  (e.g. SP1_001, SP1_005, SP1_012)
+Widget 4b — Enter Space 2 serial numbers to ADD to the merged Genie
+Widget 4c — Enter Space 1 serial numbers to REMOVE from the final merged Genie  (overrides 4a)
+Widget 4d — Enter Space 2 serial numbers to REMOVE from the final merged Genie  (overrides 4b)
+
+Use df_sp1, df_sp2, and df_compare above to pick serial numbers.
+Leave all widgets blank to build a fully merged space (both spaces, SP1 wins on conflict).
+
+Run Cell 5 after filling in the widgets.
 """)
 
 else:
@@ -684,7 +640,7 @@ if mode == "merge":
         "INSTRUCTION"    : set(),
     }
 
-    instr_lines     = []   # collected instruction lines
+    instr_lines     = []
     merge_report_sp1 = []
     merge_report_sp2 = []
     merge_skipped   = []
@@ -991,29 +947,22 @@ if mode == "merge":
                                    color=colors.HexColor("#1F4E79")))
         elements.append(Spacer(1, 0.3*cm))
 
-        # ── Landscape A3 usable width ≈ 39.7 cm  after 2.4 cm margins ────
-        # Column layout: cat | sp1_serial | sp1_name | sp1_sql+desc | sp1_add | sp2_serial | sp2_name | sp2_sql+desc | sp2_add
+        # Column layout: cat | sp1_serial | sp1_description | sp2_serial | sp2_description
         COL_W = [
-            2.8*cm,  # category
-            1.8*cm,  # sp1 serial
-            7.0*cm,  # sp1 name
-            9.5*cm,  # sp1 sql / description
-            5.0*cm,  # sp1 additional
-            1.8*cm,  # sp2 serial
-            7.0*cm,  # sp2 name
-            9.5*cm,  # sp2 sql / description
-            5.0*cm,  # sp2 additional
+            2.8*cm,   # category
+            1.8*cm,   # sp1 serial
+            16.5*cm,  # sp1 description  (wider — carries SQL too)
+            1.8*cm,   # sp2 serial
+            16.5*cm,  # sp2 description  (wider — carries SQL too)
         ]
         HDR_LABELS = [
             "Category",
-            "SP1 Serial", "SP1 Name", "SP1 SQL / Description", "SP1 Additional Info",
-            "SP2 Serial", "SP2 Name", "SP2 SQL / Description", "SP2 Additional Info",
+            "SP1 Serial", "SP1 Description / SQL",
+            "SP2 Serial", "SP2 Description / SQL",
         ]
-        HDR_BG     = [
+        HDR_BG = [
             colors.HexColor("#1F4E79"),
             colors.HexColor("#0D47A1"), colors.HexColor("#0D47A1"),
-            colors.HexColor("#0D47A1"), colors.HexColor("#0D47A1"),
-            colors.HexColor("#1B5E20"), colors.HexColor("#1B5E20"),
             colors.HexColor("#1B5E20"), colors.HexColor("#1B5E20"),
         ]
 
@@ -1032,14 +981,18 @@ if mode == "merge":
             ("RIGHTPADDING",  (0,0), (-1,-1), 3),
         ]
 
-        row_idx      = 1      # skip header row
-        prev_pdf_cat = None
+        row_idx = 1  # skip header row
 
         for cat in CATEGORIES:
-            sp1_cat = df_sp1[df_sp1["category"] == cat].reset_index(drop=True)
-            sp2_cat = df_sp2[df_sp2["category"] == cat].reset_index(drop=True)
-            max_len = max(len(sp1_cat), len(sp2_cat))
-            if max_len == 0:
+            sp1_cat = df_sp1[df_sp1["category"] == cat].copy()
+            sp2_cat = df_sp2[df_sp2["category"] == cat].copy()
+
+            sp1_by_name = {r["name"]: r for _, r in sp1_cat.iterrows()}
+            sp2_by_name = {r["name"]: r for _, r in sp2_cat.iterrows()}
+            all_keys    = sorted(set(sp1_by_name.keys()) | set(sp2_by_name.keys()),
+                                 key=lambda k: k.lower())
+
+            if not all_keys:
                 continue
 
             # Category separator row
@@ -1048,38 +1001,37 @@ if mode == "merge":
                     "pcat", parent=s_cell,
                     fontName="Helvetica-Bold", fontSize=8,
                     textColor=colors.HexColor("#0D47A1")
-                ))] + [P("")]*8
+                ))] + [P("")]*4
             )
             style_cmds.append(("BACKGROUND", (0, row_idx), (-1, row_idx),
                                 colors.HexColor("#DDEEFF")))
             style_cmds.append(("SPAN", (0, row_idx), (-1, row_idx)))
             row_idx += 1
 
-            # Data rows
-            for i in range(max_len):
-                def get_cell(df_cat, idx, field):
-                    if idx < len(df_cat): return str(df_cat.iloc[idx][field] or "")
-                    return ""
+            # Data rows — aligned by name key
+            for i, key in enumerate(all_keys):
+                r1 = sp1_by_name.get(key)
+                r2 = sp2_by_name.get(key)
 
-                sql_or_desc_1 = get_cell(sp1_cat, i, "sql_expression") or get_cell(sp1_cat, i, "description")
-                sql_or_desc_2 = get_cell(sp2_cat, i, "sql_expression") or get_cell(sp2_cat, i, "description")
+                sp1_serial = r1["serial_no"]  if r1 is not None else ""
+                sp1_desc   = r1["description"] if r1 is not None else ""
+                sp2_serial = r2["serial_no"]  if r2 is not None else ""
+                sp2_desc   = r2["description"] if r2 is not None else ""
 
                 table_data.append([
                     P(cat),
-                    P(get_cell(sp1_cat, i, "serial_no")),
-                    P(get_cell(sp1_cat, i, "name")),
-                    P(sql_or_desc_1),
-                    P(get_cell(sp1_cat, i, "additional_info")),
-                    P(get_cell(sp2_cat, i, "serial_no")),
-                    P(get_cell(sp2_cat, i, "name")),
-                    P(sql_or_desc_2),
-                    P(get_cell(sp2_cat, i, "additional_info")),
+                    P(sp1_serial),
+                    P(sp1_desc),
+                    P(sp2_serial),
+                    P(sp2_desc),
                 ])
-                # Alternating row colours (SP1 / SP2 columns differently tinted)
+
                 bg = colors.HexColor("#F0F7FF") if i % 2 == 0 else colors.white
                 style_cmds.append(("BACKGROUND", (0, row_idx),  (0, row_idx),  bg))
-                style_cmds.append(("BACKGROUND", (1, row_idx),  (4, row_idx),  colors.HexColor("#E8F5E9") if i%2==0 else colors.HexColor("#F1F8E9")))
-                style_cmds.append(("BACKGROUND", (5, row_idx),  (8, row_idx),  colors.HexColor("#E3F2FD") if i%2==0 else colors.HexColor("#EDE7F6")))
+                style_cmds.append(("BACKGROUND", (1, row_idx),  (2, row_idx),
+                                   colors.HexColor("#E8F5E9") if i%2==0 else colors.HexColor("#F1F8E9")))
+                style_cmds.append(("BACKGROUND", (3, row_idx),  (4, row_idx),
+                                   colors.HexColor("#E3F2FD") if i%2==0 else colors.HexColor("#EDE7F6")))
                 row_idx += 1
 
         tbl = Table(table_data, colWidths=COL_W, repeatRows=1)
