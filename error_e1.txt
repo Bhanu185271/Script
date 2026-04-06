@@ -101,7 +101,11 @@ for t in get_tables():
     desc = safe_str(t.get("description"))
     cols = len(t.get("column_configs", []))
     print(f"    • {t['identifier']}")
-    print(f"        Desc    : {desc[:70] or '(empty)'}")
+    if desc:
+        for line in desc.splitlines():
+            print(f"        Desc    : {line}")
+    else:
+        print(f"        Desc    : (empty)")
     print(f"        Columns : {cols} configured")
 print("\n Ready. Run any cell below independently.")
 
@@ -139,7 +143,13 @@ if not t:
 else:
     current_desc = safe_str(t.get("description"))
     print(f"\n  Table           : {selected}")
-    print(f"  Current Desc    : '{current_desc or '(empty)'}'")
+    if current_desc:
+        desc_lines = current_desc.splitlines()
+        print(f"  Current Desc    : '{desc_lines[0]}'")
+        for dl in desc_lines[1:]:
+            print(f"                    '{dl}'")
+    else:
+        print(f"  Current Desc    : '(empty)'")
     print(f"\n Type new description in widget 2 above.")
     print(f" Then run Cell 4 to apply.")
 	
@@ -223,13 +233,24 @@ print("  CELL 5 — Edit Column Description")
 print("=" * 60)
 print(f"\n  Table           : {col_selected_table}")
 print(f"  Column          : {col_selected_col}")
-print(f"  Current Desc    : '{col_existing_desc or '(empty)'}'")
+if col_existing_desc:
+    col_desc_lines = col_existing_desc.splitlines()
+    print(f"  Current Desc    : '{col_desc_lines[0]}'")
+    for dl in col_desc_lines[1:]:
+        print(f"                    '{dl}'")
+else:
+    print(f"  Current Desc    : '(empty)'")
 
 if col_t:
     print(f"\n  All columns in this table:")
     for c in col_configs:
         d = safe_str(c.get("description"))
-        print(f"    • {c['column_name']:<30} {d[:50] or '(empty)'}")
+        print(f"    • {c['column_name']}")
+        if d:
+            for line in d.splitlines():
+                print(f"        Desc : {line}")
+        else:
+            print(f"        Desc : (empty)")
 
 print(f"\n  Edit widget 3 above with the new description.")
 print(f" Then run Cell 6 to apply.")
@@ -565,7 +586,8 @@ def build_diff():
             lines.append(("ADDED", f"[NEW TABLE]  {ident}"))
             d = safe_str(t.get("description"))
             if d:
-                lines.append(("ADDED", f"             description : '{d[:80]}'"))
+                for dl in d.splitlines():
+                    lines.append(("ADDED", f"             description : '{dl}'"))
             for c in t.get("column_configs", []):
                 lines.append(("ADDED", f"             column       : {c['column_name']}"))
 
@@ -576,8 +598,10 @@ def build_diff():
         new_d = safe_str(new_t.get("description"))
         if old_d != new_d:
             lines.append(("REMOVED", f"[TABLE DESC] {ident}"))
-            lines.append(("REMOVED", f"             OLD : '{old_d or '(empty)'}'"))
-            lines.append(("ADDED",   f"             NEW : '{new_d}'"))
+            for ol in (old_d or "(empty)").splitlines():
+                lines.append(("REMOVED", f"             OLD : '{ol}'"))
+            for nl in new_d.splitlines():
+                lines.append(("ADDED",   f"             NEW : '{nl}'"))
 
         orig_cols = {c["column_name"]: c for c in orig_t.get("column_configs", [])}
         new_cols  = {c["column_name"]: c for c in new_t.get("column_configs",  [])}
@@ -586,8 +610,10 @@ def build_diff():
             new_cd = safe_str(nc.get("description"))
             if old_cd != new_cd:
                 lines.append(("REMOVED", f"[COL DESC]   {ident} → {col}"))
-                lines.append(("REMOVED", f"             OLD : '{old_cd or '(empty)'}'"))
-                lines.append(("ADDED",   f"             NEW : '{new_cd}'"))
+                for ol in (old_cd or "(empty)").splitlines():
+                    lines.append(("REMOVED", f"             OLD : '{ol}'"))
+                for nl in new_cd.splitlines():
+                    lines.append(("ADDED",   f"             NEW : '{nl}'"))
 
     #  Joins 
     orig_join_ids = {
@@ -724,4 +750,4 @@ else:
 # print(f"  Tables   : {len(get_tables())}")
 # print(f"  Joins    : {len(get_joins())}")
 # print(f"  Measures : {len(get_measures())}")
-# print(f"\n Safe to start fresh. Run any cell above to begin again.")		
+# print(f"\n Safe to start fresh. Run any cell above to begin again.")
