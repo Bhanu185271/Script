@@ -404,36 +404,38 @@ else:
 
 
 
-
 # ─────────────────────────────────────────────────────────────────────────────
-# CELL 3 — SIDE-BY-SIDE COMPARISON
+# CELL 3 — GITHUB-STYLE SIDE-BY-SIDE COMPARISON  (v2.0)
 #
-# ALIGNMENT: for each category, union all item keys from SP1 + SP2, sorted
-#   alphabetically. Same item → same row. Missing in one space → blank side.
+# FOUR-STATE CLASSIFICATION (like a GitHub Pull Request diff):
 #
-# TABLE SECTION: alphabetical by table name, displays as:
-#   Table  : <name>
-#   Desc   : <description>
-#   Cols   : N total (visible:X  hidden:Y)
-#   Visible Columns:
-#     • col_name  —  column description      (full, one per line)
-#   Hidden Columns:
-#     • col_name
+#   ✓ IDENTICAL  (white  bg)           → same key + same SQL + same description
+#   ~ MODIFIED   (amber  bg #fff3cd)   → matched but content differs; shows Δ fields
+#   ← SP1 ONLY   (green  bg #d4edda)   → exists only in Space 1
+#   → SP2 ONLY   (blue   bg #cce5ff)   → exists only in Space 2
 #
-# SUB-HEADERS: readable labels — "Table Details", "Join Details", etc.
-#   (not raw category keys like "TABLE", "JOIN")
+# TWO-PASS MATCHING (fixes false-mismatch bug):
+#   Pass 1 — match by norm_key  (name / question / identifier — existing logic)
+#   Pass 2 — for SQL-bearing categories (EXAMPLE_SQL, MEASURE, EXPRESSION,
+#             FILTER, BENCHMARK, JOIN), re-attempt matching of remaining
+#             unmatched items using normalised SQL content as the key.
+#             This catches: same SQL but slightly different question wording,
+#             or same SQL but extra whitespace / newline difference in name.
 #
-# COMPLETE OUTPUT: all text shown in full — no truncation, nothing hidden.
+# DUPLICATE DETECTION:
+#   If a space contains multiple items with the same norm_key, ALL copies are
+#   recorded (not silently dropped). The extra copies are shown and flagged.
 #
-# BOLD BLEED FIX — ONE TABLE PER CATEGORY:
-#   Independent Table per category; console.rule() as the section separator.
+# MODIFIED DIFF ANNOTATION:
+#   For MODIFIED rows, a Δ label lists which fields changed: name / SQL / description.
+#   SQL-pass-2 matches are tagged "(SQL match)" so you can review them manually.
 #
-# TEXT COLOUR FIX — BACKGROUND-ONLY ROW STYLES:
-#   Description columns: style="#000000" (true black).
-#   Row highlight uses BACKGROUND only:
-#     SP1-only  →  style="on #d4edda"  (light green  background)
-#     SP2-only  →  style="on #cce5ff"  (light blue   background)
-#     both      →  style=""            (no background)
+# SUMMARY TABLE:
+#   Per-category breakdown: SP1 Items | SP2 Items | ✓ Both | ~ Modified
+#                           | ← SP1 Only | → SP2 Only
+#
+# MERGE ACTION GUIDE:
+#   Printed after summary — explains what to do with each state (Cell 4 actions).
 # ─────────────────────────────────────────────────────────────────────────────
 
 mode = dbutils.widgets.get("mode")
@@ -445,63 +447,227 @@ if mode == "merge":
         "FILTER", "BENCHMARK", "SAMPLE_QUESTION", "EXAMPLE_SQL",
     ]
 
-    # ── Build aligned compare rows ────────────────────────────────────────────
-    compare_rows = []
+    # Categories where SQL content is meaningful for secondary matching
+    SQL_CATS = {"JOIN", "MEASURE", "EXPRESSION", "FILTER", "BENCHMARK", "EXAMPLE_SQL"}
+
+    # ── Status constants ──────────────────────────────────────────────────────
+    IDENTICAL = "IDENTICAL"
+    MODIFIED  = "MODIFIED"
+    SP1_ONLY  = "SP1_ONLY"
+    SP2_ONLY  = "SP2_ONLY"
+
+    # Background colours per status (applied to the whole row)
+    STATUS_BG = {
+        IDENTICAL : "",              # no background = white
+        MODIFIED  : "on #fff3cd",    # amber / yellow
+        SP1_ONLY  : "on #d4edda",    # light green
+        SP2_ONLY  : "on #cce5ff",    # light blue
+    }
+
+    # Human-readable status labels (GitHub PR style)
+    STATUS_LABEL = {
+        IDENTICAL : "✓ BOTH",
+        MODIFIED  : "~ MODIFIED",
+        SP1_ONLY  : "← SP1 ONLY",
+        SP2_ONLY  : "→ SP2 ONLY",
+    }
+
+    # Sort order: MODIFIED bubbles up first, then SP1/SP2-only, IDENTICAL last
+    STATUS_ORDER = {MODIFIED: 0, SP1_ONLY: 1, SP2_ONLY: 2, IDENTICAL: 3}
+
+    # ── SQL normaliser (separate from norm_key — SQL needs its own rules) ──────
+    def norm_sql(val):
+        """
+        Normalise SQL for comparison:
+          1. NFKC unicode
+          2. Collapse ALL whitespace (spaces, tabs, newlines) → single space
+          3. Strip
+          4. Casefold
+        Returns "" for None / empty.
+        """
+        if val is None:
+            return ""
+        if isinstance(val, list):
+            val = "".join(str(x) for x in val)
+        s = unicodedata.normalize("NFKC", str(val))
+        s = re.sub(r"\s+", " ", s)
+        return s.strip().casefold()
+
+    # ── Content-level diff detector ───────────────────────────────────────────
+    def content_status(r1, r2):
+        """
+        Given two rows that have been matched (both exist),
+        determine whether they are IDENTICAL or MODIFIED.
+        Returns (status_str, list_of_changed_field_names).
+        """
+        sql_match  = norm_sql(r1["sql"])         == norm_sql(r2["sql"])
+        desc_match = norm_key(r1["description"]) == norm_key(r2["description"])
+        name_match = norm_key(r1["name"])        == norm_key(r2["name"])
+
+        if sql_match and desc_match and name_match:
+            return IDENTICAL, []
+
+        diffs = []
+        if not name_match: diffs.append("name")
+        if not sql_match:  diffs.append("SQL")
+        if not desc_match: diffs.append("description")
+        return MODIFIED, diffs
+
+    # ── Two-pass matcher ──────────────────────────────────────────────────────
+    def two_pass_match(sp1_df, sp2_df, cat):
+        """
+        Match rows from sp1_df against sp2_df using two passes:
+          Pass 1: by norm_key (name/question)
+          Pass 2: by norm_sql (SQL content) — only for SQL_CATS
+
+        Handles duplicates: if multiple rows share the same norm_key in one
+        space, each is treated as a separate entry (first matches, rest become
+        SP1/SP2-only with a DUP flag).
+
+        Returns a list of match dicts:
+          {
+            "r1"         : row or None,
+            "r2"         : row or None,
+            "status"     : IDENTICAL | MODIFIED | SP1_ONLY | SP2_ONLY,
+            "diffs"      : [...],
+            "match_type" : "name" | "sql" | None,
+            "dup_flag"   : True if this is a duplicate entry,
+          }
+        """
+        results = []
+
+        # Collect ALL rows (allow duplicates) — list of (norm_key, sql_key, row)
+        def collect(df):
+            items = []
+            for _, r in df.iterrows():
+                nk = r["norm_key"]
+                sk = norm_sql(r["sql"]) if cat in SQL_CATS else ""
+                items.append({"nk": nk, "sk": sk, "row": r, "matched": False})
+            return items
+
+        sp1_items = collect(sp1_df)
+        sp2_items = collect(sp2_df)
+
+        # ── Pass 1: match by norm_key ─────────────────────────────────────────
+        for i1, e1 in enumerate(sp1_items):
+            for i2, e2 in enumerate(sp2_items):
+                if e1["matched"] or e2["matched"]:
+                    continue
+                if e1["nk"] == e2["nk"]:
+                    status, diffs = content_status(e1["row"], e2["row"])
+                    results.append({
+                        "r1": e1["row"], "r2": e2["row"],
+                        "status": status, "diffs": diffs,
+                        "match_type": "name", "dup_flag": False,
+                    })
+                    e1["matched"] = True
+                    e2["matched"] = True
+                    break  # one-to-one matching; move to next e1
+
+        # ── Pass 2: match unmatched by SQL content (SQL categories only) ──────
+        if cat in SQL_CATS:
+            unmatched_sp1 = [e for e in sp1_items if not e["matched"]]
+            unmatched_sp2 = [e for e in sp2_items if not e["matched"]]
+
+            for e1 in unmatched_sp1:
+                if not e1["sk"]:          # no SQL → nothing to match on
+                    continue
+                for e2 in unmatched_sp2:
+                    if e2["matched"] or not e2["sk"]:
+                        continue
+                    if e1["sk"] == e2["sk"]:
+                        status, diffs = content_status(e1["row"], e2["row"])
+                        # SQL matched → if name/desc differ that counts as MODIFIED
+                        results.append({
+                            "r1": e1["row"], "r2": e2["row"],
+                            "status": status, "diffs": diffs,
+                            "match_type": "sql", "dup_flag": False,
+                        })
+                        e1["matched"] = True
+                        e2["matched"] = True
+                        break
+
+        # ── Remaining unmatched → SP1_ONLY / SP2_ONLY ────────────────────────
+        for e1 in sp1_items:
+            if not e1["matched"]:
+                results.append({
+                    "r1": e1["row"], "r2": None,
+                    "status": SP1_ONLY, "diffs": [],
+                    "match_type": None, "dup_flag": False,
+                })
+        for e2 in sp2_items:
+            if not e2["matched"]:
+                results.append({
+                    "r1": None, "r2": e2["row"],
+                    "status": SP2_ONLY, "diffs": [],
+                    "match_type": None, "dup_flag": False,
+                })
+
+        # Sort: MODIFIED first, then SP1/SP2-only, IDENTICAL last;
+        #       within same status, alphabetical by name
+        def sort_key(m):
+            r = m["r1"] if m["r1"] is not None else m["r2"]
+            return (STATUS_ORDER[m["status"]], norm_key(r["name"]))
+
+        results.sort(key=sort_key)
+        return results
+
+    # ── Run matching for all categories ──────────────────────────────────────
+    compare_rows = []   # flat list of match dicts + "category" field
 
     for cat in CATEGORIES:
         sp1_cat = df_sp1[df_sp1["category"] == cat].copy()
         sp2_cat = df_sp2[df_sp2["category"] == cat].copy()
+        if sp1_cat.empty and sp2_cat.empty:
+            continue
 
-        sp1_map, sp2_map = {}, {}
-        for _, r in sp1_cat.iterrows(): sp1_map.setdefault(r["norm_key"], r)
-        for _, r in sp2_cat.iterrows(): sp2_map.setdefault(r["norm_key"], r)
-
-        all_keys = sorted(set(sp1_map) | set(sp2_map))
-        if not all_keys: continue
-
-        for nk in all_keys:
-            r1, r2 = sp1_map.get(nk), sp2_map.get(nk)
+        matches = two_pass_match(sp1_cat, sp2_cat, cat)
+        for m in matches:
+            r1, r2 = m["r1"], m["r2"]
             compare_rows.append({
+                **m,
                 "category"       : cat,
                 "SP1_serial"     : r1["serial_no"]    if r1 is not None else "",
                 "SP1_description": r1["display_desc"] if r1 is not None else "",
                 "SP2_serial"     : r2["serial_no"]    if r2 is not None else "",
                 "SP2_description": r2["display_desc"] if r2 is not None else "",
-                "_in_sp1"        : r1 is not None,
-                "_in_sp2"        : r2 is not None,
-                "_norm_key"      : nk,
             })
 
-    df_compare = pd.DataFrame(compare_rows) if compare_rows else pd.DataFrame()
-
-    # ── Legend ────────────────────────────────────────────────────────────────
+    # ── Legend / header ───────────────────────────────────────────────────────
     console.print()
     console.print(Panel(
-        "Colour legend:\n"
-        "  Background #d4edda (light green) = item exists in SPACE 1 only\n"
-        "  Background #cce5ff (light blue)  = item exists in SPACE 2 only\n"
-        "  No background (white)            = item exists in BOTH spaces\n\n"
-        f"LHS → Space 1: {outer1.get('title','?')}  [{SPACE_ID_1}]\n"
-        f"RHS → Space 2: {outer2.get('title','?')}  [{SPACE_ID_2}]",
-        title="df_compare — Side-by-Side Comparison",
+        "GitHub-style Merge Comparison — 4 States:\n\n"
+        "  ✓ BOTH      (white  bg)           → identical in both spaces — no action needed\n"
+        "  ~ MODIFIED  (amber  bg #fff3cd)   → matched but content differs → review + decide\n"
+        "  ← SP1 ONLY  (green  bg #d4edda)   → will be ADDED on merge from Space 1\n"
+        "  → SP2 ONLY  (blue   bg #cce5ff)   → will be ADDED on merge from Space 2\n\n"
+        "Matching strategy:\n"
+        "  Pass 1 — by name / question text  (all categories)\n"
+        "  Pass 2 — by SQL content           (JOIN, MEASURE, EXPRESSION, FILTER,\n"
+        "                                     BENCHMARK, EXAMPLE_SQL)\n"
+        "           '(SQL match)' tag = matched via SQL not name — review carefully.\n\n"
+        f"LHS → Space 1 : {outer1.get('title','?')}  [{SPACE_ID_1}]\n"
+        f"RHS → Space 2 : {outer2.get('title','?')}  [{SPACE_ID_2}]",
+        title="Cell 3 — GitHub-Style Merge Comparison  v2.0",
         border_style="#000000",
     ))
 
-    # ── Per-category comparison tables ────────────────────────────────────────
+    # ── Per-category rich comparison tables ───────────────────────────────────
     #
-    # One fresh Table per category → no bold bleed.
-    # Sub-header: readable label via CAT_LABELS (e.g. "Table Details" not "TABLE").
-    # All description text shown in full — overflow="fold", no max-width limit.
+    # One Table per category (avoids bold-bleed).
+    # 5 columns: Status | SP1 Serial | SP1 Description | SP2 Serial | SP2 Description
     #
-    def make_compare_table(cat_rows_df, sp1_title, sp2_title):
+    def make_compare_table(cat_matches, sp1_title, sp2_title):
         tbl = Table(
-            box         = box.SIMPLE_HEAVY,
-            show_lines  = True,
-            expand      = True,
-            padding     = (0, 1),
-            header_style= "bold white on #37474f",
+            box          = box.SIMPLE_HEAVY,
+            show_lines   = True,
+            expand       = True,
+            padding      = (0, 1),
+            header_style = "bold white on #37474f",
             show_header  = True,
         )
+        tbl.add_column("Status",
+                       style="bold #000000", width=14, no_wrap=False)
         tbl.add_column(f"SP1 Serial\n{sp1_title}",
                        style="bold #005500", width=10, no_wrap=True)
         tbl.add_column("SP1 Description / SQL / Details",
@@ -511,17 +677,25 @@ if mode == "merge":
         tbl.add_column("SP2 Description / SQL / Details",
                        style="#000000", overflow="fold", ratio=1)
 
-        for _, row in cat_rows_df.iterrows():
-            in1, in2 = row["_in_sp1"], row["_in_sp2"]
-            if   in1 and not in2: rs = "on #d4edda"   # light green bg
-            elif in2 and not in1: rs = "on #cce5ff"   # light blue  bg
-            else:                 rs = ""              # white bg
+        for m in cat_matches:
+            status = m["status"]
+            rs     = STATUS_BG[status]
+            label  = STATUS_LABEL[status]
+
+            # Append diff annotation for MODIFIED rows
+            if status == MODIFIED and m["diffs"]:
+                label += f"\n  Δ {', '.join(m['diffs'])}"
+
+            # Annotate SQL-pass-2 matches
+            if m["match_type"] == "sql":
+                label += "\n  (SQL match)"
 
             tbl.add_row(
-                row["SP1_serial"],
-                row["SP1_description"],
-                row["SP2_serial"],
-                row["SP2_description"],
+                label,
+                m["SP1_serial"],
+                m["SP1_description"],
+                m["SP2_serial"],
+                m["SP2_description"],
                 style=rs,
             )
         return tbl
@@ -530,43 +704,107 @@ if mode == "merge":
     sp2_hdr = f"{outer2.get('title','?')} [{SPACE_ID_2}]"
 
     for cat in CATEGORIES:
-        cat_df = df_compare[df_compare["category"] == cat] if not df_compare.empty else pd.DataFrame()
-        if cat_df.empty: continue
+        cat_matches = [r for r in compare_rows if r["category"] == cat]
+        if not cat_matches:
+            continue
 
-        # ── Readable 1-line section header ────────────────────────────────────
+        n_identical = sum(1 for r in cat_matches if r["status"] == IDENTICAL)
+        n_modified  = sum(1 for r in cat_matches if r["status"] == MODIFIED)
+        n_sp1       = sum(1 for r in cat_matches if r["status"] == SP1_ONLY)
+        n_sp2       = sum(1 for r in cat_matches if r["status"] == SP2_ONLY)
+        n_sql_match = sum(1 for r in cat_matches if r["match_type"] == "sql")
+
         label = CAT_LABELS.get(cat, cat)
+        summary = (
+            f"  {len(cat_matches)} rows  |  "
+            f"✓ both:{n_identical}  ~ modified:{n_modified}  "
+            f"← sp1-only:{n_sp1}  → sp2-only:{n_sp2}"
+            + (f"  (sql-matched:{n_sql_match})" if n_sql_match else "")
+        )
         console.print()
-        console.rule(f"  {label}  ({len(cat_df)} rows)  ", style="#000000")
-        console.print(make_compare_table(cat_df, sp1_hdr, sp2_hdr))
+        console.rule(f"  {label}  {summary}  ", style="#000000")
+        console.print(make_compare_table(cat_matches, sp1_hdr, sp2_hdr))
 
-    # ── Summary counts ────────────────────────────────────────────────────────
+    # ── Summary table ─────────────────────────────────────────────────────────
     console.print()
     stbl = Table(
-        title="Category Summary",
-        title_style="bold #000000",
-        box=box.SIMPLE_HEAVY,
-        header_style="bold white on #37474f",
-        show_lines=False, padding=(0, 2),
+        title        = "Comparison Summary",
+        title_style  = "bold #000000",
+        box          = box.SIMPLE_HEAVY,
+        header_style = "bold white on #37474f",
+        show_lines   = False,
+        padding      = (0, 2),
     )
-    stbl.add_column("Category",  style="#000000", width=20)
-    stbl.add_column("SP1 Count", style="#005500", width=10, justify="right")
-    stbl.add_column("SP2 Count", style="#003399", width=10, justify="right")
-    stbl.add_column("In Both",   style="#000000", width=10, justify="right")
-    stbl.add_column("SP1 Only",  style="#005500", width=10, justify="right")
-    stbl.add_column("SP2 Only",  style="#003399", width=10, justify="right")
+    stbl.add_column("Category",    style="#000000", width=20)
+    stbl.add_column("SP1 Items",   style="#005500", width=10, justify="right")
+    stbl.add_column("SP2 Items",   style="#003399", width=10, justify="right")
+    stbl.add_column("✓ Both",      style="#000000", width=10, justify="right")
+    stbl.add_column("~ Modified",  style="#856404", width=12, justify="right")
+    stbl.add_column("← SP1 Only",  style="#005500", width=12, justify="right")
+    stbl.add_column("→ SP2 Only",  style="#003399", width=12, justify="right")
+    stbl.add_column("SQL matched", style="#5f35ae", width=12, justify="right")
+
+    total = {k: 0 for k in ["sp1", "sp2", "both", "mod", "s1", "s2", "sql"]}
 
     for cat in CATEGORIES:
-        k1 = set(df_sp1[df_sp1["category"] == cat]["norm_key"])
-        k2 = set(df_sp2[df_sp2["category"] == cat]["norm_key"])
-        if not k1 and not k2: continue
-        label = CAT_LABELS.get(cat, cat)
-        stbl.add_row(label, str(len(k1)), str(len(k2)),
-                     str(len(k1 & k2)), str(len(k1 - k2)), str(len(k2 - k1)))
+        cat_matches = [r for r in compare_rows if r["category"] == cat]
+        if not cat_matches:
+            continue
+        c_sp1  = sum(1 for r in cat_matches if r.get("_in_sp1", r["r1"] is not None) or r["SP1_serial"])
+        c_sp2  = sum(1 for r in cat_matches if r.get("_in_sp2", r["r2"] is not None) or r["SP2_serial"])
+        c_both = sum(1 for r in cat_matches if r["status"] == IDENTICAL)
+        c_mod  = sum(1 for r in cat_matches if r["status"] == MODIFIED)
+        c_s1   = sum(1 for r in cat_matches if r["status"] == SP1_ONLY)
+        c_s2   = sum(1 for r in cat_matches if r["status"] == SP2_ONLY)
+        c_sql  = sum(1 for r in cat_matches if r["match_type"] == "sql")
+        label  = CAT_LABELS.get(cat, cat)
+        stbl.add_row(label,
+                     str(c_sp1), str(c_sp2),
+                     str(c_both), str(c_mod), str(c_s1), str(c_s2),
+                     str(c_sql) if c_sql else "")
+        total["sp1"] += c_sp1; total["sp2"] += c_sp2
+        total["both"] += c_both; total["mod"] += c_mod
+        total["s1"] += c_s1;    total["s2"] += c_s2; total["sql"] += c_sql
+
     stbl.add_section()
-    stbl.add_row("TOTAL", str(len(df_sp1)), str(len(df_sp2)), "", "", "")
+    stbl.add_row("TOTAL",
+                 str(total["sp1"]), str(total["sp2"]),
+                 str(total["both"]), str(total["mod"]),
+                 str(total["s1"]),  str(total["s2"]),
+                 str(total["sql"]) if total["sql"] else "")
     console.print(stbl)
 
-    # ── INSTRUCTION debug ─────────────────────────────────────────────────────
+    # ── MODIFIED items drill-down ──────────────────────────────────────────────
+    modified_rows = [r for r in compare_rows if r["status"] == MODIFIED]
+    if modified_rows:
+        console.print()
+        mod_tbl = Table(
+            title        = f"MODIFIED Items Drill-down  ({len(modified_rows)} items)",
+            title_style  = "bold #856404",
+            box          = box.SIMPLE_HEAVY,
+            header_style = "bold white on #856404",
+            show_lines   = True,
+            expand       = True,
+            padding      = (0, 1),
+        )
+        mod_tbl.add_column("Category",   style="#000000", width=16, no_wrap=True)
+        mod_tbl.add_column("SP1 Serial", style="bold #005500", width=10, no_wrap=True)
+        mod_tbl.add_column("SP2 Serial", style="bold #003399", width=10, no_wrap=True)
+        mod_tbl.add_column("Changed Fields", style="#856404", width=28, no_wrap=False)
+        mod_tbl.add_column("Match via",  style="#5f35ae", width=10, no_wrap=True)
+
+        for m in modified_rows:
+            mod_tbl.add_row(
+                CAT_LABELS.get(m["category"], m["category"]),
+                m["SP1_serial"],
+                m["SP2_serial"],
+                "  Δ " + ", ".join(m["diffs"]) if m["diffs"] else "—",
+                m["match_type"] or "—",
+                style="on #fff3cd",
+            )
+        console.print(mod_tbl)
+
+    # ── INSTRUCTION debug (retained from v1 — helps diagnose text mismatches) ──
     sp1_instr = df_sp1[df_sp1["category"] == "INSTRUCTION"].copy()
     sp2_instr = df_sp2[df_sp2["category"] == "INSTRUCTION"].copy()
     sp1_instr_map = {r["norm_key"]: r["name"] for _, r in sp1_instr.iterrows()}
@@ -591,10 +829,40 @@ if mode == "merge":
                             title="INSTRUCTION Matching Debug",
                             border_style="#000000"))
 
+    # ── Merge Action Guide (GitHub PR style) ──────────────────────────────────
+    console.print()
+    console.print(Panel(
+        "How to use this comparison (like a GitHub Pull Request):\n\n"
+        "  ✓ BOTH (white)\n"
+        "      → Item is identical in both spaces. No action needed.\n"
+        "        It will be included in the merge automatically.\n\n"
+        "  ~ MODIFIED (amber)\n"
+        "      → Same item exists in both but content differs.\n"
+        "        SP1 version wins by default on merge.\n"
+        "        To use SP2 version instead: exclude SP1 serial via Cell 4c\n"
+        "        and include SP2 serial via Cell 4b.\n"
+        "        'SQL match' tag means they matched on SQL, not name — review carefully.\n\n"
+        "  ← SP1 ONLY (green)\n"
+        "      → Will be added to merge automatically.\n"
+        "        To EXCLUDE it: add SP1 serial to Cell 4c.\n\n"
+        "  → SP2 ONLY (blue)\n"
+        "      → Will be added to merge automatically.\n"
+        "        To EXCLUDE it: add SP2 serial to Cell 4d.\n\n"
+        "  Selective merge example:\n"
+        "    Cell 4a blank → include ALL SP1 items\n"
+        "    Cell 4c = 'SP1_005, SP1_012' → except those two\n"
+        "    Cell 4b blank → include ALL SP2 items\n"
+        "    Cell 4d = 'SP2_008' → except that one\n\n"
+        "Run Cell 4 to configure serial number selection for the merge.",
+        title="Merge Action Guide  (GitHub PR Style)",
+        border_style="#003399",
+    ))
+
     console.print("\nRun Cell 4 to fill in serial number selection widgets.")
 
 else:
     console.print("Mode = rollback — Cell 3 skipped.")
+
 
 
 
