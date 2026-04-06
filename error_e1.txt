@@ -12,6 +12,13 @@ SPACE_ID        = ""
 # 2 — LOAD GENIE SPACE
 
 import requests, json, copy, uuid
+import pandas as pd
+
+# Ensure pandas never truncates text in any column or row
+pd.set_option("display.max_colwidth", None)
+pd.set_option("display.max_rows",     None)
+pd.set_option("display.max_columns",  None)
+pd.set_option("display.width",        None)
 
 HEADERS = {
     "Authorization": f"Bearer {TOKEN}",
@@ -97,16 +104,15 @@ print(f"  Joins     : {len(get_joins())}")
 print(f"  Measures  : {len(get_measures())}")
 print("=" * 60)
 print("\n  Tables:")
+tbl_summary_rows = []
 for t in get_tables():
-    desc = safe_str(t.get("description"))
-    cols = len(t.get("column_configs", []))
-    print(f"    • {t['identifier']}")
-    if desc:
-        for line in desc.splitlines():
-            print(f"        Desc    : {line}")
-    else:
-        print(f"        Desc    : (empty)")
-    print(f"        Columns : {cols} configured")
+    tbl_summary_rows.append({
+        "Table Identifier" : t["identifier"],
+        "Description"      : safe_str(t.get("description")) or "(empty)",
+        "Configured Cols"  : len(t.get("column_configs", [])),
+    })
+tbl_summary_df = pd.DataFrame(tbl_summary_rows)
+display(tbl_summary_df)
 print("\n Ready. Run any cell below independently.")
 
 
@@ -243,14 +249,14 @@ else:
 
 if col_t:
     print(f"\n  All columns in this table:")
+    col_rows = []
     for c in col_configs:
-        d = safe_str(c.get("description"))
-        print(f"    • {c['column_name']}")
-        if d:
-            for line in d.splitlines():
-                print(f"        Desc : {line}")
-        else:
-            print(f"        Desc : (empty)")
+        col_rows.append({
+            "Column Name" : c["column_name"],
+            "Description" : safe_str(c.get("description")) or "(empty)",
+        })
+    col_df = pd.DataFrame(col_rows)
+    display(col_df)
 
 print(f"\n  Edit widget 3 above with the new description.")
 print(f" Then run Cell 6 to apply.")
@@ -658,11 +664,22 @@ else:
     added   = [l for l in diff if l[0] == "ADDED"]
     removed = [l for l in diff if l[0] == "REMOVED"]
     print(f"\n  {len(diff)} line(s)  |  + {len(added)} added   − {len(removed)} removed\n")
-    print("  " + "-" * 55)
+
+    diff_rows = []
     for kind, text in diff:
-        prefix = "  +  " if kind == "ADDED" else "  -  "
-        print(f"{prefix}{text}")
-    print("  " + "-" * 55)
+        diff_rows.append({
+            "Change" : ("+ ADDED"   if kind == "ADDED" else "- REMOVED"),
+            "Detail" : text,
+        })
+    diff_df = pd.DataFrame(diff_rows)
+
+    def _colour_diff(row):
+        colour = "background-color: #d4edda; color: #155724" \
+                 if row["Change"].startswith("+") \
+                 else "background-color: #f8d7da; color: #721c24"
+        return [colour, colour]
+
+    display(diff_df.style.apply(_colour_diff, axis=1))
     print(f"\n  Everything looks good?  :  Run Cell 12 to SAVE.")
     print(f" Want to undo everything? : Run Cell 13 to DISCARD.")
 
