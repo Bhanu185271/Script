@@ -679,7 +679,7 @@ if mode == "merge":
         "  Useful example: target=SP1, add SP2_007 (table from Space 2) AND re-add\n"
         "    SP1_003 (if you removed it in Widget 6 but want a clean re-insert)\n"
         "  Each item lands in its correct section: tables→tables, joins→joins, etc.\n"
-        "  Instructions are appended.  Duplicates are automatically suppressed.\n"
+        "  Instructions are appended below target instructions.  Duplicates are automatically suppressed.\n"
         "  Leave blank → no items added.\n\n"
         "[Widget 6]  Serials to REMOVE  — items to delete from the TARGET space\n"
         "  e.g. SP1_010 to drop a join from Space 1 (when target = SP1)\n"
@@ -704,7 +704,7 @@ else:
 #   2. Remove any items listed in Widget 6 (from TARGET)
 #   3. Add selected items from SOURCE space (Widget 5) into their correct sections
 #   4. Deduplicate every section — TARGET wins on conflict (same norm_key)
-#   5. Instructions are appended and sorted; no duplicates
+#   5. Instructions: target order preserved as-is; source instructions appended below, no duplicates
 # ─────────────────────────────────────────────────────────────────────────────
 
 mode = dbutils.widgets.get("mode")
@@ -802,16 +802,26 @@ if mode == "merge":
         "TABLE", "JOIN", "MEASURE", "EXPRESSION", "FILTER",
         "BENCHMARK", "SAMPLE_QUESTION", "EXAMPLE_SQL", "INSTRUCTION"
     ]}
-    instr_lines  = []
+    target_instr_lines = []   # target instructions in ORIGINAL space order, minus removals
+    source_instr_lines = []   # source instructions appended from Widget 5 selections
     merged_registry = {}
     rpt_base, rpt_added, rpt_removed, rpt_skipped = [], [], [], []
 
-    def apply_item(entry, sn):
+    def apply_item(entry, sn, is_source_phase=False):
         """
         Write one registry entry into merged_ss.
         Returns True if written, False if duplicate (skipped).
-        Items are placed in their correct section — tables→tables,
-        joins→joins, instructions are appended and deduped, etc.
+        Items are placed in their correct section — tables->tables,
+        joins->joins, instructions are appended and deduped, etc.
+
+        is_source_phase=False  -> called during Step 1 (target base items)
+        is_source_phase=True   -> called during Step 2 (items added from source via Widget 5)
+
+        INSTRUCTION lines are handled specially:
+          - Target instructions are pre-extracted in original space order (target_instr_lines).
+            apply_item marks them seen for dedup but does NOT re-append them.
+          - Source instructions (is_source_phase=True) are appended to source_instr_lines.
+        Final text_instructions = target_instr_lines + source_instr_lines (no sorting).
         """
         cat, key = entry["category"], entry["key"]
         item     = copy.deepcopy(entry["item"])
@@ -833,7 +843,11 @@ if mode == "merge":
         elif cat == "SAMPLE_QUESTION": merged_ss["config"]["sample_questions"].append(item)
         elif cat == "EXAMPLE_SQL"    : inst["example_question_sqls"].append(item)
         elif cat == "INSTRUCTION"    :
-            instr_lines.append(item["line"])
+            if is_source_phase:
+                # Source instruction: append AFTER all target instructions
+                source_instr_lines.append(item["line"])
+            # Target instructions are already captured in target_instr_lines
+            # (pre-extracted in original space order before Step 1).
             instr_line = item["line"]
 
         merged_registry[sn] = {
@@ -843,6 +857,35 @@ if mode == "merge":
             "instr_line": instr_line,
         }
         return True
+
+    # ── Pre-extract target instructions in ORIGINAL space order ──────────────
+    # build_registry sorts instructions alphabetically for display/comparison.
+    # To preserve the target space's original instruction ordering we read
+    # directly from the raw target_ss JSON here, before Step 1 runs.
+    # Instructions listed in remove_serials are excluded.
+    _removed_instr_nkeys = {
+        norm_key(target_registry[sn]["key"])
+        for sn in remove_serials
+        if sn in target_registry and target_registry[sn]["category"] == "INSTRUCTION"
+    }
+    _seen_ti = set()
+    for _ti in get_txt(target_ss):
+        if not isinstance(_ti, dict): continue
+        _c = _ti.get("content", [])
+        if isinstance(_c, str): _c = [_c]
+        for _ln in _c:
+            _ln = str(_ln).strip()
+            if not _ln: continue
+            _nk = norm_key(_ln)
+            if _nk in _removed_instr_nkeys or _nk in _seen_ti: continue
+            _seen_ti.add(_nk)
+            target_instr_lines.append(_ln)
+    # Pre-seed seen["INSTRUCTION"] with all target instruction keys so that
+    # apply_item (Step 1) marks them seen for dedup WITHOUT re-appending them
+    # (they are already captured above in original order).
+    for _sn, _e in target_registry.items():
+        if _e["category"] == "INSTRUCTION":
+            seen["INSTRUCTION"].add(_e["key"])
 
     # ── Step 1 : BASE — all TARGET items, minus removals ──────────────────────
     for sn in sorted(target_registry.keys()):
@@ -861,13 +904,16 @@ if mode == "merge":
         if reg is None or sn not in reg:
             continue   # already warned above
         e = reg[sn]
-        if apply_item(e, sn):
+        if apply_item(e, sn, is_source_phase=True):
             rpt_added.append(
                 f"  + {sn} [{e['category']}] [{reg_label}] {str(e['key'])[:80]}")
 
     # ── Consolidate instructions ───────────────────────────────────────────────
-    if instr_lines:
-        inst["text_instructions"] = [{"content": sorted(instr_lines)}]
+    # target_instr_lines : target space instructions in their ORIGINAL order
+    # source_instr_lines : source instructions appended BELOW (in serial-number order)
+    # No sorting — target order is preserved as-is; source lines are simply appended.
+    if target_instr_lines or source_instr_lines:
+        inst["text_instructions"] = [{"content": target_instr_lines + source_instr_lines}]
 
     # ── Report ─────────────────────────────────────────────────────────────────
     body = (
@@ -888,7 +934,8 @@ if mode == "merge":
     console.print(Panel(body, title="Merged Space Built ✓", border_style="#005500"))
     console.print(f"  Tables           : {len(ds['tables'])}")
     console.print(f"  Joins            : {len(inst['join_specs'])}")
-    console.print(f"  Instructions     : {len(instr_lines)}")
+    console.print(f"  Instructions     : {len(target_instr_lines) + len(source_instr_lines)}  "
+                  f"(target: {len(target_instr_lines)}  +  appended from source: {len(source_instr_lines)})")
     console.print(f"  Measures         : {len(snip['measures'])}")
     console.print(f"  Expressions      : {len(snip['expressions'])}")
     console.print(f"  Filters          : {len(snip['filters'])}")
