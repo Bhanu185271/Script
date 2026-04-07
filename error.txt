@@ -1,3 +1,8 @@
+ ✗  HTTP 409
+     {"error_code":"ABORTED","message":"Space configuration has been modified since this export was taken. Re-export the space and merge your changes.","details":[{"@type":"type.googleapis.com/google.rpc.RequestInfo","request_id":"dbe1eef1-64d2-4b66-b400-f79cafca5406","serving_data":""}]}
+  Check CAN EDIT permission on the target space.
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # CELL 1 — IMPORTS + CONFIG + WIDGETS
 # ─────────────────────────────────────────────────────────────────────────────
