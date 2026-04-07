@@ -1,4 +1,6 @@
-# 1 — IMPORTS + CONFIG + WIDGETS
+# ─────────────────────────────────────────────────────────────────────────────
+# CELL 1 — IMPORTS + CONFIG + WIDGETS
+# ─────────────────────────────────────────────────────────────────────────────
 
 import re, os, shutil, requests, json, copy, unicodedata
 from datetime import datetime
@@ -18,8 +20,7 @@ except ImportError:
     from rich         import box
     from rich.panel   import Panel
 
-#  Color Console 
-
+#  Color Console
 console = Console(force_terminal=True, color_system="truecolor",
                   width=300, highlight=False)
 
@@ -27,13 +28,8 @@ pd.set_option("display.max_colwidth", None)
 pd.set_option("display.max_rows",     None)
 
 
-
-DATABRICKS_HOST = "https://adb-.0.azuredatabricks.net"  
+DATABRICKS_HOST = "https://adb-.0.azuredatabricks.net"
 TOKEN           = "-2"
-
-# The two spaces you want to merge
-# SPACE_ID_1      = ""    # Test Genie Deployment Campaign & Content, Customer Journey and ATLAS, ACE and ES Insights V1.0
-# SPACE_ID_2      = ""    # V 1.1
 
 WAREHOUSE_ID     = ""
 NEW_SPACE_TITLE  = "Test Genie Merger Campaign & Content, Customer Journey and ATLAS, ACE and ES Insights v1.0 and v1.1"
@@ -43,10 +39,9 @@ PARENT_PATH      = "/Shared/iNavi_Metadata/genie/post_request_import_api"
 SNAPSHOT_FOLDER = "/Workspace/Users/chandrabhanu.x.chandrabhanu@gsk.com/Genie_Snapshot"
 MERGED_SAVE_PATH = "/Workspace/Users/chandrabhanu.x.chandrabhanu@gsk.com/merged_genie_space.json"
 
-
 HEADERS = {"Authorization": f"Bearer {TOKEN}", "Content-Type": "application/json"}
 
-dbutils.widgets.dropdown("mode", "merge", ["merge","rollback"], "1. Mode")
+dbutils.widgets.dropdown("mode", "merge", ["merge", "rollback"], "1. Mode")
 mode = dbutils.widgets.get("mode")
 
 if mode == "merge":
@@ -54,18 +49,18 @@ if mode == "merge":
     dbutils.widgets.text("space_id_2", "", "3. Space ID 2")
     console.print(Panel(
         "Mode : MERGE  —  Fill Space ID 1 and Space ID 2",
-        title="Genie Merge v8.0", border_style="dark_green"))
+        title="Genie Merge v9.0", border_style="dark_green"))
 else:
     dbutils.widgets.text("rollback_file", "", "2. Snapshot filename")
     console.print(Panel(
         f"Mode : ROLLBACK  —  Snapshot folder : {SNAPSHOT_FOLDER}\n"
-        "Enter snapshot filename, then run ollback Cell",
+        "Enter snapshot filename, then run Rollback Cell",
         title="Genie Merge", border_style="yellow"))
-		
-		
-		
 
-# 2 — LOAD BOTH SPACES + ADD SERIAL NUMBER
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CELL 2 — LOAD BOTH SPACES + ADD SERIAL NUMBER
+# ─────────────────────────────────────────────────────────────────────────────
 
 mode = dbutils.widgets.get("mode")
 
@@ -74,7 +69,7 @@ if mode == "merge":
     SPACE_ID_1 = dbutils.widgets.get("space_id_1").strip()
     SPACE_ID_2 = dbutils.widgets.get("space_id_2").strip()
 
-    #  Readable category and sub-headers label 
+    #  Readable category label map
     CAT_LABELS = {
         "INSTRUCTION"    : "Genie Instructions",
         "TABLE"          : "Table Details",
@@ -87,7 +82,7 @@ if mode == "merge":
         "EXAMPLE_SQL"    : "Example SQLs",
     }
 
-    # API 
+    # ── API fetch ──────────────────────────────────────────────────────────────
     def fetch_space(sid):
         r = requests.get(
             f"{DATABRICKS_HOST}/api/2.0/genie/spaces/{sid}",
@@ -103,7 +98,7 @@ if mode == "merge":
             raise KeyError(f"'serialized_space' missing. Keys: {list(outer.keys())}")
         return outer, (json.loads(raw) if isinstance(raw, str) else raw)
 
-    # Helpers 
+    # ── Helpers ────────────────────────────────────────────────────────────────
     def safe_str(v):
         if v is None:           return ""
         if isinstance(v, list): return " | ".join(str(x) for x in v if x is not None)
@@ -115,18 +110,11 @@ if mode == "merge":
         return ""
 
     def norm_key(s):
-        """
-          normalisation so visually identical strings always match:
-          1. NFKC unicode normalisation
-          2. Collapse ALL whitespace (spaces, tabs, newlines) to single space
-          3. Strip leading/trailing whitespace
-          4. Casefold 
-        """
         s = unicodedata.normalize("NFKC", str(s))
         s = re.sub(r"\s+", " ", s)
         return s.strip().casefold()
 
-    #  Section accessors 
+    #  Section accessors
     def get_tables(ss):    return ss.get("data_sources", {}).get("tables", [])
     def get_inst(ss):      return ss.get("instructions", {})
     def get_snip(ss):      return get_inst(ss).get("sql_snippets", {})
@@ -138,63 +126,41 @@ if mode == "merge":
     def get_measures(ss):  return get_snip(ss).get("measures", [])
     def get_benchmarks(ss):
         bm = ss.get("benchmarks", {})
-        return (bm.get("questions",[]) if isinstance(bm,dict)
-                else bm if isinstance(bm,list) else [])
-    def get_sample_qs(ss): return ss.get("config",{}).get("sample_questions",[])
+        return (bm.get("questions", []) if isinstance(bm, dict)
+                else bm if isinstance(bm, list) else [])
+    def get_sample_qs(ss): return ss.get("config", {}).get("sample_questions", [])
 
-    #   Description — full details
-    #
-    # TABLE format:
-    #   Table  :
-    #   Desc   : 
-    #   Cols   : 
-    #   Visible Columns:
-    #     col_name — column description
-    #     col_name — column description
-    #   Hidden Columns:
-    #     col_name
-    #
     def make_desc(cat, name, desc, sql, addl):
         p = []
         if cat == "INSTRUCTION":
             return name.strip() or "(empty)"
-
         elif cat == "TABLE":
-            # Table name always first
             p.append(f"Table  : {name}")
-            if desc:
-                p.append(f"Desc   : {desc}")
-            if addl:
-                p.append(addl)
+            if desc: p.append(f"Desc   : {desc}")
+            if addl: p.append(addl)
             return "\n".join(p)
-
         elif cat == "JOIN":
-            if sql:  p.append(f"SQL    : {sql}")
+            if sql: p.append(f"SQL    : {sql}")
             return "\n".join(p) if p else name
-
         elif cat in ("MEASURE", "EXPRESSION", "FILTER"):
             if desc: p.append(f"Desc   : {desc}")
             if sql:  p.append(f"SQL    : {sql}")
             if addl: p.append(addl)
             return "\n".join(p) if p else name
-
         elif cat == "BENCHMARK":
             p.append(f"Q      : {name}")
-            if sql:  p.append(f"SQL    : {sql}")
+            if sql: p.append(f"SQL    : {sql}")
             return "\n".join(p)
-
         elif cat == "SAMPLE_QUESTION":
             return name
-
         elif cat == "EXAMPLE_SQL":
             p.append(f"Q      : {name}")
-            if sql:  p.append(f"SQL    : {sql}")
+            if sql: p.append(f"SQL    : {sql}")
             return "\n".join(p)
-
         else:
             return desc or name
 
-    #  Registry builder 
+    #  Registry builder
     def build_registry(ss, prefix):
         rows, registry, ctr = [], {}, [1]
 
@@ -230,8 +196,7 @@ if mode == "merge":
             add("INSTRUCTION", ln, ln, "", "", "",
                 json.dumps({"line": ln}), {"line": ln, "_parent_ti": ti})
 
-        # 2. TABLES — sorted alphabetically by table name
-        #    Display: table name then description then full column list
+        # 2. TABLES
         for t in sorted([t for t in get_tables(ss)
                          if isinstance(t, dict) and t.get("identifier")],
                         key=lambda t: t["identifier"].lower()):
@@ -240,7 +205,6 @@ if mode == "merge":
             vis   = [c for c in cols if isinstance(c, dict) and not c.get("hidden", False)]
             hid   = [c for c in cols if isinstance(c, dict) and     c.get("hidden", False)]
 
-            #  full column listing 
             addl_lines = [f"Cols   : {len(cols)} total  (visible:{len(vis)}  hidden:{len(hid)})"]
             if vis:
                 addl_lines.append("Visible Columns:")
@@ -259,9 +223,9 @@ if mode == "merge":
 
         # 3. JOINS
         def jk(j):
-            l = j.get("left",{}).get("identifier","") if isinstance(j.get("left"),dict) else ""
-            r = j.get("right",{}).get("identifier","") if isinstance(j.get("right"),dict) else ""
-            return f"{min(l,r)} <-> {max(l,r)}"
+            l = j.get("left", {}).get("identifier", "") if isinstance(j.get("left"), dict) else ""
+            r = j.get("right", {}).get("identifier", "") if isinstance(j.get("right"), dict) else ""
+            return f"{min(l, r)} <-> {max(l, r)}"
         for j in sorted([j for j in get_joins(ss) if isinstance(j, dict)],
                         key=lambda j: jk(j).lower()):
             k = jk(j)
@@ -313,7 +277,7 @@ if mode == "merge":
 
         return rows, registry
 
-    # Fetch + build 
+    # ── Fetch + build ──────────────────────────────────────────────────────────
     outer1, ss1 = fetch_space(SPACE_ID_1)
     outer2, ss2 = fetch_space(SPACE_ID_2)
     rows1, registry1 = build_registry(ss1, "SP1")
@@ -324,24 +288,19 @@ if mode == "merge":
     df_sp1 = pd.DataFrame(rows1, columns=COLS)
     df_sp2 = pd.DataFrame(rows2, columns=COLS)
 
-    #  3- show : column rich table  
-
     def render_space_table(df, title, serial_hex, cat_hex):
         tbl = Table(
-            title       = title,
-            title_style = f"bold {serial_hex}",
-            box         = box.SIMPLE_HEAVY,
-            header_style= f"bold white on {serial_hex}",
-            show_lines  = True,
-            expand      = True,
-            padding     = (0, 1),
+            title        = title,
+            title_style  = f"bold {serial_hex}",
+            box          = box.SIMPLE_HEAVY,
+            header_style = f"bold white on {serial_hex}",
+            show_lines   = True,
+            expand       = True,
+            padding      = (0, 1),
         )
-        tbl.add_column("Serial No",
-                       style=f"bold {serial_hex}", width=10, no_wrap=True)
-        tbl.add_column("Category",
-                       style=cat_hex, width=22, no_wrap=True)
-        tbl.add_column("Description / SQL / Details",
-                       style="#000000", overflow="fold", ratio=1)
+        tbl.add_column("Serial No",  style=f"bold {serial_hex}", width=10, no_wrap=True)
+        tbl.add_column("Category",   style=cat_hex, width=22, no_wrap=True)
+        tbl.add_column("Description / SQL / Details", style="#000000", overflow="fold", ratio=1)
 
         prev = None
         for _, row in df.iterrows():
@@ -350,25 +309,19 @@ if mode == "merge":
                 if prev is not None:
                     tbl.add_section()
                 prev = cat
-                # Category label row 
                 label = CAT_LABELS.get(cat, cat)
-                tbl.add_row(
-                    "", f"── {label} ──", "",
-                    style=f"bold {serial_hex}",
-                )
+                tbl.add_row("", f"── {label} ──", "", style=f"bold {serial_hex}")
                 tbl.add_section()
             tbl.add_row(row["serial_no"], row["category"], row["display_desc"])
 
         console.print(); console.print(tbl); console.print()
 
-    # SP1 — dark green 
     render_space_table(
         df_sp1,
         title      = f"df_sp1  —  Space 1: {outer1.get('title','?')}   [{SPACE_ID_1}]   {len(rows1)} items",
         serial_hex = "#005500",
         cat_hex    = "#005500",
     )
-    # SP2 — dark blue 
     render_space_table(
         df_sp2,
         title      = f"df_sp2  —  Space 2: {outer2.get('title','?')}   [{SPACE_ID_2}]   {len(rows2)} items",
@@ -379,16 +332,16 @@ if mode == "merge":
     console.print(Panel(
         f"Space 1 : {outer1.get('title','?')}  [{SPACE_ID_1}]  :  {len(rows1)} items\n"
         f"Space 2 : {outer2.get('title','?')}  [{SPACE_ID_2}]  :  {len(rows2)} items\n\n"
-        "side-by-side comparison",
+        "Side-by-side comparison below ↓",
         title="Both spaces loaded", border_style="#005500"))
 
 else:
     console.print("Mode = rollback — Cell 2 skipped")
 
 
-
-#  3 — SIDE-BY-SIDE COMPARISON
-
+# ─────────────────────────────────────────────────────────────────────────────
+# CELL 3 — SIDE-BY-SIDE COMPARISON
+# ─────────────────────────────────────────────────────────────────────────────
 
 mode = dbutils.widgets.get("mode")
 
@@ -399,24 +352,20 @@ if mode == "merge":
         "FILTER", "BENCHMARK", "SAMPLE_QUESTION", "EXAMPLE_SQL",
     ]
 
-    # Categories where SQL content is meaningful for secondary matching
     SQL_CATS = {"JOIN", "MEASURE", "EXPRESSION", "FILTER", "BENCHMARK", "EXAMPLE_SQL"}
 
-    #  Status constants 
     IDENTICAL = "IDENTICAL"
     MODIFIED  = "MODIFIED"
     SP1_ONLY  = "SP1_ONLY"
     SP2_ONLY  = "SP2_ONLY"
 
-    # Background colours per status 
     STATUS_BG = {
-        IDENTICAL : "",              # no background = white
-        MODIFIED  : "on #fff3cd",    # amber / yellow
-        SP1_ONLY  : "on #d4edda",    # light green
-        SP2_ONLY  : "on #cce5ff",    # light blue
+        IDENTICAL : "",
+        MODIFIED  : "on #fff3cd",
+        SP1_ONLY  : "on #d4edda",
+        SP2_ONLY  : "on #cce5ff",
     }
 
-    # status labels 
     STATUS_LABEL = {
         IDENTICAL : "BOTH",
         MODIFIED  : "MODIFIED",
@@ -424,19 +373,9 @@ if mode == "merge":
         SP2_ONLY  : "-> SP2 ONLY",
     }
 
-    # Sort order: MODIFIED first, then SP1/SP2-only, IDENTICAL last
     STATUS_ORDER = {MODIFIED: 0, SP1_ONLY: 1, SP2_ONLY: 2, IDENTICAL: 3}
 
-    #  SQL normaliser
     def norm_sql(val):
-        """
-        Normalise SQL for comparison:
-          1. NFKC unicode
-          2. Collapse ALL whitespace (spaces, tabs, newlines) → single space
-          3. Strip
-          4. Casefold
-        Returns "" for None / empty.
-        """
         if val is None:
             return ""
         if isinstance(val, list):
@@ -445,50 +384,21 @@ if mode == "merge":
         s = re.sub(r"\s+", " ", s)
         return s.strip().casefold()
 
-    #  Content-level diff detector 
     def content_status(r1, r2):
-        """
-        Given two rows that have been matched (both exist),
-        determine whether they are IDENTICAL or MODIFIED.
-        Returns (status_str, list_of_changed_field_names).
-        """
         sql_match  = norm_sql(r1["sql"])         == norm_sql(r2["sql"])
         desc_match = norm_key(r1["description"]) == norm_key(r2["description"])
         name_match = norm_key(r1["name"])        == norm_key(r2["name"])
-
         if sql_match and desc_match and name_match:
             return IDENTICAL, []
-
         diffs = []
         if not name_match: diffs.append("name")
         if not sql_match:  diffs.append("SQL")
         if not desc_match: diffs.append("description")
         return MODIFIED, diffs
 
-    #  Two pass matcher 
     def two_pass_match(sp1_df, sp2_df, cat):
-        """
-        Match rows from sp1_df against sp2_df using two passes:
-          Pass 1: by norm_key (name/question)
-          Pass 2: by norm_sql (SQL content) — only for SQL_CATS
-
-        Handles duplicates: if multiple rows share the same norm_key in one
-        space, each is treated as a separate entry (first matches, rest become
-        SP1/SP2-only with a DUP flag).
-
-        Returns a list of match dicts:
-          {
-            "r1"         : row or None,
-            "r2"         : row or None,
-            "status"     : IDENTICAL | MODIFIED | SP1_ONLY | SP2_ONLY,
-            "diffs"      : [...],
-            "match_type" : "name" | "sql" | None,
-            "dup_flag"   : True if this is a duplicate entry,
-          }
-        """
         results = []
 
-        # Collect ALL rows (allow duplicates) — list of norm_key, sql_key, row
         def collect(df):
             items = []
             for _, r in df.iterrows():
@@ -500,7 +410,6 @@ if mode == "merge":
         sp1_items = collect(sp1_df)
         sp2_items = collect(sp2_df)
 
-        #  Pass 1: match by norm_key 
         for i1, e1 in enumerate(sp1_items):
             for i2, e2 in enumerate(sp2_items):
                 if e1["matched"] or e2["matched"]:
@@ -514,22 +423,17 @@ if mode == "merge":
                     })
                     e1["matched"] = True
                     e2["matched"] = True
-                    break  # one-to-one matching
+                    break
 
-        #  Pass 2: match unmatched by SQL content
         if cat in SQL_CATS:
             unmatched_sp1 = [e for e in sp1_items if not e["matched"]]
             unmatched_sp2 = [e for e in sp2_items if not e["matched"]]
-
             for e1 in unmatched_sp1:
-                if not e1["sk"]:          # no SQL : nothing to match on
-                    continue
+                if not e1["sk"]: continue
                 for e2 in unmatched_sp2:
-                    if e2["matched"] or not e2["sk"]:
-                        continue
+                    if e2["matched"] or not e2["sk"]: continue
                     if e1["sk"] == e2["sk"]:
                         status, diffs = content_status(e1["row"], e2["row"])
-                        # SQL matched : if name/desc differ that counts as MODIFIED
                         results.append({
                             "r1": e1["row"], "r2": e2["row"],
                             "status": status, "diffs": diffs,
@@ -539,7 +443,6 @@ if mode == "merge":
                         e2["matched"] = True
                         break
 
-        #  Remaining unmatched → SP1_ONLY / SP2_ONLY 
         for e1 in sp1_items:
             if not e1["matched"]:
                 results.append({
@@ -555,8 +458,6 @@ if mode == "merge":
                     "match_type": None, "dup_flag": False,
                 })
 
-        # Sort: MODIFIED first, then SP1/SP2-only, IDENTICAL last;
-        #       within same status, alphabetical by name
         def sort_key(m):
             r = m["r1"] if m["r1"] is not None else m["r2"]
             return (STATUS_ORDER[m["status"]], norm_key(r["name"]))
@@ -564,15 +465,12 @@ if mode == "merge":
         results.sort(key=sort_key)
         return results
 
-    #  Run matching for all categories 
-    compare_rows = []   
-
+    compare_rows = []
     for cat in CATEGORIES:
         sp1_cat = df_sp1[df_sp1["category"] == cat].copy()
         sp2_cat = df_sp2[df_sp2["category"] == cat].copy()
         if sp1_cat.empty and sp2_cat.empty:
             continue
-
         matches = two_pass_match(sp1_cat, sp2_cat, cat)
         for m in matches:
             r1, r2 = m["r1"], m["r2"]
@@ -585,15 +483,8 @@ if mode == "merge":
                 "SP2_description": r2["display_desc"] if r2 is not None else "",
             })
 
-    #  Legend / header 
     console.print()
 
-
-    # Per category rich comparison tables 
-    #
-    # One Table per category
-    # 5 columns: Status | SP1 Serial | SP1 Description | SP2 Serial | SP2 Description
- 
     def make_compare_table(cat_matches, sp1_title, sp2_title):
         tbl = Table(
             box          = box.SIMPLE_HEAVY,
@@ -603,36 +494,24 @@ if mode == "merge":
             header_style = "bold white on #37474f",
             show_header  = True,
         )
-        tbl.add_column("Status",
-                       style="bold #000000", width=14, no_wrap=False)
-        tbl.add_column(f"SP1 Serial\n{sp1_title}",
-                       style="bold #005500", width=10, no_wrap=True)
-        tbl.add_column("SP1 Description / SQL / Details",
-                       style="#000000", overflow="fold", ratio=1)
-        tbl.add_column(f"SP2 Serial\n{sp2_title}",
-                       style="bold #003399", width=10, no_wrap=True)
-        tbl.add_column("SP2 Description / SQL / Details",
-                       style="#000000", overflow="fold", ratio=1)
+        tbl.add_column("Status",                    style="bold #000000", width=14, no_wrap=False)
+        tbl.add_column(f"SP1 Serial\n{sp1_title}",  style="bold #005500", width=10, no_wrap=True)
+        tbl.add_column("SP1 Description / SQL / Details", style="#000000", overflow="fold", ratio=1)
+        tbl.add_column(f"SP2 Serial\n{sp2_title}",  style="bold #003399", width=10, no_wrap=True)
+        tbl.add_column("SP2 Description / SQL / Details", style="#000000", overflow="fold", ratio=1)
 
         for m in cat_matches:
             status = m["status"]
             rs     = STATUS_BG[status]
             label  = STATUS_LABEL[status]
-
-            # Append diff annotation for MODIFIED rows
             if status == MODIFIED and m["diffs"]:
                 label += f"\n  Δ {', '.join(m['diffs'])}"
-
-            # Annotate SQL-pass-2 matches
             if m["match_type"] == "sql":
                 label += "\n  (SQL match)"
-
             tbl.add_row(
                 label,
-                m["SP1_serial"],
-                m["SP1_description"],
-                m["SP2_serial"],
-                m["SP2_description"],
+                m["SP1_serial"], m["SP1_description"],
+                m["SP2_serial"], m["SP2_description"],
                 style=rs,
             )
         return tbl
@@ -642,15 +521,12 @@ if mode == "merge":
 
     for cat in CATEGORIES:
         cat_matches = [r for r in compare_rows if r["category"] == cat]
-        if not cat_matches:
-            continue
-
+        if not cat_matches: continue
         n_identical = sum(1 for r in cat_matches if r["status"] == IDENTICAL)
         n_modified  = sum(1 for r in cat_matches if r["status"] == MODIFIED)
         n_sp1       = sum(1 for r in cat_matches if r["status"] == SP1_ONLY)
         n_sp2       = sum(1 for r in cat_matches if r["status"] == SP2_ONLY)
         n_sql_match = sum(1 for r in cat_matches if r["match_type"] == "sql")
-
         label = CAT_LABELS.get(cat, cat)
         summary = (
             f"  {len(cat_matches)} rows  |  "
@@ -662,7 +538,6 @@ if mode == "merge":
         console.rule(f"  {label}  {summary}  ", style="#000000")
         console.print(make_compare_table(cat_matches, sp1_hdr, sp2_hdr))
 
-    #  Summary table 
     console.print()
     stbl = Table(
         title        = "Comparison Summary",
@@ -675,18 +550,16 @@ if mode == "merge":
     stbl.add_column("Category",    style="#000000", width=20)
     stbl.add_column("SP1 Items",   style="#005500", width=10, justify="right")
     stbl.add_column("SP2 Items",   style="#003399", width=10, justify="right")
-    stbl.add_column("Both",      style="#000000", width=10, justify="right")
-    stbl.add_column("Modified",  style="#856404", width=12, justify="right")
+    stbl.add_column("Both",        style="#000000", width=10, justify="right")
+    stbl.add_column("Modified",    style="#856404", width=12, justify="right")
     stbl.add_column("<-SP1 Only",  style="#005500", width=12, justify="right")
     stbl.add_column("->SP2 Only",  style="#003399", width=12, justify="right")
     stbl.add_column("SQL matched", style="#5f35ae", width=12, justify="right")
 
     total = {k: 0 for k in ["sp1", "sp2", "both", "mod", "s1", "s2", "sql"]}
-
     for cat in CATEGORIES:
         cat_matches = [r for r in compare_rows if r["category"] == cat]
-        if not cat_matches:
-            continue
+        if not cat_matches: continue
         c_sp1  = sum(1 for r in cat_matches if r.get("_in_sp1", r["r1"] is not None) or r["SP1_serial"])
         c_sp2  = sum(1 for r in cat_matches if r.get("_in_sp2", r["r2"] is not None) or r["SP2_serial"])
         c_both = sum(1 for r in cat_matches if r["status"] == IDENTICAL)
@@ -701,7 +574,7 @@ if mode == "merge":
                      str(c_sql) if c_sql else "")
         total["sp1"] += c_sp1; total["sp2"] += c_sp2
         total["both"] += c_both; total["mod"] += c_mod
-        total["s1"] += c_s1;    total["s2"] += c_s2; total["sql"] += c_sql
+        total["s1"] += c_s1;   total["s2"] += c_s2;  total["sql"] += c_sql
 
     stbl.add_section()
     stbl.add_row("TOTAL",
@@ -711,7 +584,6 @@ if mode == "merge":
                  str(total["sql"]) if total["sql"] else "")
     console.print(stbl)
 
-    #  MODIFIED items drill down 
     modified_rows = [r for r in compare_rows if r["status"] == MODIFIED]
     if modified_rows:
         console.print()
@@ -724,24 +596,21 @@ if mode == "merge":
             expand       = True,
             padding      = (0, 1),
         )
-        mod_tbl.add_column("Category",   style="#000000", width=16, no_wrap=True)
-        mod_tbl.add_column("SP1 Serial", style="bold #005500", width=10, no_wrap=True)
-        mod_tbl.add_column("SP2 Serial", style="bold #003399", width=10, no_wrap=True)
+        mod_tbl.add_column("Category",     style="#000000", width=16, no_wrap=True)
+        mod_tbl.add_column("SP1 Serial",   style="bold #005500", width=10, no_wrap=True)
+        mod_tbl.add_column("SP2 Serial",   style="bold #003399", width=10, no_wrap=True)
         mod_tbl.add_column("Changed Fields", style="#856404", width=28, no_wrap=False)
-        mod_tbl.add_column("Match via",  style="#5f35ae", width=10, no_wrap=True)
-
+        mod_tbl.add_column("Match via",    style="#5f35ae", width=10, no_wrap=True)
         for m in modified_rows:
             mod_tbl.add_row(
                 CAT_LABELS.get(m["category"], m["category"]),
-                m["SP1_serial"],
-                m["SP2_serial"],
+                m["SP1_serial"], m["SP2_serial"],
                 "   " + ", ".join(m["diffs"]) if m["diffs"] else "—",
                 m["match_type"] or "—",
                 style="on #fff3cd",
             )
         console.print(mod_tbl)
 
-    #  INSTRUCTION debug 
     sp1_instr = df_sp1[df_sp1["category"] == "INSTRUCTION"].copy()
     sp2_instr = df_sp2[df_sp2["category"] == "INSTRUCTION"].copy()
     sp1_instr_map = {r["norm_key"]: r["name"] for _, r in sp1_instr.iterrows()}
@@ -760,139 +629,203 @@ if mode == "merge":
             for raw_txt in only2_instr.values():
                 lines.append(f"    | {repr(raw_txt)}")
         lines.append("\n  repr() shows hidden characters (\\n, \\t, extra spaces)")
-        lines.append("  If two lines look the same but repr() differs, the text is")
-        lines.append("  genuinely different in the source Genie space data")
         console.print(Panel("\n".join(lines),
                             title="INSTRUCTION Matching Debug",
                             border_style="#000000"))
 
-    #  Merge Action Guide 
-    console.print()
-
-
-    console.print("\nRun next Cell to fill in serial number selection widgets")
+    console.print("\nReview serial numbers above, then run Cell 4 to configure the merge.")
 
 else:
     console.print("Mode = rollback — Cell 3 skipped.")
 
 
-
-# CELL 4 — SERIAL NUMBER SELECTION WIDGETS
+# ─────────────────────────────────────────────────────────────────────────────
+# CELL 4 — MERGE CONTROL  (3 widgets only)
 #
-# 4a / 4b : which serials to ADD from SP1 / SP2  (blank = all)
-# 4c / 4d : which serials to REMOVE
-#
-# SP2 JSON PACKAGE CONTROL - futher remove using 4e, 4f
-
+# Widget 4 : target_space   — which Genie space is the DESTINATION (base)
+# Widget 5 : serials_to_add — serial numbers from the SOURCE space to ADD
+# Widget 6 : serials_to_remove — serial numbers to REMOVE from TARGET space
+# ─────────────────────────────────────────────────────────────────────────────
 
 mode = dbutils.widgets.get("mode")
 
 if mode == "merge":
-    dbutils.widgets.text("add_from_sp1",    "", "4a. ADD from Space 1  (comma-sep SP1_xxx)")
-    dbutils.widgets.text("add_from_sp2",    "", "4b. ADD from Space 2  (comma-sep SP2_xxx)")
-    dbutils.widgets.text("remove_from_sp1", "", "4c. REMOVE from Space 1 selections")
-    dbutils.widgets.text("remove_from_sp2", "", "4d. REMOVE from Space 2 selections")
-    dbutils.widgets.text("sp2_include",     "", "4e. SP2 JSON — include ONLY these (blank=all merged)")
-    dbutils.widgets.text("sp2_exclude",     "", "4f. SP2 JSON — exclude these from SP2 output")
+
+    dbutils.widgets.dropdown(
+        "target_space",
+        "SP1 — Merge INTO Space 1",
+        ["SP1 — Merge INTO Space 1", "SP2 — Merge INTO Space 2"],
+        "4. Target Space (merge destination)"
+    )
+
+    dbutils.widgets.text(
+        "serials_to_add", "",
+        "5. Serial nos to ADD from source  (e.g. SP2_003, SP2_007)"
+    )
+
+    dbutils.widgets.text(
+        "serials_to_remove", "",
+        "6. Serial nos to REMOVE from target  (e.g. SP1_010, SP1_015)"
+    )
+
     console.print(Panel(
-        "4a — Space 1 serials to ADD    (e.g. SP1_001, SP1_005)\n"
-        "4b — Space 2 serials to ADD\n"
-        "4c — Space 1 serials to REMOVE (overrides 4a)\n"
-        "4d — Space 2 serials to REMOVE (overrides 4b)\n\n"
-        "Leave 4a–4d ALL blank → full merge (both spaces, SP1 wins on conflict).\n\n"
-        "----SP2 JSON Package Control ----\n"
-        "4e — Include ONLY these serials in SP2 JSON  (blank = include all merged)\n"
-        "     Example: SP1_002, SP1_005, SP2_003\n"
-        "4f — Exclude these serials from SP2 JSON     (blank = exclude nothing)\n"
-        "     Example: SP1_010\n\n"
-        "Rule: SP2 JSON = (4e ∩ merged)  −  4f\n"
+        "[Widget 4]  Target Space  — the Genie space that becomes the DESTINATION\n"
+        "  ● 'SP1 — Merge INTO Space 1'  →  Space 1 is the base; source = Space 2\n"
+        "  ● 'SP2 — Merge INTO Space 2'  →  Space 2 is the base; source = Space 1\n\n"
+        "[Widget 5]  Serials to ADD  — items from the SOURCE space to inject into TARGET\n"
+        "  If target = SP1, enter SP2_xxx serials  (e.g. SP2_003, SP2_007)\n"
+        "  If target = SP2, enter SP1_xxx serials  (e.g. SP1_005, SP1_012)\n"
+        "  Each item lands in its correct section: tables→tables, joins→joins, etc.\n"
+        "  Instructions are appended.  Duplicates are automatically suppressed.\n"
+        "  Leave blank → no items added from source.\n\n"
+        "[Widget 6]  Serials to REMOVE  — items to delete from the TARGET space\n"
+        "  e.g. SP1_010 to drop a join from Space 1 (when target = SP1)\n"
+        "  Leave blank → nothing removed.\n\n"
+        "Example : 'Add two tables from Space 2 to Space 1 and remove one join from Space 1'\n"
+        "  Widget 4 → SP1 — Merge INTO Space 1\n"
+        "  Widget 5 → SP2_014, SP2_021\n"
+        "  Widget 6 → SP1_009\n\n"
         "Run Cell 5 after filling widgets.",
-        title="Serial Number Selection + SP2 Package Control", border_style="yellow"))
+        title="Merge Control — Target / Add / Remove", border_style="yellow"
+    ))
+
 else:
     console.print("Mode = rollback — Cell 4 skipped.")
 
 
-
-# CELL 5 — BUILD MERGED SPACE  +  BUILD SP2 SPECIFIC JSON
+# ─────────────────────────────────────────────────────────────────────────────
+# CELL 5 — BUILD MERGED SPACE
 #
-# Step A: Build merged_snapshot  (full merge)
-
-# Step B: Apply sp2_include / sp2_exclude filters to select which items from merged package
-
+# Logic (similar to a GitHub merge):
+#   1. Take ALL items from TARGET space as the base
+#   2. Remove any items listed in Widget 6 (from TARGET)
+#   3. Add selected items from SOURCE space (Widget 5) into their correct sections
+#   4. Deduplicate every section — TARGET wins on conflict (same norm_key)
+#   5. Instructions are appended and sorted; no duplicates
+# ─────────────────────────────────────────────────────────────────────────────
 
 mode = dbutils.widgets.get("mode")
 
 if mode == "merge":
 
+    # ── Resolve target vs source ───────────────────────────────────────────────
+    target_choice = dbutils.widgets.get("target_space").strip()
+    is_sp1_target = target_choice.startswith("SP1")
+
+    if is_sp1_target:
+        target_registry = registry1
+        source_registry = registry2
+        TARGET_SPACE_ID = SPACE_ID_1
+        SOURCE_SPACE_ID = SPACE_ID_2
+        outer_target    = outer1
+        outer_source    = outer2
+        target_ss       = ss1
+        source_ss       = ss2
+        target_label    = f"Space 1 : {outer1.get('title','?')}"
+        source_label    = f"Space 2 : {outer2.get('title','?')}"
+        target_prefix   = "SP1"
+        source_prefix   = "SP2"
+    else:
+        target_registry = registry2
+        source_registry = registry1
+        TARGET_SPACE_ID = SPACE_ID_2
+        SOURCE_SPACE_ID = SPACE_ID_1
+        outer_target    = outer2
+        outer_source    = outer1
+        target_ss       = ss2
+        source_ss       = ss1
+        target_label    = f"Space 2 : {outer2.get('title','?')}"
+        source_label    = f"Space 1 : {outer1.get('title','?')}"
+        target_prefix   = "SP2"
+        source_prefix   = "SP1"
+
+    # ── Parse widget inputs ────────────────────────────────────────────────────
     def parse_serials(raw):
         return set(s.strip().upper() for s in raw.split(",") if s.strip())
 
-    add1 = parse_serials(dbutils.widgets.get("add_from_sp1"))
-    add2 = parse_serials(dbutils.widgets.get("add_from_sp2"))
-    rem1 = parse_serials(dbutils.widgets.get("remove_from_sp1"))
-    rem2 = parse_serials(dbutils.widgets.get("remove_from_sp2"))
+    add_serials    = parse_serials(dbutils.widgets.get("serials_to_add"))
+    remove_serials = parse_serials(dbutils.widgets.get("serials_to_remove"))
 
-    sp2_include_raw = parse_serials(dbutils.widgets.get("sp2_include"))
-    sp2_exclude_raw = parse_serials(dbutils.widgets.get("sp2_exclude"))
+    # ── Validate serial numbers ────────────────────────────────────────────────
+    bad_add = [f"  {s} — not found in SOURCE ({source_prefix})" for s in add_serials
+               if s not in source_registry]
+    bad_rem = [f"  {s} — not found in TARGET ({target_prefix})" for s in remove_serials
+               if s not in target_registry]
 
-    if not add1 and not add2:
-        add1 = set(registry1.keys())
-        add2 = set(registry2.keys())
-        console.print("No serials entered — using ALL items from both spaces.")
+    if bad_add or bad_rem:
+        console.print("WARNING — invalid serials (will be ignored):")
+        for m in (bad_add + bad_rem): console.print(m)
 
-    eff1, eff2 = add1 - rem1, add2 - rem2
+    # Validate prefix direction
+    wrong_add = [s for s in add_serials if s.startswith(target_prefix + "_")]
+    wrong_rem = [s for s in remove_serials if s.startswith(source_prefix + "_")]
+    if wrong_add:
+        console.print(f"\n⚠  Widget 5 (ADD) contains {target_prefix} serials — "
+                      f"these belong to the TARGET space, not the source:\n"
+                      f"  {', '.join(sorted(wrong_add))}\n"
+                      f"  Widget 5 should contain {source_prefix} serials (from source space).")
+    if wrong_rem:
+        console.print(f"\n⚠  Widget 6 (REMOVE) contains {source_prefix} serials — "
+                      f"these belong to the SOURCE space, not the target:\n"
+                      f"  {', '.join(sorted(wrong_rem))}\n"
+                      f"  Widget 6 should contain {target_prefix} serials (from target space).")
 
-    bad = ([f"   {s} — not in Space 1" for s in eff1 if s not in registry1] +
-           [f"   {s} — not in Space 2" for s in eff2 if s not in registry2])
-    if bad:
-        console.print("WARNING — invalid serials:")
-        for m in bad: console.print(m)
-
-    #  Step A: Build full merged_ss 
+    # ── Initialise output structure ────────────────────────────────────────────
     merged_ss = {
         "data_sources": {"tables": []},
         "instructions": {
-            "text_instructions": [], "join_specs": [],
+            "text_instructions"  : [],
+            "join_specs"         : [],
             "example_question_sqls": [],
-            "sql_snippets": {"filters": [], "expressions": [], "measures": []},
+            "sql_snippets"       : {"filters": [], "expressions": [], "measures": []},
         },
         "benchmarks": {"questions": []},
-        "config":     {"sample_questions": []},
-        "version":    max(ss1.get("version", 1), ss2.get("version", 1)),
+        "config"    : {"sample_questions": []},
+        "version"   : max(ss1.get("version", 1), ss2.get("version", 1)),
     }
     ds   = merged_ss["data_sources"]
     inst = merged_ss["instructions"]
     snip = inst["sql_snippets"]
 
+    # seen[cat] = set of norm_keys already written — guarantees no duplicates
     seen = {c: set() for c in [
         "TABLE", "JOIN", "MEASURE", "EXPRESSION", "FILTER",
         "BENCHMARK", "SAMPLE_QUESTION", "EXAMPLE_SQL", "INSTRUCTION"
     ]}
-    instr_lines, rpt1, rpt2, skipped = [], [], [], []
-
-    # merged_registry
-    # Tracks every serial number that successfully entered merged_ss,
-    # so we can reconstruct a filtered sp2_merged_ss in Step B.
+    instr_lines  = []
     merged_registry = {}
+    rpt_base, rpt_added, rpt_removed, rpt_skipped = [], [], [], []
 
-    def apply(entry, sn):
+    def apply_item(entry, sn):
+        """
+        Write one registry entry into merged_ss.
+        Returns True if written, False if duplicate (skipped).
+        Items are placed in their correct section — tables→tables,
+        joins→joins, instructions are appended and deduped, etc.
+        """
         cat, key = entry["category"], entry["key"]
-        item = copy.deepcopy(entry["item"])
+        item     = copy.deepcopy(entry["item"])
+
         if key in seen[cat]:
-            skipped.append(f"  = {sn} [{cat}] {str(key)[:80]} (SP1 kept)"); return False
+            rpt_skipped.append(
+                f"  = {sn} [{cat}] {str(key)[:80]}  (duplicate — TARGET version kept)")
+            return False
+
         seen[cat].add(key)
         instr_line = None
-        if   cat == "TABLE":           ds["tables"].append(item)
-        elif cat == "JOIN":            inst["join_specs"].append(item)
-        elif cat == "MEASURE":         snip["measures"].append(item)
-        elif cat == "EXPRESSION":      snip["expressions"].append(item)
-        elif cat == "FILTER":          snip["filters"].append(item)
-        elif cat == "BENCHMARK":       merged_ss["benchmarks"]["questions"].append(item)
+
+        if   cat == "TABLE"          : ds["tables"].append(item)
+        elif cat == "JOIN"           : inst["join_specs"].append(item)
+        elif cat == "MEASURE"        : snip["measures"].append(item)
+        elif cat == "EXPRESSION"     : snip["expressions"].append(item)
+        elif cat == "FILTER"         : snip["filters"].append(item)
+        elif cat == "BENCHMARK"      : merged_ss["benchmarks"]["questions"].append(item)
         elif cat == "SAMPLE_QUESTION": merged_ss["config"]["sample_questions"].append(item)
-        elif cat == "EXAMPLE_SQL":     inst["example_question_sqls"].append(item)
-        elif cat == "INSTRUCTION":
+        elif cat == "EXAMPLE_SQL"    : inst["example_question_sqls"].append(item)
+        elif cat == "INSTRUCTION"    :
             instr_lines.append(item["line"])
             instr_line = item["line"]
+
         merged_registry[sn] = {
             "category"  : cat,
             "key"       : key,
@@ -901,27 +834,46 @@ if mode == "merge":
         }
         return True
 
-    for sn in sorted(eff1):
-        if sn not in registry1: continue
-        e = registry1[sn]
-        if apply(e, sn): rpt1.append(f"  + {sn} [{e['category']}] {str(e['key'])[:80]}")
+    # ── Step 1 : BASE — all TARGET items, minus removals ──────────────────────
+    for sn in sorted(target_registry.keys()):
+        if sn in remove_serials:
+            e = target_registry[sn]
+            rpt_removed.append(
+                f"  - {sn} [{e['category']}] {str(e['key'])[:80]}")
+            continue
+        e = target_registry[sn]
+        if apply_item(e, sn):
+            rpt_base.append(f"  ✓ {sn} [{e['category']}] {str(e['key'])[:80]}")
 
-    for sn in sorted(eff2):
-        if sn not in registry2: continue
-        e = registry2[sn]
-        if apply(e, sn): rpt2.append(f"  + {sn} [{e['category']}] {str(e['key'])[:80]}")
+    # ── Step 2 : ADD selected SOURCE items (deduplicated, correct section) ─────
+    valid_add = {s for s in add_serials if s in source_registry}
+    for sn in sorted(valid_add):
+        e = source_registry[sn]
+        if apply_item(e, sn):
+            rpt_added.append(
+                f"  + {sn} [{e['category']}] {str(e['key'])[:80]}")
 
+    # ── Consolidate instructions ───────────────────────────────────────────────
     if instr_lines:
         inst["text_instructions"] = [{"content": sorted(instr_lines)}]
 
-    body = (f"Added from Space 1  ({len(rpt1)} items):\n"
-            + ("\n".join(rpt1) or "  (none)") + "\n\n"
-            + f"Added from Space 2  ({len(rpt2)} items):\n"
-            + ("\n".join(rpt2) or "  (none)"))
-    if skipped:
-        body += f"\n\nSkipped — duplicate key, SP1 kept ({len(skipped)}):\n" + "\n".join(skipped)
+    # ── Report ─────────────────────────────────────────────────────────────────
+    body = (
+        f"Target  : {target_label}  [{TARGET_SPACE_ID}]\n"
+        f"Source  : {source_label}  [{SOURCE_SPACE_ID}]\n\n"
+        f"Base items from target kept : {len(rpt_base)}\n"
+        f"Items removed from target   : {len(rpt_removed)}\n"
+        f"Items added from source     : {len(rpt_added)}\n"
+        f"Duplicates suppressed       : {len(rpt_skipped)}"
+    )
+    if rpt_removed:
+        body += "\n\nRemoved from target:\n" + "\n".join(rpt_removed)
+    if rpt_added:
+        body += "\n\nAdded from source:\n" + "\n".join(rpt_added)
+    if rpt_skipped:
+        body += "\n\nSkipped — duplicate key, TARGET version kept:\n" + "\n".join(rpt_skipped)
 
-    console.print(Panel(body, title="Merged Space Built (Full)", border_style="#005500"))
+    console.print(Panel(body, title="Merged Space Built ✓", border_style="#005500"))
     console.print(f"  Tables           : {len(ds['tables'])}")
     console.print(f"  Joins            : {len(inst['join_specs'])}")
     console.print(f"  Instructions     : {len(instr_lines)}")
@@ -931,119 +883,21 @@ if mode == "merge":
     console.print(f"  Benchmarks       : {len(merged_ss['benchmarks']['questions'])}")
     console.print(f"  Sample Questions : {len(merged_ss['config']['sample_questions'])}")
     console.print(f"  Example SQLs     : {len(inst['example_question_sqls'])}")
-    console.print(f"  JSON size        : {len(json.dumps(merged_ss,ensure_ascii=False)):,} chars")
+    console.print(f"  JSON size        : {len(json.dumps(merged_ss, ensure_ascii=False)):,} chars")
 
-    # Step B: Build sp2_merged_ss (filtered for SP2 JSON package) 
+    # For Cell 6 compatibility — no separate SP2 filter needed in new flow
+    sp2_merged_ss = merged_ss
+    sp2_filtered  = False
 
-    # Determine which serials go into the SP2 JSON:
-
-    all_merged_serials = set(merged_registry.keys())
-
-    if sp2_include_raw:
-        # Only include specific serials that are actually in merged
-        sp2_serials = (sp2_include_raw & all_merged_serials) - sp2_exclude_raw
-        invalid_inc = sp2_include_raw - all_merged_serials
-        if invalid_inc:
-            console.print(f" SP2 include serials not found in merged: "
-                          f"{', '.join(sorted(invalid_inc))}")
-    else:
-        sp2_serials = all_merged_serials - sp2_exclude_raw
-
-    invalid_exc = sp2_exclude_raw - all_merged_serials
-    if invalid_exc:
-        console.print(f" SP2 exclude serials not found in merged: "
-                      f"{', '.join(sorted(invalid_exc))}")
-
-    # Reconstruct sp2_merged_ss from the selected serials
-    def build_ss_from_registry(serials, registry):
-        """Build a serialized_space dict from a subset of merged_registry serials."""
-        ss_out = {
-            "data_sources": {"tables": []},
-            "instructions": {
-                "text_instructions": [], "join_specs": [],
-                "example_question_sqls": [],
-                "sql_snippets": {"filters": [], "expressions": [], "measures": []},
-            },
-            "benchmarks": {"questions": []},
-            "config":     {"sample_questions": []},
-            "version":    merged_ss.get("version", 1),
-        }
-        ds_o   = ss_out["data_sources"]
-        inst_o = ss_out["instructions"]
-        snip_o = inst_o["sql_snippets"]
-        sp2_instr_lines = []
-
-        for sn in sorted(serials):
-            if sn not in registry: continue
-            e   = registry[sn]
-            cat = e["category"]
-            itm = copy.deepcopy(e["item"])
-            if   cat == "TABLE":           ds_o["tables"].append(itm)
-            elif cat == "JOIN":            inst_o["join_specs"].append(itm)
-            elif cat == "MEASURE":         snip_o["measures"].append(itm)
-            elif cat == "EXPRESSION":      snip_o["expressions"].append(itm)
-            elif cat == "FILTER":          snip_o["filters"].append(itm)
-            elif cat == "BENCHMARK":       ss_out["benchmarks"]["questions"].append(itm)
-            elif cat == "SAMPLE_QUESTION": ss_out["config"]["sample_questions"].append(itm)
-            elif cat == "EXAMPLE_SQL":     inst_o["example_question_sqls"].append(itm)
-            elif cat == "INSTRUCTION":
-                if e["instr_line"]: sp2_instr_lines.append(e["instr_line"])
-
-        if sp2_instr_lines:
-            inst_o["text_instructions"] = [{"content": sorted(sp2_instr_lines)}]
-
-        return ss_out
-
-    # If sp2 filters are identical to full merge : reuse merged_ss 
-    if sp2_serials == all_merged_serials:
-        sp2_merged_ss = merged_ss
-        sp2_filtered  = False
-    else:
-        sp2_merged_ss = build_ss_from_registry(sp2_serials, merged_registry)
-        sp2_filtered  = True
-
-    # Report SP2 package contents
-    sp2_ds   = sp2_merged_ss["data_sources"]
-    sp2_inst = sp2_merged_ss["instructions"]
-    sp2_snip = sp2_inst["sql_snippets"]
-    sp2_txt  = sp2_inst.get("text_instructions", [])
-    sp2_instr_count = len(sp2_txt[0].get("content", [])) if sp2_txt else 0
-
-    if sp2_filtered:
-        excluded = sorted(all_merged_serials - sp2_serials)
-        console.print(Panel(
-            f"SP2 JSON package is a FILTERED subset of the full merge.\n\n"
-            f"  Serials included : {len(sp2_serials)}\n"
-            f"  Serials excluded : {len(excluded)}\n"
-            f"    {', '.join(excluded) if excluded else '(none)'}\n\n"
-            f"  Tables           : {len(sp2_ds['tables'])}\n"
-            f"  Joins            : {len(sp2_inst['join_specs'])}\n"
-            f"  Instructions     : {sp2_instr_count}\n"
-            f"  Measures         : {len(sp2_snip['measures'])}\n"
-            f"  Expressions      : {len(sp2_snip['expressions'])}\n"
-            f"  Filters          : {len(sp2_snip['filters'])}\n"
-            f"  Benchmarks       : {len(sp2_merged_ss['benchmarks']['questions'])}\n"
-            f"  Sample Questions : {len(sp2_merged_ss['config']['sample_questions'])}\n"
-            f"  Example SQLs     : {len(sp2_inst['example_question_sqls'])}\n"
-            f"  SP2 JSON size    : {len(json.dumps(sp2_merged_ss,ensure_ascii=False)):,} chars",
-            title="SP2 JSON Package (Filtered) ✓", border_style="#003399"))
-    else:
-        console.print(Panel(
-            "SP2 JSON package = full merged space (no sp2 include/exclude filters applied).\n"
-            "Use widgets 4e / 4f to include or exclude specific serials from the SP2 output.",
-            title="SP2 JSON Package (Full Merge)", border_style="#003399"))
-
-    console.print("\n validate.")
+    console.print("\nRun Cell 6 to clean, sort, and validate.")
 
 else:
-    console.print("Mode = rollback — Cell execution skipped.")
+    console.print("Mode = rollback — Cell 5 skipped.")
 
 
-
-# CELL 6 — Clean + SORT + VALIDATE
-#
-# Clean and sorts BOTH:
-
+# ─────────────────────────────────────────────────────────────────────────────
+# CELL 6 — CLEAN + SORT + VALIDATE
+# ─────────────────────────────────────────────────────────────────────────────
 
 mode = dbutils.widgets.get("mode")
 
@@ -1069,11 +923,10 @@ if mode == "merge":
                     f = fix_desc(c["description"])
                     if f: c["description"] = f
                     else: del c["description"]
-                # c["hidden"] NOT touched — preserved exactly
 
     def sort_all(ss):
-        by_id    = lambda l: sorted(l, key=lambda x: x.get("id","zzz") if isinstance(x,dict) else "zzz")
-        by_ident = lambda l: sorted(l, key=lambda x: x.get("identifier","") if isinstance(x,dict) else "")
+        by_id    = lambda l: sorted(l, key=lambda x: x.get("id", "zzz") if isinstance(x, dict) else "zzz")
+        by_ident = lambda l: sorted(l, key=lambda x: x.get("identifier", "") if isinstance(x, dict) else "")
         ds, inst = ss.get("data_sources", {}), ss.get("instructions", {})
         snip = inst.get("sql_snippets", {})
         bm   = ss.get("benchmarks", {})
@@ -1086,7 +939,6 @@ if mode == "merge":
         if isinstance(bm, dict) and "questions" in bm: bm["questions"] = by_id(bm["questions"])
         if "sample_questions" in cfg: cfg["sample_questions"] = by_id(cfg["sample_questions"])
 
-    # ── Sanitize + sort full merged space ─────────────────────────────────────
     ready_ss = copy.deepcopy(merged_ss)
     sanitize(ready_ss)
     sort_all(ready_ss)
@@ -1094,49 +946,35 @@ if mode == "merge":
     try:
         s = json.dumps(ready_ss, ensure_ascii=False)
         json.loads(s)
-        console.print(f"  ✓  ready_ss (full merge) — valid JSON  {len(s):,} chars")
+        console.print(f"  ✓  ready_ss — valid JSON  {len(s):,} chars")
     except Exception as e:
         console.print(f"  ✗  ready_ss JSON validation failed: {e}"); raise
 
-    # ── Sanitize + sort SP2-specific space ────────────────────────────────────
-    if sp2_filtered:
-        ready_sp2_ss = copy.deepcopy(sp2_merged_ss)
-        sanitize(ready_sp2_ss)
-        sort_all(ready_sp2_ss)
-        try:
-            s2 = json.dumps(ready_sp2_ss, ensure_ascii=False)
-            json.loads(s2)
-            console.print(f"  ✓  ready_sp2_ss (filtered) — valid JSON  {len(s2):,} chars")
-        except Exception as e:
-            console.print(f"  ✗  ready_sp2_ss JSON validation failed: {e}"); raise
-    else:
-        ready_sp2_ss = ready_ss
-        console.print("  ✓  ready_sp2_ss = ready_ss (no SP2 filter applied)")
+    # ready_sp2_ss is an alias for compatibility — in the new flow there is only
+    # one output: the ready_ss that gets patched into TARGET_SPACE_ID
+    ready_sp2_ss = ready_ss
 
     txt = len(ready_ss.get("instructions", {}).get("text_instructions", []))
     ex  = [x.get("id", "") for x in
            ready_ss.get("instructions", {}).get("example_question_sqls", [])
            if isinstance(x, dict)]
     console.print(f"  text_instructions blocks : {txt}  (expected ≤ 1)")
-    console.print(f"  example_question_sqls    : {'sorted ✓' if ex==sorted(ex) else 'NOT sorted ✗'}")
+    console.print(f"  example_question_sqls    : {'sorted ✓' if ex == sorted(ex) else 'NOT sorted ✗'}")
     console.print("\nRun Cell 7 to snapshot + export JSON + generate PDF.")
 
 else:
     console.print("Mode = rollback — Cell 6 skipped.")
 
 
-
 # ─────────────────────────────────────────────────────────────────────────────
 # CELL 7 — SNAPSHOT + JSON EXPORTS + PDF
 #
 # Saves:
-#   snapshot_SP1_<ts>.json        — pre-merge snapshot of Space 1
-#   snapshot_SP2_<ts>.json        — pre-merge snapshot of Space 2
-#   genie_SP1_EXPORT_<ts>.json    — Space 1 export
-#   genie_MERGED_PATCH_<ts>.json  — full merged space (ready_ss)
-#   genie_SP2_PATCH_<ts>.json     — SP2-filtered space (ready_sp2_ss)
-#                                   (same as merged patch if no SP2 filter)
-#   genie_comparison_<ts>.pdf     — side-by-side PDF report
+#   snapshot_SP1_<ts>.json         — pre-merge snapshot of Space 1
+#   snapshot_SP2_<ts>.json         — pre-merge snapshot of Space 2
+#   genie_SP1_EXPORT_<ts>.json     — Space 1 serialized export
+#   genie_MERGED_PATCH_<ts>.json   — merged space (ready_ss) → patches TARGET
+#   genie_comparison_<ts>.pdf      — side-by-side PDF report
 # ─────────────────────────────────────────────────────────────────────────────
 
 mode = dbutils.widgets.get("mode")
@@ -1144,6 +982,8 @@ mode = dbutils.widgets.get("mode")
 if mode == "merge":
 
     ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+
+    DBFS_SNAPSHOT = f"dbfs:/FileStore/genie_snapshots"
 
     def write_json(path, data, label):
         try:
@@ -1171,46 +1011,46 @@ if mode == "merge":
     snap1_name  = f"snapshot_{SPACE_ID_1}_{ts}.json"
     snap2_name  = f"snapshot_{SPACE_ID_2}_{ts}.json"
     sp1_export  = f"genie_SP1_EXPORT_{ts}.json"
-    patch_name  = f"genie_MERGED_PATCH_{ts}.json"
-    sp2_patch_name = f"genie_SP2_PATCH_{ts}.json"
+    patch_name  = f"genie_MERGED_PATCH_{TARGET_SPACE_ID}_{ts}.json"
     pdf_name    = f"genie_comparison_{SPACE_ID_1}_vs_{SPACE_ID_2}_{ts}.pdf"
 
     write_json(f"{SNAPSHOT_FOLDER}/{snap1_name}", {
-        "space_id": outer1.get("space_id",""), "title": outer1.get("title",""),
-        "description": outer1.get("description",""), "warehouse_id": outer1.get("warehouse_id",""),
-        "parent_path": outer1.get("parent_path",""),
-        "serialized_space": outer1.get("serialized_space",""),
+        "space_id"        : outer1.get("space_id", ""),
+        "title"           : outer1.get("title", ""),
+        "description"     : outer1.get("description", ""),
+        "warehouse_id"    : outer1.get("warehouse_id", ""),
+        "parent_path"     : outer1.get("parent_path", ""),
+        "serialized_space": outer1.get("serialized_space", ""),
     }, "Snapshot SP1")
 
     write_json(f"{SNAPSHOT_FOLDER}/{snap2_name}", {
-        "space_id": outer2.get("space_id",""), "title": outer2.get("title",""),
-        "description": outer2.get("description",""), "warehouse_id": outer2.get("warehouse_id",""),
-        "parent_path": outer2.get("parent_path",""),
-        "serialized_space": outer2.get("serialized_space",""),
+        "space_id"        : outer2.get("space_id", ""),
+        "title"           : outer2.get("title", ""),
+        "description"     : outer2.get("description", ""),
+        "warehouse_id"    : outer2.get("warehouse_id", ""),
+        "parent_path"     : outer2.get("parent_path", ""),
+        "serialized_space": outer2.get("serialized_space", ""),
     }, "Snapshot SP2")
 
     write_json(f"{SNAPSHOT_FOLDER}/{sp1_export}", {
-        "space_id": SPACE_ID_1, "title": outer1.get("title",""),
-        "description": outer1.get("description",""), "warehouse_id": outer1.get("warehouse_id",""),
-        "parent_path": outer1.get("parent_path",""),
-        "serialized_space": outer1.get("serialized_space",""),
+        "space_id"        : SPACE_ID_1,
+        "title"           : outer1.get("title", ""),
+        "description"     : outer1.get("description", ""),
+        "warehouse_id"    : outer1.get("warehouse_id", ""),
+        "parent_path"     : outer1.get("parent_path", ""),
+        "serialized_space": outer1.get("serialized_space", ""),
     }, "SP1 export JSON")
 
     write_json(f"{SNAPSHOT_FOLDER}/{patch_name}", {
-        "space_id": SPACE_ID_2, "title": outer2["title"],
-        "description": outer2.get("description",""), "warehouse_id": outer2["warehouse_id"],
-        "parent_path": outer2.get("parent_path",""),
+        "space_id"        : TARGET_SPACE_ID,
+        "title"           : outer_target["title"],
+        "description"     : outer_target.get("description", ""),
+        "warehouse_id"    : outer_target["warehouse_id"],
+        "parent_path"     : outer_target.get("parent_path", ""),
         "serialized_space": json.dumps(ready_ss, indent=2, ensure_ascii=False),
-    }, "Full merged patch JSON")
+    }, "Merged patch JSON  ← patches TARGET space")
 
-    write_json(f"{SNAPSHOT_FOLDER}/{sp2_patch_name}", {
-        "space_id": SPACE_ID_2, "title": outer2["title"],
-        "description": outer2.get("description",""), "warehouse_id": outer2["warehouse_id"],
-        "parent_path": outer2.get("parent_path",""),
-        "serialized_space": json.dumps(ready_sp2_ss, indent=2, ensure_ascii=False),
-    }, "SP2-filtered patch JSON  ← this is what patches Space 2")
-
-    # ── PDF ───────────────────────────────────────────────────────────────────
+    # ── PDF ────────────────────────────────────────────────────────────────────
     tmp_pdf = f"/tmp/{pdf_name}"
     try:
         from reportlab.lib           import colors as RC
@@ -1223,7 +1063,7 @@ if mode == "merge":
 
         doc = SimpleDocTemplate(tmp_pdf, pagesize=landscape(A3),
                                 leftMargin=1.2*cm, rightMargin=1.2*cm,
-                                topMargin=1.5*cm,  bottomMargin=1.5*cm)
+                                topMargin=1.5*cm, bottomMargin=1.5*cm)
         ss_  = getSampleStyleSheet()
         s_t  = ParagraphStyle("pt",  parent=ss_["Title"],  fontSize=16, spaceAfter=4)
         s_m  = ParagraphStyle("pm",  parent=ss_["Normal"], fontSize=9,  spaceAfter=2)
@@ -1236,7 +1076,7 @@ if mode == "merge":
 
         def P(t, st=None):
             return Paragraph(
-                str(t or "").replace("&","&amp;").replace("<","&lt;").replace(">","&gt;"),
+                str(t or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"),
                 st or s_c)
 
         elems = [
@@ -1244,8 +1084,9 @@ if mode == "merge":
             P(f"Generated  : {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}", s_m),
             P(f"Space 1    : {outer1.get('title','?')}  [{SPACE_ID_1}]", s_m),
             P(f"Space 2    : {outer2.get('title','?')}  [{SPACE_ID_2}]", s_m),
+            P(f"Target     : {target_label}  [{TARGET_SPACE_ID}]", s_m),
             P(f"Items SP1  : {len(df_sp1)}   Items SP2: {len(df_sp2)}", s_m),
-            P("GREEN bg = SP1 only  |  BLUE bg = SP2 only  |  WHITE = both spaces", s_m),
+            P("GREEN bg = SP1 only  |  BLUE bg = SP2 only  |  WHITE = both spaces  |  AMBER = modified", s_m),
             Spacer(1, .3*cm),
             HRFlowable(width="100%", thickness=1.5, color=RC.HexColor("#1F4E79")),
             Spacer(1, .3*cm),
@@ -1259,24 +1100,24 @@ if mode == "merge":
 
         C_SP1A = RC.HexColor("#d4edda"); C_SP1B = RC.HexColor("#b8dfc4")
         C_SP2A = RC.HexColor("#cce5ff"); C_SP2B = RC.HexColor("#a8d1f0")
-        C_BOTA = RC.white;               C_BOTB = RC.HexColor("#F5F5F5")
+        C_BOTA = RC.white;              C_BOTB = RC.HexColor("#F5F5F5")
         C_CAT  = RC.HexColor("#37474F")
 
         td = [[P(h, s_h) for h in HDRS]]
         sc = [
-            ("FONTSIZE",      (0,0), (-1,-1), 7),
-            ("LEADING",       (0,0), (-1,-1), 9),
-            ("VALIGN",        (0,0), (-1,-1), "TOP"),
-            ("ALIGN",         (0,0), (-1,-1), "LEFT"),
-            ("GRID",          (0,0), (-1,-1), .3, RC.HexColor("#B0BEC5")),
-            ("TOPPADDING",    (0,0), (-1,-1), 3),
-            ("BOTTOMPADDING", (0,0), (-1,-1), 3),
-            ("LEFTPADDING",   (0,0), (-1,-1), 3),
-            ("RIGHTPADDING",  (0,0), (-1,-1), 3),
+            ("FONTSIZE",      (0, 0), (-1, -1), 7),
+            ("LEADING",       (0, 0), (-1, -1), 9),
+            ("VALIGN",        (0, 0), (-1, -1), "TOP"),
+            ("ALIGN",         (0, 0), (-1, -1), "LEFT"),
+            ("GRID",          (0, 0), (-1, -1), .3, RC.HexColor("#B0BEC5")),
+            ("TOPPADDING",    (0, 0), (-1, -1), 3),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+            ("LEFTPADDING",   (0, 0), (-1, -1), 3),
+            ("RIGHTPADDING",  (0, 0), (-1, -1), 3),
         ]
         for ci, bg in enumerate(HDR_BG):
-            sc += [("BACKGROUND", (ci,0), (ci,0), bg),
-                   ("TEXTCOLOR",  (ci,0), (ci,0), RC.white)]
+            sc += [("BACKGROUND", (ci, 0), (ci, 0), bg),
+                   ("TEXTCOLOR",  (ci, 0), (ci, 0), RC.white)]
 
         ri = 1
         for cat in CATEGORIES:
@@ -1288,27 +1129,26 @@ if mode == "merge":
             ks_ = sorted(set(m1_) | set(m2_))
             if not ks_: continue
 
-            # Readable category label in PDF section header
             cat_label = CAT_LABELS.get(cat, cat)
-            td.append([P(f"▶  {cat_label}", s_ct)] + [P("")]*3)
-            sc += [("BACKGROUND", (0,ri), (-1,ri), C_CAT),
-                   ("SPAN",       (0,ri), (-1,ri))]
+            td.append([P(f"▶  {cat_label}", s_ct)] + [P("")] * 3)
+            sc += [("BACKGROUND", (0, ri), (-1, ri), C_CAT),
+                   ("SPAN",       (0, ri), (-1, ri))]
             ri += 1
 
             for i, k in enumerate(ks_):
                 r1_, r2_ = m1_.get(k), m2_.get(k)
                 o1 = r1_ is not None and r2_ is None
                 o2 = r1_ is None     and r2_ is not None
-                bg = (C_SP1A if i%2==0 else C_SP1B) if o1 else \
-                     (C_SP2A if i%2==0 else C_SP2B) if o2 else \
-                     (C_BOTA if i%2==0 else C_BOTB)
+                bg = (C_SP1A if i % 2 == 0 else C_SP1B) if o1 else \
+                     (C_SP2A if i % 2 == 0 else C_SP2B) if o2 else \
+                     (C_BOTA if i % 2 == 0 else C_BOTB)
                 td.append([
                     P(r1_["serial_no"]    if r1_ is not None else ""),
                     P(r1_["display_desc"] if r1_ is not None else ""),
                     P(r2_["serial_no"]    if r2_ is not None else ""),
                     P(r2_["display_desc"] if r2_ is not None else ""),
                 ])
-                sc.append(("BACKGROUND", (0,ri), (-1,ri), bg)); ri += 1
+                sc.append(("BACKGROUND", (0, ri), (-1, ri), bg)); ri += 1
 
         rl_tbl = RT(td, colWidths=COL_W, repeatRows=1)
         rl_tbl.setStyle(TableStyle(sc))
@@ -1325,33 +1165,25 @@ if mode == "merge":
 
     console.print(Panel(
         f"Saved to : {SNAPSHOT_FOLDER}\n"
-        f"  Snapshot SP1       : {snap1_name}\n"
-        f"  Snapshot SP2       : {snap2_name}\n"
-        f"  SP1 export         : {sp1_export}\n"
-        f"  Full merged patch  : {patch_name}\n"
-        f"  SP2-filtered patch : {sp2_patch_name}  ← used by Cell 9\n"
-        f"  PDF report         : {pdf_name}\n\n"
-        "Run Cell 8 to CREATE a NEW Genie space (optional).\n"
-        "Run Cell 9 to PATCH Space 2 with merged content.",
+        f"  Snapshot SP1      : {snap1_name}\n"
+        f"  Snapshot SP2      : {snap2_name}\n"
+        f"  SP1 export        : {sp1_export}\n"
+        f"  Merged patch      : {patch_name}  ← patches TARGET space\n"
+        f"  PDF report        : {pdf_name}\n\n"
+        f"Target Space  : {target_label}  [{TARGET_SPACE_ID}]\n"
+        f"Source Space  : {source_label}  [{SOURCE_SPACE_ID}]\n\n"
+        "Run Cell 8 to CREATE a new Genie space (optional).\n"
+        "Run Cell 9 to PATCH the TARGET space with merged content.",
         title="Cell 7 complete ✓", border_style="#005500"))
 
 else:
     console.print("Mode = rollback — Cell 7 skipped.")
 
 
-
-
-
-
-
-
-
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # CELL 8 — CREATE NEW GENIE SPACE  (optional)
 #
-# Uses ready_ss (full merged space).
+# Uses ready_ss (merged space).
 # Fill widget "8. New Genie Space title" to activate.
 # Leave blank → Cell 8 skips cleanly.
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1368,13 +1200,13 @@ if mode == "merge":
         console.print(Panel(
             "Widget '8. New Genie Space title' is empty — Cell 8 skipped.\n"
             "Fill the widget and re-run this cell to create a new Genie space.\n"
-            "Run Cell 9 to PATCH Space 2 with the SP2-filtered content.",
+            "Run Cell 9 to PATCH the TARGET space with the merged content.",
             title="Cell 8 — Create New Space (SKIPPED)", border_style="yellow"))
     else:
         console.print(Panel(
             f"Title        : {new_title}\n"
             f"Description  : {NEW_SPACE_DESC}\n"
-            f"Warehouse ID : {outer2['warehouse_id']}\n"
+            f"Warehouse ID : {outer_target['warehouse_id']}\n"
             f"Parent path  : {PARENT_PATH}\n\n"
             "Uses full merged space (ready_ss).\n"
             "Calling POST /api/2.0/genie/spaces …",
@@ -1386,7 +1218,7 @@ if mode == "merge":
             json={
                 "title"           : new_title,
                 "description"     : NEW_SPACE_DESC,
-                "warehouse_id"    : outer2["warehouse_id"],
+                "warehouse_id"    : outer_target["warehouse_id"],
                 "parent_path"     : PARENT_PATH,
                 "serialized_space": json.dumps(ready_ss, ensure_ascii=False),
             },
@@ -1401,7 +1233,7 @@ if mode == "merge":
                 f"  Title    : {new_title}\n"
                 f"  Space ID : {sid}\n\n"
                 "Open Databricks → Genie to verify.\n\n"
-                "Run Cell 9 only if you ALSO want to patch Space 2.",
+                "Run Cell 9 only if you ALSO want to patch the TARGET space.",
                 title="Cell 8 — New Space Created ✓", border_style="#005500"))
         else:
             console.print(f"  ✗  Create failed  HTTP {resp_new.status_code}")
@@ -1417,51 +1249,56 @@ else:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CELL 9 — PATCH SPACE 2
+# CELL 9 — PATCH TARGET SPACE
 #
-# Uses ready_sp2_ss — the SP2-filtered space built in Cell 5/6.
-# If no SP2 filter was applied (widgets 4e/4f blank), this is the full merge.
-# If SP2 filters were applied, only the selected serials are patched.
+# Patches the TARGET space (selected in Widget 4) with the merged content.
+# The SOURCE space is NOT modified.
 # ─────────────────────────────────────────────────────────────────────────────
 
 mode = dbutils.widgets.get("mode")
 
 if mode == "merge":
 
-    sp2_note = ("SP2-filtered subset" if sp2_filtered
-                else "full merged space (no SP2 filter applied)")
-
     console.print(Panel(
-        f"Space 1 '{outer1['title']}'  [{SPACE_ID_1}]  →  source only, NOT modified\n"
-        f"Space 2 '{outer2['title']}'  [{SPACE_ID_2}]  →  will be REPLACED\n\n"
-        f"Patching with: {sp2_note}",
-        title="Cell 9 — Patch Space 2", border_style="yellow"))
+        f"Target (will be PATCHED)  : {target_label}  [{TARGET_SPACE_ID}]\n"
+        f"Source (unchanged)        : {source_label}  [{SOURCE_SPACE_ID}]\n\n"
+        f"Items in merged space:\n"
+        f"  Tables           : {len(ready_ss.get('data_sources',{}).get('tables',[]))}\n"
+        f"  Joins            : {len(ready_ss.get('instructions',{}).get('join_specs',[]))}\n"
+        f"  Measures         : {len(ready_ss.get('instructions',{}).get('sql_snippets',{}).get('measures',[]))}\n"
+        f"  Expressions      : {len(ready_ss.get('instructions',{}).get('sql_snippets',{}).get('expressions',[]))}\n"
+        f"  Filters          : {len(ready_ss.get('instructions',{}).get('sql_snippets',{}).get('filters',[]))}\n"
+        f"  Example SQLs     : {len(ready_ss.get('instructions',{}).get('example_question_sqls',[]))}\n"
+        f"  Benchmarks       : {len(ready_ss.get('benchmarks',{}).get('questions',[]))}\n"
+        f"  Sample Questions : {len(ready_ss.get('config',{}).get('sample_questions',[]))}",
+        title="Cell 9 — Patch Target Space", border_style="yellow"))
 
     resp_p = requests.patch(
-        f"{DATABRICKS_HOST}/api/2.0/genie/spaces/{SPACE_ID_2}",
+        f"{DATABRICKS_HOST}/api/2.0/genie/spaces/{TARGET_SPACE_ID}",
         headers=HEADERS,
         json={
-            "title"           : outer2["title"],
-            "description"     : outer2.get("description", ""),
-            "warehouse_id"    : outer2["warehouse_id"],
-            "serialized_space": json.dumps(ready_sp2_ss, ensure_ascii=False),
+            "title"           : outer_target["title"],
+            "description"     : outer_target.get("description", ""),
+            "warehouse_id"    : outer_target["warehouse_id"],
+            "serialized_space": json.dumps(ready_ss, ensure_ascii=False),
         },
         timeout=120,
     )
 
     if resp_p.status_code == 200:
         console.print(Panel(
-            f"✓  SUCCESS — Space 2 patched!\n\n"
-            f"  '{outer2['title']}'  [{SPACE_ID_2}]  — replaced with {sp2_note}\n"
-            f"  '{outer1['title']}'  [{SPACE_ID_1}]  — unchanged\n\n"
+            f"✓  SUCCESS — Target space patched!\n\n"
+            f"  PATCHED  : '{outer_target['title']}'  [{TARGET_SPACE_ID}]\n"
+            f"  UNTOUCHED: '{outer_source['title']}'  [{SOURCE_SPACE_ID}]\n\n"
             f"To rollback:\n"
             f"  1. Set mode → rollback\n"
-            f"  2. Enter snapshot → {snap2_name}\n"
+            f"  2. Enter snapshot → {snap1_name if is_sp1_target else snap2_name}\n"
             f"  3. Run Cell 10",
             title="Cell 9 — Patch complete ✓", border_style="#005500"))
     else:
         console.print(f"  ✗  Error  HTTP {resp_p.status_code}")
         console.print(f"     {resp_p.text[:800]}")
+        console.print("  Check CAN EDIT permission on the target space.")
 
 else:
     console.print("Mode = rollback — Cell 9 skipped.")
@@ -1539,6 +1376,3 @@ if mode == "rollback":
 
 else:
     console.print("Mode = merge — Cell 10 (rollback) skipped.")
-
-
-	
