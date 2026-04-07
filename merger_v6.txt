@@ -745,6 +745,22 @@ if mode == "merge":
     add_serials    = parse_serials(dbutils.widgets.get("serials_to_add"))
     remove_serials = parse_serials(dbutils.widgets.get("serials_to_remove"))
 
+    # AUTO FULL MERGE: if both Widget 5 and Widget 6 are blank, merge everything
+    # from both spaces into the target, deduplicating across all components.
+    # Target always wins when the same item exists in both spaces.
+    _auto_full_merge = (not add_serials) and (not remove_serials)
+    if _auto_full_merge:
+        console.print(Panel(
+            "Widget 5 (serials to add) and Widget 6 (serials to remove) are both blank.\n\n"
+            "AUTO FULL MERGE MODE activated:\n"
+            "  All items from both spaces are merged into the target space.\n"
+            "  This includes: Instructions, Tables, Joins, Measures, Expressions,\n"
+            "                 Filters, Benchmarks, Sample Questions, Example SQLs.\n\n"
+            "  Duplicates are suppressed in every component - no duplicates anywhere.\n"
+            "  Target version wins whenever the same item exists in both spaces.\n\n"
+            "To do a selective merge instead, enter serial numbers in Widget 5 / Widget 6.",
+            title="AUTO FULL MERGE", border_style="#5f35ae"))
+
     # Route a serial number to its correct registry based on prefix
     def _resolve_registry(sn):
         if sn.startswith("SP1_"): return registry1, "Space 1"
@@ -842,25 +858,35 @@ if mode == "merge":
         if apply_item(e, sn):
             rpt_base.append(f"  {sn} [{e['category']}] {str(e['key'])[:80]}")
 
-    # Step 2: Add items from Widget 5 (auto-routed to the correct registry by prefix)
-    for sn in sorted(add_serials):
-        reg, reg_label = _resolve_registry(sn)
-        if reg is None or sn not in reg:
-            continue
-        e = reg[sn]
-        if apply_item(e, sn):
-            rpt_added.append(f"  {sn} [{e['category']}] [{reg_label}] {str(e['key'])[:80]}")
+    # Step 2: Add items from Widget 5, OR in auto-full-merge mode add ALL source items
+    if _auto_full_merge:
+        # Add every item from the source space; apply_item deduplicates automatically
+        for sn in sorted(source_registry.keys()):
+            e = source_registry[sn]
+            if apply_item(e, sn):
+                rpt_added.append(f"  {sn} [{e['category']}] [auto-merge] {str(e['key'])[:80]}")
+    else:
+        # Selective add: only the serial numbers entered in Widget 5
+        for sn in sorted(add_serials):
+            reg, reg_label = _resolve_registry(sn)
+            if reg is None or sn not in reg:
+                continue
+            e = reg[sn]
+            if apply_item(e, sn):
+                rpt_added.append(f"  {sn} [{e['category']}] [{reg_label}] {str(e['key'])[:80]}")
 
     # Step 3: Build the final instruction text block
     #
-    # - Keep the target's text_instructions object exactly as the API returned it
-    # - Remove lines whose norm_key matches any INSTRUCTION serial listed in Widget 6
-    # - Append lines from any INSTRUCTION serial listed in Widget 5 (deduped)
-    # - Insert one blank line between the target block and the newly added source lines
-    # - Genie allows exactly one text_instructions object so the original shell is reused
+    # FIX - each instruction always stored as its own list element so it appears
+    # on its own line (previously added lines were concatenating into one paragraph).
     #
-    # Each instruction from Widget 5 appears on its own line in the content list.
-    # For example, adding 5 serials from Space 2 produces 5 separate lines below the blank line.
+    # Rules:
+    #   - Keep target text_instructions, filtered by Widget 6 removals
+    #   - Each instruction (kept or added) is ONE element in the content list
+    #   - One empty-string separator between the target block and the added block
+    #   - In auto-full-merge mode : add ALL source instruction lines not in target
+    #   - In selective mode       : add only instruction lines from Widget 5 serials
+    #   - Deduplication by norm_key throughout (target version always wins)
 
     # Collect norm_keys of instructions to remove from the target content
     _rem_instr_nkeys = {
@@ -869,67 +895,90 @@ if mode == "merge":
         if sn in target_registry and target_registry[sn]["category"] == "INSTRUCTION"
     }
 
-    # Deep-copy the raw target text_instructions list (all original fields preserved)
+    # Deep-copy the raw target text_instructions list (preserves all original API fields)
     _raw_ti_list = copy.deepcopy(get_txt(target_ss))
+    _ti_shell    = _raw_ti_list[0] if _raw_ti_list else {"content": []}
+    _raw_content = _ti_shell.get("content", [])
 
-    # Use the first ti object as the shell; create a minimal one if target had none
-    _ti_shell = _raw_ti_list[0] if _raw_ti_list else {"content": []}
+    # Normalize content (string or list) into a flat list of individual non-empty lines.
+    # This is the core fix: every instruction becomes its own list element.
+    def _content_to_lines(content):
+        """Return a flat list of stripped non-empty instruction lines."""
+        if isinstance(content, str):
+            # Single string that may contain newline-separated instructions
+            return [ln for ln in content.split("\n") if ln.strip()]
+        elif isinstance(content, list):
+            result = []
+            for entry in content:
+                # Each list element might itself contain embedded newlines
+                for ln in str(entry).split("\n"):
+                    if ln.strip():
+                        result.append(ln)
+            return result
+        return []
 
-    # Preserve the original string-vs-list type of the content field
-    _raw_content  = _ti_shell.get("content", [])
-    _is_str       = isinstance(_raw_content, str)
-    _content_list = [_raw_content] if _is_str else list(_raw_content or [])
+    _target_lines = _content_to_lines(_raw_content)
 
-    # Filter out removed lines and build a seen-set for deduplication
+    # Filter out removed lines; build a dedup set of norm_keys already present
     _existing_nkeys = set()
-    _kept_content   = []
-    for _entry in _content_list:
-        _nk = norm_key(str(_entry))
+    _kept_lines     = []
+    for _ln in _target_lines:
+        _nk = norm_key(_ln)
         if _nk in _rem_instr_nkeys:
             continue
         _existing_nkeys.add(_nk)
-        _kept_content.append(_entry)
+        _kept_lines.append(_ln)
 
-    # Collect new instruction lines from Widget 5, one line per serial number
-    # Each line is added as a separate entry in the list so they appear on separate lines
+    # Collect new instruction lines to append (one entry per instruction = one line)
     _lines_added = []
-    for sn in sorted(add_serials):
-        reg, _ = _resolve_registry(sn)
-        if reg is None or sn not in reg:
-            continue
-        e = reg[sn]
-        if e["category"] != "INSTRUCTION":
-            continue
-        _line_text = e["item"]["line"]
-        _nk = norm_key(_line_text)
-        if _nk not in _existing_nkeys:
-            _existing_nkeys.add(_nk)
-            _lines_added.append(_line_text)
 
-    # Assemble the final content list:
-    #   target instructions (one per line)
-    #   blank line separator   <- inserted only when both blocks have content
-    #   source instructions    <- each on its own line (one entry per serial added)
-    if _kept_content and _lines_added:
-        _separator = ["\n"]
+    if _auto_full_merge:
+        # Auto-full-merge: add ALL instruction lines from the source space
+        for sn in sorted(source_registry.keys()):
+            e = source_registry[sn]
+            if e["category"] != "INSTRUCTION":
+                continue
+            _line_text = e["item"]["line"]
+            _nk = norm_key(_line_text)
+            if _nk not in _existing_nkeys:
+                _existing_nkeys.add(_nk)
+                _lines_added.append(_line_text)
     else:
-        _separator = []
+        # Selective: add only instruction lines from Widget 5 serial numbers
+        for sn in sorted(add_serials):
+            reg, _ = _resolve_registry(sn)
+            if reg is None or sn not in reg:
+                continue
+            e = reg[sn]
+            if e["category"] != "INSTRUCTION":
+                continue
+            _line_text = e["item"]["line"]
+            _nk = norm_key(_line_text)
+            if _nk not in _existing_nkeys:
+                _existing_nkeys.add(_nk)
+                _lines_added.append(_line_text)
 
-    _final_content = _kept_content + _separator + _lines_added
+    # Separator: one blank element between the two blocks (only when both have content)
+    _separator_lines = [""] if (_kept_lines and _lines_added) else []
 
-    if _final_content or _raw_ti_list:
-        _ti_shell["content"] = (_final_content[0]
-                                if (_is_str and len(_final_content) == 1)
-                                else _final_content)
+    # Final content: each instruction is its own list element -> renders on its own line
+    _final_lines = _kept_lines + _separator_lines + _lines_added
+
+    if _final_lines or _raw_ti_list:
+        # Always store as a list so every instruction appears on a separate line.
+        # The Genie API accepts both str and list for content; list preserves line breaks.
+        _ti_shell["content"] = _final_lines
         inst["text_instructions"] = [_ti_shell]
 
-    # Count summary for the report
-    _n_target_kept = len(_kept_content)
+    # Counts for the summary report
+    _n_target_kept = len(_kept_lines)
     _n_removed     = len(_rem_instr_nkeys)
     _n_added       = len(_lines_added)
 
     # Print merge summary
+    _merge_mode_label = "AUTO FULL MERGE" if _auto_full_merge else "Selective Merge"
     body = (
+        f"Mode    : {_merge_mode_label}\n"
         f"Target  : {target_label}  [{TARGET_SPACE_ID}]\n"
         f"Source  : {source_label}  [{SOURCE_SPACE_ID}]\n\n"
         f"Base items from target kept : {len(rpt_base)}\n"
@@ -944,11 +993,11 @@ if mode == "merge":
     if rpt_skipped:
         body += "\n\nSkipped (duplicate key, target version kept):\n" + "\n".join(rpt_skipped)
 
-    console.print(Panel(body, title="Merged Space Built", border_style="#005500"))
+    console.print(Panel(body, title=f"Merged Space Built  [{_merge_mode_label}]", border_style="#005500"))
     console.print(f"  Tables           : {len(ds['tables'])}")
     console.print(f"  Joins            : {len(inst['join_specs'])}")
     _merged_ti   = inst.get("text_instructions", [])
-    _total_lines = len(_merged_ti[0].get("content", [])) if _merged_ti else 0
+    _total_lines = len([l for l in (_merged_ti[0].get("content", []) if _merged_ti else []) if str(l).strip()])
     console.print(f"  Instructions     : {_n_target_kept} kept + {_n_added} added  ({_n_removed} removed)  = {_total_lines} lines total")
     console.print(f"  Measures         : {len(snip['measures'])}")
     console.print(f"  Expressions      : {len(snip['expressions'])}")
