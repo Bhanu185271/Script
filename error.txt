@@ -1,3 +1,14 @@
+✗  Create failed  HTTP 400
+     {"error_code":"INVALID_PARAMETER_VALUE","message":"Invalid export proto: instructions.text_instructions must contain at most one item","details":[{"@type":"type.googleapis.com/google.rpc.RequestInfo","request_id":"93d03f5c-11f5-4168-9e7d-146580f74092","serving_data":""}]}
+  Common causes:
+    • TOKEN lacks CAN MANAGE on PARENT_PATH
+    • warehouse_id invalid or warehouse is stopped
+    • PARENT_PATH does not exist
+    • serialized_space JSON exceeds API size limit
+
+
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # CELL 1 — IMPORTS + CONFIG + WIDGETS
 # ─────────────────────────────────────────────────────────────────────────────
