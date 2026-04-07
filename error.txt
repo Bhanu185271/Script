@@ -804,14 +804,13 @@ if mode == "merge":
         "TABLE", "JOIN", "MEASURE", "EXPRESSION", "FILTER",
         "BENCHMARK", "SAMPLE_QUESTION", "EXAMPLE_SQL", "INSTRUCTION"
     ]}
-    target_text_instrs  = []
-    source_text_instrs  = []
-    _seen_source_ti_ids = set()
     merged_registry = {}
     rpt_base, rpt_added, rpt_removed, rpt_skipped = [], [], [], []
 
-    def apply_item(entry, sn, is_source_phase=False):
+    def apply_item(entry, sn):
         # Write one registry entry into merged_ss. Returns True if written, False if duplicate.
+        # INSTRUCTION items: tracked in seen + merged_registry only;
+        # actual text_instructions content is built after Step 2 via raw concatenation.
         cat, key = entry["category"], entry["key"]
         item     = copy.deepcopy(entry["item"])
 
@@ -832,15 +831,7 @@ if mode == "merge":
         elif cat == "SAMPLE_QUESTION": merged_ss["config"]["sample_questions"].append(item)
         elif cat == "EXAMPLE_SQL"    : inst["example_question_sqls"].append(item)
         elif cat == "INSTRUCTION"    :
-            if is_source_phase:
-                # Collect the parent ti object from the source registry item
-                _parent = item.get("_parent_ti")
-                if isinstance(_parent, dict):
-                    _ti_id = _parent.get("id", id(_parent))
-                    if _ti_id not in _seen_source_ti_ids:
-                        _seen_source_ti_ids.add(_ti_id)
-                        source_text_instrs.append(copy.deepcopy(_parent))
-            # Target instructions are pre-extracted before Step 1, not re-added here
+            # Content handled separately below — just record the line for the registry
             instr_line = item["line"]
 
         merged_registry[sn] = {
@@ -850,45 +841,6 @@ if mode == "merge":
             "instr_line": instr_line,
         }
         return True
-
-    # Pre-extract target instructions in original space order, excluding removed lines
-    _removed_instr_nkeys = {
-        norm_key(target_registry[sn]["key"])
-        for sn in remove_serials
-        if sn in target_registry and target_registry[sn]["category"] == "INSTRUCTION"
-    }
-    _seen_ti_line_nkeys = set()   # dedup across all target ti objects
-    _seen_ti_ids        = set()   # avoid adding the same ti object twice
-    for _ti in get_txt(target_ss):
-        if not isinstance(_ti, dict): continue
-        _ti_id = _ti.get("id", id(_ti))
-        if _ti_id in _seen_ti_ids: continue
-
-        _raw_c = _ti.get("content", [])
-        _c_list = [_raw_c] if isinstance(_raw_c, str) else \
-                  [str(x) for x in _raw_c if x is not None]
-
-        # Filter out removed or already-seen lines
-        _kept = []
-        for _ln in _c_list:
-            _ln = _ln.strip()
-            if not _ln: continue
-            _nk = norm_key(_ln)
-            if _nk in _removed_instr_nkeys or _nk in _seen_ti_line_nkeys: continue
-            _seen_ti_line_nkeys.add(_nk)
-            _kept.append(_ln)
-
-        if not _kept: continue
-
-        _ti_copy = copy.deepcopy(_ti)
-        _ti_copy["content"] = _kept[0] if isinstance(_raw_c, str) else _kept
-        _seen_ti_ids.add(_ti_id)
-        target_text_instrs.append(_ti_copy)
-
-    # Pre-seed seen so apply_item marks target instructions as seen without re-adding them
-    for _sn, _e in target_registry.items():
-        if _e["category"] == "INSTRUCTION":
-            seen["INSTRUCTION"].add(_e["key"])
 
     # ── Step 1 : BASE — all TARGET items, minus removals ──────────────────────
     for sn in sorted(target_registry.keys()):
@@ -907,43 +859,72 @@ if mode == "merge":
         if reg is None or sn not in reg:
             continue   # already warned above
         e = reg[sn]
-        if apply_item(e, sn, is_source_phase=True):
+        if apply_item(e, sn):
             rpt_added.append(
                 f"  + {sn} [{e['category']}] [{reg_label}] {str(e['key'])[:80]}")
 
-    # Merge instructions into a single text_instruction object using a separator marker.
-    # Source lines go first, then a marker line, then target lines — matching the reference approach.
-    MERGE_MARKER = "=== Additional Instructions ==="
+    # ── Instructions: raw concat — no restructuring ──────────────────────────────
+    # Rule: Take the target's text_instructions object exactly as the API returned it.
+    #   • Remove entries whose norm_key matches any INSTRUCTION serial in Widget 6.
+    #   • Append lines from any INSTRUCTION serial in Widget 5 (deduped, order preserved).
+    # Genie allows exactly one text_instructions object — the original shell is kept intact.
 
-    def extract_lines(ti_list):
-        lines = []
-        for _ti in ti_list:
-            _c = _ti.get("content", [])
-            if isinstance(_c, str): _c = [_c]
-            for _ln in _c:
-                _ln = str(_ln).strip()
-                if _ln:
-                    lines.append(_ln)
-        return lines
+    # norm_keys to remove from target content
+    _rem_instr_nkeys = {
+        norm_key(target_registry[sn]["key"])
+        for sn in remove_serials
+        if sn in target_registry and target_registry[sn]["category"] == "INSTRUCTION"
+    }
 
-    target_lines = extract_lines(target_text_instrs)
-    source_lines = extract_lines(source_text_instrs)
+    # Deep-copy the raw target text_instructions list (all original fields preserved)
+    _raw_ti_list = copy.deepcopy(get_txt(target_ss))
 
-    all_ti = target_text_instrs + source_text_instrs
-    if all_ti:
-        already_merged = any(MERGE_MARKER in ln for ln in target_lines)
-        if source_lines and not already_merged:
-            merged_content = (
-                source_lines
-                + ["\r\n", MERGE_MARKER + "\r\n", "\r\n"]
-                + target_lines
-            )
-        else:
-            merged_content = target_lines
+    # Use the first (only) ti object as the shell; create a minimal one if target had none
+    _ti_shell = _raw_ti_list[0] if _raw_ti_list else {"content": []}
 
-        shell = copy.deepcopy(all_ti[0])
-        shell["content"] = merged_content
-        inst["text_instructions"] = [shell]
+    # Preserve original str-vs-list type of content
+    _raw_content  = _ti_shell.get("content", [])
+    _is_str       = isinstance(_raw_content, str)
+    _content_list = [_raw_content] if _is_str else list(_raw_content or [])
+
+    # Step A: filter out removed lines, build seen-set for dedup
+    _existing_nkeys = set()
+    _kept_content   = []
+    for _entry in _content_list:
+        _nk = norm_key(str(_entry))
+        if _nk in _rem_instr_nkeys:
+            continue
+        _existing_nkeys.add(_nk)
+        _kept_content.append(_entry)
+
+    # Step B: append new lines from Widget 5 INSTRUCTION serials (deduped, original text kept)
+    _lines_added = []
+    for sn in sorted(add_serials):
+        reg, _ = _resolve_registry(sn)
+        if reg is None or sn not in reg:
+            continue
+        e = reg[sn]
+        if e["category"] != "INSTRUCTION":
+            continue
+        _line_text = e["item"]["line"]
+        _nk = norm_key(_line_text)
+        if _nk not in _existing_nkeys:
+            _existing_nkeys.add(_nk)
+            _lines_added.append(_line_text)
+
+    # Step C: write final content back into the shell — preserve str type if original was str
+    _final_content = _kept_content + _lines_added
+    if _final_content or _raw_ti_list:
+        _ti_shell["content"] = (_final_content[0]
+                                if (_is_str and len(_final_content) == 1)
+                                else _final_content)
+        inst["text_instructions"] = [_ti_shell]
+    # else: no target instructions and nothing added — inst["text_instructions"] stays []
+
+    # Counts for report
+    _n_target_kept = len(_kept_content)
+    _n_removed     = len(_rem_instr_nkeys)
+    _n_added       = len(_lines_added)
 
     # ── Report ─────────────────────────────────────────────────────────────────
     body = (
@@ -964,9 +945,9 @@ if mode == "merge":
     console.print(Panel(body, title="Merged Space Built ✓", border_style="#005500"))
     console.print(f"  Tables           : {len(ds['tables'])}")
     console.print(f"  Joins            : {len(inst['join_specs'])}")
-    _merged_ti    = inst.get("text_instructions", [])
-    _total_lines  = len(_merged_ti[0].get("content", [])) if _merged_ti else 0
-    console.print(f"  Instructions     : {len(target_lines)} target + {len(source_lines)} source = {_total_lines} lines in 1 object")
+    _merged_ti   = inst.get("text_instructions", [])
+    _total_lines = len(_merged_ti[0].get("content", [])) if _merged_ti else 0
+    console.print(f"  Instructions     : {_n_target_kept} kept + {_n_added} appended  ({_n_removed} removed)  = {_total_lines} lines total  (1 object)")
     console.print(f"  Measures         : {len(snip['measures'])}")
     console.print(f"  Expressions      : {len(snip['expressions'])}")
     console.print(f"  Filters          : {len(snip['filters'])}")
