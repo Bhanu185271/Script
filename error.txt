@@ -1,8 +1,3 @@
- ✗  HTTP 409
-     {"error_code":"ABORTED","message":"Space configuration has been modified since this export was taken. Re-export the space and merge your changes.","details":[{"@type":"type.googleapis.com/google.rpc.RequestInfo","request_id":"dbe1eef1-64d2-4b66-b400-f79cafca5406","serving_data":""}]}
-  Check CAN EDIT permission on the target space.
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # CELL 1 — IMPORTS + CONFIG + WIDGETS
 # ─────────────────────────────────────────────────────────────────────────────
@@ -796,7 +791,9 @@ if mode == "merge":
         },
         "benchmarks": {"questions": []},
         "config"    : {"sample_questions": []},
-        "version"   : max(ss1.get("version", 1), ss2.get("version", 1)),
+        # Always use TARGET space version — Databricks requires an exact match on PATCH.
+        # Using max(ss1, ss2) risks sending a wrong version if source > target.
+        "version"   : target_ss.get("version", 1),
     }
     ds   = merged_ss["data_sources"]
     inst = merged_ss["instructions"]
@@ -807,8 +804,12 @@ if mode == "merge":
         "TABLE", "JOIN", "MEASURE", "EXPRESSION", "FILTER",
         "BENCHMARK", "SAMPLE_QUESTION", "EXAMPLE_SQL", "INSTRUCTION"
     ]}
-    target_instr_lines = []   # target instructions in ORIGINAL space order, minus removals
-    source_instr_lines = []   # source instructions appended from Widget 5 selections
+    # Full text_instruction objects are preserved exactly as they came from the API.
+    # Each ti object carries its own id, content string/list, and any other fields.
+    # We do NOT flatten into a single content list -- that would break the per-line format.
+    target_text_instrs  = []   # original ti objects from target space, original order, minus removals
+    source_text_instrs  = []   # original ti objects from source space, appended from Widget 5
+    _seen_source_ti_ids = set()  # prevents adding the same source ti object twice
     merged_registry = {}
     rpt_base, rpt_added, rpt_removed, rpt_skipped = [], [], [], []
 
@@ -816,24 +817,25 @@ if mode == "merge":
         """
         Write one registry entry into merged_ss.
         Returns True if written, False if duplicate (skipped).
-        Items are placed in their correct section — tables->tables,
+        Items are placed in their correct section -- tables->tables,
         joins->joins, instructions are appended and deduped, etc.
 
         is_source_phase=False  -> called during Step 1 (target base items)
         is_source_phase=True   -> called during Step 2 (items added from source via Widget 5)
 
-        INSTRUCTION lines are handled specially:
-          - Target instructions are pre-extracted in original space order (target_instr_lines).
-            apply_item marks them seen for dedup but does NOT re-append them.
-          - Source instructions (is_source_phase=True) are appended to source_instr_lines.
-        Final text_instructions = target_instr_lines + source_instr_lines (no sorting).
+        INSTRUCTION handling:
+          - Target ti objects are pre-extracted in original space order (target_text_instrs).
+            apply_item marks them seen for dedup but does NOT re-add them here.
+          - Source ti objects (_parent_ti) are appended to source_text_instrs as-is,
+            preserving the original API format (id, content string, etc.) exactly.
+        Final text_instructions = target_text_instrs + source_text_instrs (no sorting, no flattening).
         """
         cat, key = entry["category"], entry["key"]
         item     = copy.deepcopy(entry["item"])
 
         if key in seen[cat]:
             rpt_skipped.append(
-                f"  = {sn} [{cat}] {str(key)[:80]}  (duplicate — TARGET version kept)")
+                f"  = {sn} [{cat}] {str(key)[:80]}  (duplicate -- TARGET version kept)")
             return False
 
         seen[cat].add(key)
@@ -849,9 +851,17 @@ if mode == "merge":
         elif cat == "EXAMPLE_SQL"    : inst["example_question_sqls"].append(item)
         elif cat == "INSTRUCTION"    :
             if is_source_phase:
-                # Source instruction: append AFTER all target instructions
-                source_instr_lines.append(item["line"])
-            # Target instructions are already captured in target_instr_lines
+                # Grab the original text_instruction object stored in the registry.
+                # _parent_ti is the raw dict from the source space API response —
+                # it already has the correct id, content format, and any other fields.
+                # Appending it directly preserves the exact per-line format.
+                _parent = item.get("_parent_ti")
+                if isinstance(_parent, dict):
+                    _ti_id = _parent.get("id", id(_parent))
+                    if _ti_id not in _seen_source_ti_ids:
+                        _seen_source_ti_ids.add(_ti_id)
+                        source_text_instrs.append(copy.deepcopy(_parent))
+            # Target instructions are already captured in target_text_instrs
             # (pre-extracted in original space order before Step 1).
             instr_line = item["line"]
 
@@ -864,30 +874,54 @@ if mode == "merge":
         return True
 
     # ── Pre-extract target instructions in ORIGINAL space order ──────────────
-    # build_registry sorts instructions alphabetically for display/comparison.
-    # To preserve the target space's original instruction ordering we read
-    # directly from the raw target_ss JSON here, before Step 1 runs.
-    # Instructions listed in remove_serials are excluded.
+    # We read directly from target_ss to preserve the exact text_instruction
+    # objects (with their original id, content format, etc.) and their ordering.
+    # Each ti object is copied as-is; lines listed in remove_serials are excluded.
+    # If a ti had multiple content lines and only some are removed, we keep the
+    # remaining lines inside that ti object (content format preserved: str or list).
     _removed_instr_nkeys = {
         norm_key(target_registry[sn]["key"])
         for sn in remove_serials
         if sn in target_registry and target_registry[sn]["category"] == "INSTRUCTION"
     }
-    _seen_ti = set()
+    _seen_ti_line_nkeys = set()   # dedup across all target ti objects
+    _seen_ti_ids        = set()   # avoid adding the same ti object twice
     for _ti in get_txt(target_ss):
         if not isinstance(_ti, dict): continue
-        _c = _ti.get("content", [])
-        if isinstance(_c, str): _c = [_c]
-        for _ln in _c:
-            _ln = str(_ln).strip()
+        _ti_id = _ti.get("id", id(_ti))
+        if _ti_id in _seen_ti_ids: continue
+
+        _raw_c = _ti.get("content", [])
+        _c_list = [_raw_c] if isinstance(_raw_c, str) else \
+                  [str(x) for x in _raw_c if x is not None]
+
+        # Filter out removed or already-seen lines
+        _kept = []
+        for _ln in _c_list:
+            _ln = _ln.strip()
             if not _ln: continue
             _nk = norm_key(_ln)
-            if _nk in _removed_instr_nkeys or _nk in _seen_ti: continue
-            _seen_ti.add(_nk)
-            target_instr_lines.append(_ln)
-    # Pre-seed seen["INSTRUCTION"] with all target instruction keys so that
-    # apply_item (Step 1) marks them seen for dedup WITHOUT re-appending them
-    # (they are already captured above in original order).
+            if _nk in _removed_instr_nkeys or _nk in _seen_ti_line_nkeys: continue
+            _seen_ti_line_nkeys.add(_nk)
+            _kept.append(_ln)
+
+        if not _kept: continue   # entire ti was removed — skip it
+
+        # Deep-copy the ti object to avoid mutating the original space data,
+        # then patch content to match exactly what is being kept.
+        _ti_copy = copy.deepcopy(_ti)
+        if isinstance(_raw_c, str):
+            # Original was a plain string — keep as plain string
+            _ti_copy["content"] = _kept[0]
+        else:
+            # Original was a list — keep as list
+            _ti_copy["content"] = _kept
+
+        _seen_ti_ids.add(_ti_id)
+        target_text_instrs.append(_ti_copy)
+
+    # Pre-seed seen["INSTRUCTION"] so apply_item (Step 1) marks target instruction
+    # entries as seen (for dedup) WITHOUT trying to re-add them to any list.
     for _sn, _e in target_registry.items():
         if _e["category"] == "INSTRUCTION":
             seen["INSTRUCTION"].add(_e["key"])
@@ -914,11 +948,12 @@ if mode == "merge":
                 f"  + {sn} [{e['category']}] [{reg_label}] {str(e['key'])[:80]}")
 
     # ── Consolidate instructions ───────────────────────────────────────────────
-    # target_instr_lines : target space instructions in their ORIGINAL order
-    # source_instr_lines : source instructions appended BELOW (in serial-number order)
-    # No sorting — target order is preserved as-is; source lines are simply appended.
-    if target_instr_lines or source_instr_lines:
-        inst["text_instructions"] = [{"content": target_instr_lines + source_instr_lines}]
+    # target_text_instrs : original ti objects from target space, original order
+    # source_text_instrs : original ti objects from source space, appended below
+    # Each object keeps its exact API structure (id, content as str or list, etc.)
+    # No flattening, no sorting -- format is identical to what the API returned.
+    if target_text_instrs or source_text_instrs:
+        inst["text_instructions"] = target_text_instrs + source_text_instrs
 
     # ── Report ─────────────────────────────────────────────────────────────────
     body = (
@@ -939,8 +974,8 @@ if mode == "merge":
     console.print(Panel(body, title="Merged Space Built ✓", border_style="#005500"))
     console.print(f"  Tables           : {len(ds['tables'])}")
     console.print(f"  Joins            : {len(inst['join_specs'])}")
-    console.print(f"  Instructions     : {len(target_instr_lines) + len(source_instr_lines)}  "
-                  f"(target: {len(target_instr_lines)}  +  appended from source: {len(source_instr_lines)})")
+    console.print(f"  Instructions     : {len(target_text_instrs) + len(source_text_instrs)}  "
+                  f"(target: {len(target_text_instrs)}  +  appended from source: {len(source_text_instrs)})")
     console.print(f"  Measures         : {len(snip['measures'])}")
     console.print(f"  Expressions      : {len(snip['expressions'])}")
     console.print(f"  Filters          : {len(snip['filters'])}")
@@ -1356,6 +1391,24 @@ if mode == "merge":
         f"  Sample Questions : {len(ready_ss.get('config',{}).get('sample_questions',[]))}",
         title="Cell 9 — Patch Target Space", border_style="yellow"))
 
+    # ── Refresh target version immediately before PATCH ───────────────────────
+    # Databricks optimistic-concurrency: version in serialized_space must match
+    # exactly what the server holds RIGHT NOW.  Any re-run or concurrent edit
+    # since Cell 2 would have bumped the server version → 409 without this refresh.
+    _ver_r = requests.get(
+        f"{DATABRICKS_HOST}/api/2.0/genie/spaces/{TARGET_SPACE_ID}",
+        headers=HEADERS,
+        params={"include_serialized_space": "true"},
+        timeout=30,
+    )
+    if _ver_r.status_code == 200:
+        _ver_raw = _ver_r.json().get("serialized_space", "{}")
+        _live_ver = (json.loads(_ver_raw) if isinstance(_ver_raw, str) else _ver_raw).get("version", 1)
+        ready_ss["version"] = _live_ver
+        console.print(f"  ℹ  Live target version refreshed → {_live_ver}")
+    else:
+        console.print(f"  ⚠  Could not refresh target version (HTTP {_ver_r.status_code}) — proceeding with cached version")
+
     resp_p = requests.patch(
         f"{DATABRICKS_HOST}/api/2.0/genie/spaces/{TARGET_SPACE_ID}",
         headers=HEADERS,
@@ -1381,7 +1434,11 @@ if mode == "merge":
     else:
         console.print(f"  ✗  Error  HTTP {resp_p.status_code}")
         console.print(f"     {resp_p.text[:800]}")
-        console.print("  Check CAN EDIT permission on the target space.")
+        if resp_p.status_code == 409:
+            console.print("  409 = version conflict.  The space was modified after the version refresh.")
+            console.print("  Re-run from Cell 2 to re-fetch, then retry Cell 9.")
+        else:
+            console.print("  Check CAN EDIT permission on the target space.")
 
 else:
     console.print("Mode = rollback — Cell 9 skipped.")
@@ -1434,6 +1491,24 @@ if mode == "rollback":
         f"Sample Qs    : {len(ss_r.get('config',{}).get('sample_questions',[]))}",
         title="Restoring snapshot", border_style="yellow"))
 
+    # ── Refresh live version before rollback PATCH ────────────────────────────
+    # The snapshot was taken before the merge.  After a successful merge patch
+    # the server version incremented, so the snapshot version is now stale.
+    # We must inject the current live version into ss_r before patching.
+    _rb_ver_r = requests.get(
+        f"{DATABRICKS_HOST}/api/2.0/genie/spaces/{sid}",
+        headers=HEADERS,
+        params={"include_serialized_space": "true"},
+        timeout=30,
+    )
+    if _rb_ver_r.status_code == 200:
+        _rb_raw = _rb_ver_r.json().get("serialized_space", "{}")
+        _rb_live_ver = (json.loads(_rb_raw) if isinstance(_rb_raw, str) else _rb_raw).get("version", 1)
+        ss_r["version"] = _rb_live_ver
+        console.print(f"  ℹ  Live space version refreshed → {_rb_live_ver}  (snapshot version replaced)")
+    else:
+        console.print(f"  ⚠  Could not refresh live version (HTTP {_rb_ver_r.status_code}) — rollback may get 409")
+
     resp_rb = requests.patch(
         f"{DATABRICKS_HOST}/api/2.0/genie/spaces/{sid}",
         headers=HEADERS,
@@ -1441,7 +1516,9 @@ if mode == "rollback":
             "title"           : rb["title"],
             "description"     : rb.get("description", ""),
             "warehouse_id"    : rb["warehouse_id"],
-            "serialized_space": rb["serialized_space"],
+            # Re-serialise ss_r (not the raw snapshot string) so the refreshed
+            # live version is included — prevents 409 version-conflict errors.
+            "serialized_space": json.dumps(ss_r, ensure_ascii=False),
         },
         timeout=120,
     )
@@ -1455,7 +1532,11 @@ if mode == "rollback":
     else:
         console.print(f"  ✗  HTTP {resp_rb.status_code}")
         console.print(f"     {resp_rb.text[:600]}")
-        console.print("  Check CAN EDIT permission on the target space.")
+        if resp_rb.status_code == 409:
+            console.print("  409 = version conflict — space was modified after the version refresh.")
+            console.print("  Wait a moment and re-run Cell 10 to pick up the latest version.")
+        else:
+            console.print("  Check CAN EDIT permission on the target space.")
 
 else:
     console.print("Mode = merge — Cell 10 (rollback) skipped.")
