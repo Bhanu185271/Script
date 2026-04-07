@@ -804,32 +804,14 @@ if mode == "merge":
         "TABLE", "JOIN", "MEASURE", "EXPRESSION", "FILTER",
         "BENCHMARK", "SAMPLE_QUESTION", "EXAMPLE_SQL", "INSTRUCTION"
     ]}
-    # Full text_instruction objects are preserved exactly as they came from the API.
-    # Each ti object carries its own id, content string/list, and any other fields.
-    # We do NOT flatten into a single content list -- that would break the per-line format.
-    target_text_instrs  = []   # original ti objects from target space, original order, minus removals
-    source_text_instrs  = []   # original ti objects from source space, appended from Widget 5
-    _seen_source_ti_ids = set()  # prevents adding the same source ti object twice
+    target_text_instrs  = []
+    source_text_instrs  = []
+    _seen_source_ti_ids = set()
     merged_registry = {}
     rpt_base, rpt_added, rpt_removed, rpt_skipped = [], [], [], []
 
     def apply_item(entry, sn, is_source_phase=False):
-        """
-        Write one registry entry into merged_ss.
-        Returns True if written, False if duplicate (skipped).
-        Items are placed in their correct section -- tables->tables,
-        joins->joins, instructions are appended and deduped, etc.
-
-        is_source_phase=False  -> called during Step 1 (target base items)
-        is_source_phase=True   -> called during Step 2 (items added from source via Widget 5)
-
-        INSTRUCTION handling:
-          - Target ti objects are pre-extracted in original space order (target_text_instrs).
-            apply_item marks them seen for dedup but does NOT re-add them here.
-          - Source ti objects (_parent_ti) are appended to source_text_instrs as-is,
-            preserving the original API format (id, content string, etc.) exactly.
-        Final text_instructions = target_text_instrs + source_text_instrs (no sorting, no flattening).
-        """
+        # Write one registry entry into merged_ss. Returns True if written, False if duplicate.
         cat, key = entry["category"], entry["key"]
         item     = copy.deepcopy(entry["item"])
 
@@ -851,18 +833,14 @@ if mode == "merge":
         elif cat == "EXAMPLE_SQL"    : inst["example_question_sqls"].append(item)
         elif cat == "INSTRUCTION"    :
             if is_source_phase:
-                # Grab the original text_instruction object stored in the registry.
-                # _parent_ti is the raw dict from the source space API response —
-                # it already has the correct id, content format, and any other fields.
-                # Appending it directly preserves the exact per-line format.
+                # Collect the parent ti object from the source registry item
                 _parent = item.get("_parent_ti")
                 if isinstance(_parent, dict):
                     _ti_id = _parent.get("id", id(_parent))
                     if _ti_id not in _seen_source_ti_ids:
                         _seen_source_ti_ids.add(_ti_id)
                         source_text_instrs.append(copy.deepcopy(_parent))
-            # Target instructions are already captured in target_text_instrs
-            # (pre-extracted in original space order before Step 1).
+            # Target instructions are pre-extracted before Step 1, not re-added here
             instr_line = item["line"]
 
         merged_registry[sn] = {
@@ -873,12 +851,7 @@ if mode == "merge":
         }
         return True
 
-    # ── Pre-extract target instructions in ORIGINAL space order ──────────────
-    # We read directly from target_ss to preserve the exact text_instruction
-    # objects (with their original id, content format, etc.) and their ordering.
-    # Each ti object is copied as-is; lines listed in remove_serials are excluded.
-    # If a ti had multiple content lines and only some are removed, we keep the
-    # remaining lines inside that ti object (content format preserved: str or list).
+    # Pre-extract target instructions in original space order, excluding removed lines
     _removed_instr_nkeys = {
         norm_key(target_registry[sn]["key"])
         for sn in remove_serials
@@ -905,23 +878,14 @@ if mode == "merge":
             _seen_ti_line_nkeys.add(_nk)
             _kept.append(_ln)
 
-        if not _kept: continue   # entire ti was removed — skip it
+        if not _kept: continue
 
-        # Deep-copy the ti object to avoid mutating the original space data,
-        # then patch content to match exactly what is being kept.
         _ti_copy = copy.deepcopy(_ti)
-        if isinstance(_raw_c, str):
-            # Original was a plain string — keep as plain string
-            _ti_copy["content"] = _kept[0]
-        else:
-            # Original was a list — keep as list
-            _ti_copy["content"] = _kept
-
+        _ti_copy["content"] = _kept[0] if isinstance(_raw_c, str) else _kept
         _seen_ti_ids.add(_ti_id)
         target_text_instrs.append(_ti_copy)
 
-    # Pre-seed seen["INSTRUCTION"] so apply_item (Step 1) marks target instruction
-    # entries as seen (for dedup) WITHOUT trying to re-add them to any list.
+    # Pre-seed seen so apply_item marks target instructions as seen without re-adding them
     for _sn, _e in target_registry.items():
         if _e["category"] == "INSTRUCTION":
             seen["INSTRUCTION"].add(_e["key"])
@@ -947,36 +911,39 @@ if mode == "merge":
             rpt_added.append(
                 f"  + {sn} [{e['category']}] [{reg_label}] {str(e['key'])[:80]}")
 
-    # ── Consolidate instructions into a SINGLE text_instruction object ────────
-    # The Databricks Genie API enforces:
-    #   "instructions.text_instructions must contain at most one item"
-    #
-    # Strategy (mirrors error_ref.txt approach):
-    #   1. Collect ALL content lines from every ti object in target + source order.
-    #   2. Lines are already deduped by pre-extraction (target) and apply_item
-    #      (source), so we just strip and skip blanks here.
-    #   3. Reuse the FIRST ti object's shell (preserves its API-assigned id and
-    #      any other fields the server expects), replace its content with the
-    #      full combined line list, and place it as the sole element.
-    #
-    # Result: text_instructions always has exactly 1 item regardless of how
-    # many ti objects existed across the two source spaces.
-    all_ti_objects = target_text_instrs + source_text_instrs
-    if all_ti_objects:
-        combined_lines = []
-        for _ti in all_ti_objects:
-            _c = _ti.get("content", [])
-            if isinstance(_c, str):
-                _c = [_c]
-            for _ln in _c:
-                _ln_s = str(_ln).strip()
-                if _ln_s:
-                    combined_lines.append(_ln_s)
+    # Merge instructions into a single text_instruction object using a separator marker.
+    # Source lines go first, then a marker line, then target lines — matching the reference approach.
+    MERGE_MARKER = "=== Additional Instructions ==="
 
-        # Reuse the first ti's shell so the API-assigned id is preserved
-        single_ti = copy.deepcopy(all_ti_objects[0])
-        single_ti["content"] = combined_lines
-        inst["text_instructions"] = [single_ti]
+    def extract_lines(ti_list):
+        lines = []
+        for _ti in ti_list:
+            _c = _ti.get("content", [])
+            if isinstance(_c, str): _c = [_c]
+            for _ln in _c:
+                _ln = str(_ln).strip()
+                if _ln:
+                    lines.append(_ln)
+        return lines
+
+    target_lines = extract_lines(target_text_instrs)
+    source_lines = extract_lines(source_text_instrs)
+
+    all_ti = target_text_instrs + source_text_instrs
+    if all_ti:
+        already_merged = any(MERGE_MARKER in ln for ln in target_lines)
+        if source_lines and not already_merged:
+            merged_content = (
+                source_lines
+                + ["\r\n", MERGE_MARKER + "\r\n", "\r\n"]
+                + target_lines
+            )
+        else:
+            merged_content = target_lines
+
+        shell = copy.deepcopy(all_ti[0])
+        shell["content"] = merged_content
+        inst["text_instructions"] = [shell]
 
     # ── Report ─────────────────────────────────────────────────────────────────
     body = (
@@ -998,11 +965,8 @@ if mode == "merge":
     console.print(f"  Tables           : {len(ds['tables'])}")
     console.print(f"  Joins            : {len(inst['join_specs'])}")
     _merged_ti    = inst.get("text_instructions", [])
-    _merged_lines = len(_merged_ti[0].get("content", [])) if _merged_ti else 0
-    console.print(f"  Instructions     : 1 text_instruction object  "
-                  f"({_merged_lines} lines total - "
-                  f"{len(target_text_instrs)} target ti obj(s) + "
-                  f"{len(source_text_instrs)} source ti obj(s) collapsed)")
+    _total_lines  = len(_merged_ti[0].get("content", [])) if _merged_ti else 0
+    console.print(f"  Instructions     : {len(target_lines)} target + {len(source_lines)} source = {_total_lines} lines in 1 object")
     console.print(f"  Measures         : {len(snip['measures'])}")
     console.print(f"  Expressions      : {len(snip['expressions'])}")
     console.print(f"  Filters          : {len(snip['filters'])}")
