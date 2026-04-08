@@ -882,77 +882,105 @@ if mode == "merge":
             if apply_item(e, sn):
                 rpt_added.append(f"  {sn} [{e['category']}] [{reg_label}] {str(e['key'])[:80]}")
 
-    # Step 3: Build the final instruction text block
+    # =========================================================================
+    # Step 3 – Build the final instruction text block
     #
-    # FIX - each instruction always stored as its own list element so it appears
-    # on its own line (previously added lines were concatenating into one paragraph).
+    # ROOT CAUSE OF CONCATENATION BUG:
+    #   The Databricks API stores instructions in text_instructions[0]["content"]
+    #   as a SINGLE \n-delimited STRING  (e.g. "Line1\nLine2\nLine3").
+    #   Previous versions set content = a Python list, which gets serialised as
+    #   a JSON array.  Databricks then joins the array elements with no separator,
+    #   so all lines appear on one line inside the Genie UI.
     #
-    # Rules:
-    #   - Keep target text_instructions, filtered by Widget 6 removals
-    #   - Each instruction (kept or added) is ONE element in the content list
-    #   - One empty-string separator between the target block and the added block
-    #   - In auto-full-merge mode : add ALL source instruction lines not in target
-    #   - In selective mode       : add only instruction lines from Widget 5 serials
-    #   - Deduplication by norm_key throughout (target version always wins)
+    # FIX:
+    #   content must ALWAYS be written back as one plain string with \n between
+    #   every instruction line.  We never store a list in content.
+    #
+    # APPROACH – "lift and shift":
+    #   Full merge  : take the target's raw content string as-is, then append
+    #                 the source's raw content string as-is (blank line between).
+    #                 Deduplicate line-by-line (target wins); join with \n.
+    #   Selective   : take the target's raw content string as-is, then append
+    #                 only the lines that correspond to the selected serial numbers,
+    #                 one line per serial, joined with \n.
+    #   Removals    : lines whose norm_key matches a Widget-6 serial are dropped
+    #                 from the target block before appending anything.
+    # =========================================================================
 
-    # Collect norm_keys of instructions to remove from the target content
+    def _raw_content_to_str(content):
+        """
+        Normalise the raw 'content' value from the API into a plain string.
+        The API may return a str or occasionally a list.
+        Always returns a str (lines separated by \\n).
+        """
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            # Flatten any nested newlines and join with \n
+            parts = []
+            for entry in content:
+                for ln in str(entry).split("\n"):
+                    parts.append(ln)
+            return "\n".join(parts)
+        return ""
+
+    def _str_to_lines(s):
+        """Split a \n-separated instruction string into individual lines."""
+        return s.split("\n") if s else []
+
+    # ---- Collect norm_keys of instructions the user wants removed (Widget 6) ----
     _rem_instr_nkeys = {
         norm_key(target_registry[sn]["key"])
         for sn in remove_serials
         if sn in target_registry and target_registry[sn]["category"] == "INSTRUCTION"
     }
 
-    # Deep-copy the raw target text_instructions list (preserves all original API fields)
-    _raw_ti_list = copy.deepcopy(get_txt(target_ss))
-    _ti_shell    = _raw_ti_list[0] if _raw_ti_list else {"content": []}
-    _raw_content = _ti_shell.get("content", [])
+    # ---- Deep-copy the target's text_instructions block (keeps id and other API fields) ----
+    _raw_ti_list  = copy.deepcopy(get_txt(target_ss))
+    _ti_shell     = _raw_ti_list[0] if _raw_ti_list else {}
+    _raw_content  = _ti_shell.get("content", "")
 
-    # Normalize content (string or list) into a flat list of individual non-empty lines.
-    # This is the core fix: every instruction becomes its own list element.
-    def _content_to_lines(content):
-        """Return a flat list of stripped non-empty instruction lines."""
-        if isinstance(content, str):
-            # Single string that may contain newline-separated instructions
-            return [ln for ln in content.split("\n") if ln.strip()]
-        elif isinstance(content, list):
-            result = []
-            for entry in content:
-                # Each list element might itself contain embedded newlines
-                for ln in str(entry).split("\n"):
-                    if ln.strip():
-                        result.append(ln)
-            return result
-        return []
+    # Convert whatever the API returned into a clean string, then into a line list
+    _target_all_lines = _str_to_lines(_raw_content_to_str(_raw_content))
 
-    _target_lines = _content_to_lines(_raw_content)
-
-    # Filter out removed lines; build a dedup set of norm_keys already present
+    # ---- Filter out removed lines; track which norm_keys are already present ----
     _existing_nkeys = set()
     _kept_lines     = []
-    for _ln in _target_lines:
+    for _ln in _target_all_lines:
         _nk = norm_key(_ln)
         if _nk in _rem_instr_nkeys:
-            continue
+            continue          # user explicitly removed this line
         _existing_nkeys.add(_nk)
         _kept_lines.append(_ln)
 
-    # Collect new instruction lines to append (one entry per instruction = one line)
+    # ---- Collect lines to append from the source ----
     _lines_added = []
 
     if _auto_full_merge:
-        # Auto-full-merge: add ALL instruction lines from the source space
-        for sn in sorted(source_registry.keys()):
-            e = source_registry[sn]
-            if e["category"] != "INSTRUCTION":
-                continue
-            _line_text = e["item"]["line"]
-            _nk = norm_key(_line_text)
+        # FULL MERGE – lift-and-shift: grab the entire source content block,
+        # iterate its lines in original order, skip duplicates.
+        _src_ti_list   = get_txt(source_ss)
+        _src_ti_shell  = _src_ti_list[0] if _src_ti_list else {}
+        _src_raw       = _src_ti_shell.get("content", "")
+        _src_all_lines = _str_to_lines(_raw_content_to_str(_src_raw))
+
+        for _ln in _src_all_lines:
+            _nk = norm_key(_ln)
             if _nk not in _existing_nkeys:
                 _existing_nkeys.add(_nk)
-                _lines_added.append(_line_text)
+                _lines_added.append(_ln)
+            # If the line already exists in the target we simply skip it (target wins)
+
     else:
-        # Selective: add only instruction lines from Widget 5 serial numbers
-        for sn in sorted(add_serials):
+        # SELECTIVE – add only the lines that correspond to Widget-5 serial numbers.
+        # Serial numbers are processed in the ORDER the user typed them so that the
+        # appended block respects the user's intended sequence.
+        _ordered_add_serials = [
+            s.strip().upper()
+            for s in dbutils.widgets.get("serials_to_add").split(",")
+            if s.strip()
+        ]
+        for sn in _ordered_add_serials:
             reg, _ = _resolve_registry(sn)
             if reg is None or sn not in reg:
                 continue
@@ -965,23 +993,29 @@ if mode == "merge":
                 _existing_nkeys.add(_nk)
                 _lines_added.append(_line_text)
 
-    # Separator: one blank element between the two blocks (only when both have content)
-    _separator_lines = [""] if (_kept_lines and _lines_added) else []
+    # ---- Assemble the final content string ----
+    # One blank line separates the target block from the appended block.
+    # Every instruction occupies exactly one line – no concatenation possible
+    # because we write a single \n-joined string (not a list).
+    if _kept_lines and _lines_added:
+        _final_content_str = "\n".join(_kept_lines) + "\n\n" + "\n".join(_lines_added)
+    elif _kept_lines:
+        _final_content_str = "\n".join(_kept_lines)
+    elif _lines_added:
+        _final_content_str = "\n".join(_lines_added)
+    else:
+        _final_content_str = ""
 
-    # Final content: each instruction is its own list element -> renders on its own line
-    # This guarantees 5 instructions become 5 separate lines, never concatenated.
-    _final_lines = _kept_lines + _separator_lines + _lines_added
-
-    if _final_lines or _raw_ti_list:
-        # Always store as a list so every instruction appears on a separate line.
-        # The Genie API accepts both str and list for content; list preserves line breaks.
-        _ti_shell["content"] = _final_lines
+    # ---- Write back into the merged space ----
+    # content is stored as a plain string – exactly what the Databricks API expects.
+    if _final_content_str or _ti_shell:
+        _ti_shell["content"] = _final_content_str   # single \n-delimited string
         inst["text_instructions"] = [_ti_shell]
 
     # Counts for the summary report
-    _n_target_kept = len(_kept_lines)
+    _n_target_kept = len([l for l in _kept_lines if l.strip()])
     _n_removed     = len(_rem_instr_nkeys)
-    _n_added       = len(_lines_added)
+    _n_added       = len([l for l in _lines_added if l.strip()])
 
     # Print merge summary
     _merge_mode_label = "AUTO FULL MERGE" if _auto_full_merge else "Selective Merge"
@@ -1005,7 +1039,8 @@ if mode == "merge":
     console.print(f"  Tables           : {len(ds['tables'])}")
     console.print(f"  Joins            : {len(inst['join_specs'])}")
     _merged_ti   = inst.get("text_instructions", [])
-    _total_lines = len([l for l in (_merged_ti[0].get("content", []) if _merged_ti else []) if str(l).strip()])
+    _ti_content  = _merged_ti[0].get("content", "") if _merged_ti else ""
+    _total_lines = len([l for l in _ti_content.split("\n") if l.strip()]) if isinstance(_ti_content, str) else 0
     console.print(f"  Instructions     : {_n_target_kept} kept + {_n_added} added  ({_n_removed} removed)  = {_total_lines} lines total")
     console.print(f"  Measures         : {len(snip['measures'])}")
     console.print(f"  Expressions      : {len(snip['expressions'])}")
