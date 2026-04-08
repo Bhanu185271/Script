@@ -1,3 +1,15 @@
+ Create failed  HTTP 400
+  {"error_code":"INVALID_PARAMETER_VALUE","message":"Invalid serialized_space: Expected an array for content but found \"- There are 6 channels- Veeva calls (Veeva calls is total of both F2F calls and Edetail calls), Mass Email,Veeva Email,Webinar,Portal,Instant Messaging.\\r\\n\\n- Salesforce/Veeva
+channels are Veeva calls, Veeva Email and Webinar.\\r\\n\\n- Veeva touchpoint is veeva call touchpoint+Veeva Email touchpoint + Webinar touchpoint\\r\\n\\n- ONLY use information explicitly stated in the input. DO NOT infer, SPECULATE, or add any information not directly provided. If the input is 
+incomplete or ambiguous, respond by requesting clarification or stating that the information is insufficient. Under no circumstances should you make assumptions.\\r\\n\\n- Always convert strings columns t
+  Common causes:
+    TOKEN lacks CAN MANAGE permission on PARENT_PATH
+    warehouse_id is invalid or the warehouse is stopped
+    PARENT_PATH does not exist
+    serialized_space JSON exceeds the API size limit
+
+
+
 # CELL 1 - IMPORTS + CONFIG + WIDGETS
 
 import re, os, shutil, requests, json, copy, unicodedata, uuid
