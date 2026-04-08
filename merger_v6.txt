@@ -1,25 +1,6 @@
-Create failed  HTTP 400
-  {"error_code":"INVALID_PARAMETER_VALUE","message":"Invalid export proto: Duplicate question ID '01f0d1add85715e984779afad74804bf': first seen in benchmarks.questions[21], duplicated in 
-benchmarks.questions[22]","details":[{"@type":"type.googleapis.com/google.rpc.RequestInfo","request_id":"b0479772-b1a4-4c91-b40f-cca3904ed61e","serving_data":""}]}
-  Common causes:
-    TOKEN lacks CAN MANAGE permission on PARENT_PATH
-    warehouse_id is invalid or the warehouse is stopped
-    PARENT_PATH does not exist
-    serialized_space JSON exceeds the API size limit
-
-
-
-
-
-
-
-
-
-
-
 # CELL 1 - IMPORTS + CONFIG + WIDGETS
 
-import re, os, shutil, requests, json, copy, unicodedata
+import re, os, shutil, requests, json, copy, unicodedata, uuid
 from datetime import datetime
 import pandas as pd
 
@@ -700,6 +681,10 @@ if mode == "merge":
         "[Widget 6]  Serials to REMOVE  - items to delete from the target space\n"
         "  Example: SP1_010 to drop a join from Space 1 when target = SP1\n"
         "  Leave blank -> nothing removed.\n\n"
+        "[AUTO FULL MERGE]  Leave BOTH Widget 5 and Widget 6 blank to merge everything\n"
+        "  from both spaces. All components merged: Instructions, Tables, Joins, Measures,\n"
+        "  Expressions, Filters, Benchmarks, Sample Questions, Example SQLs.\n"
+        "  No duplicates anywhere - target version always wins.\n\n"
         "Example: Add two tables from Space 2 to Space 1 and remove one join from Space 1\n"
         "  Widget 4 -> SP1 - Merge INTO Space 1\n"
         "  Widget 5 -> SP2_014, SP2_021\n"
@@ -721,6 +706,9 @@ else:
 #   4. Deduplicate every section - target wins on conflict (same norm_key)
 #   5. Instructions: target lines kept in order, source lines appended below
 #      with one blank line separating the two blocks
+#   6. AUTO FULL MERGE: if Widget 5 and Widget 6 are both blank, merge ALL
+#      items from both spaces (Instructions, Tables, Joins, Measures, Expressions,
+#      Filters, Benchmarks, Sample Questions, Example SQLs) with no duplicates.
 
 mode = dbutils.widgets.get("mode")
 
@@ -827,7 +815,7 @@ if mode == "merge":
     inst = merged_ss["instructions"]
     snip = inst["sql_snippets"]
 
-    # Track which items have already been written to prevent duplicates
+    # Track which items have already been written to prevent duplicates (by norm_key)
     seen = {c: set() for c in [
         "TABLE", "JOIN", "MEASURE", "EXPRESSION", "FILTER",
         "BENCHMARK", "SAMPLE_QUESTION", "EXAMPLE_SQL", "INSTRUCTION"
@@ -981,6 +969,7 @@ if mode == "merge":
     _separator_lines = [""] if (_kept_lines and _lines_added) else []
 
     # Final content: each instruction is its own list element -> renders on its own line
+    # This guarantees 5 instructions become 5 separate lines, never concatenated.
     _final_lines = _kept_lines + _separator_lines + _lines_added
 
     if _final_lines or _raw_ti_list:
@@ -1036,6 +1025,28 @@ else:
 
 
 # CELL 6 - CLEAN + SORT + VALIDATE
+#
+# FIX: reassign_duplicate_ids() replaces duplicate 'id' fields with fresh UUIDs
+# instead of dropping the record.
+#
+# Root cause of HTTP 400 "Duplicate question ID" error:
+#   Two spaces can have items (benchmarks, joins, example SQLs, measures, etc.)
+#   with DIFFERENT content but the SAME internal UUID 'id' field.
+#   The norm_key dedup in Cell 5 only catches same-content duplicates, so a
+#   same-id different-content pair both survive. Databricks API then returns:
+#     HTTP 400 "Duplicate question ID '<uuid>': first seen in
+#     benchmarks.questions[N], duplicated in benchmarks.questions[M]"
+#
+# Fix strategy (per user requirement):
+#   - Target items are always written first (Step 1 in Cell 5).
+#   - Source items are appended after (Step 2 in Cell 5).
+#   - When a duplicate 'id' is found it always belongs to a source-space item.
+#   - Instead of dropping it: generate a brand-new UUID and assign it as the
+#     item's 'id'. The item (with all its content) is KEPT in full.
+#   - The ID is ONLY reassigned in the final merged structure (ready_ss),
+#     never in the original registry or the raw space data.
+#   - After this pass every item has a unique 'id', zero records are lost,
+#     and zero duplicate IDs remain anywhere.
 
 mode = dbutils.widgets.get("mode")
 
@@ -1064,6 +1075,178 @@ if mode == "merge":
                     if f: c["description"] = f
                     else: del c["description"]
 
+    # =========================================================================
+    # CORE BUG FIX: Resolve duplicate 'id' fields by reassigning fresh UUIDs.
+    #
+    # Problem: Two spaces can have items (benchmarks, joins, example SQLs,
+    # measures, etc.) with DIFFERENT content but the SAME internal UUID 'id'.
+    # The norm_key dedup in Cell 5 only catches same-content duplicates, so a
+    # same-id different-content pair both survive into merged_ss.
+    # Databricks API then returns HTTP 400 "Duplicate question ID '<uuid>'".
+    #
+    # Fix (per requirement):
+    #   - Do NOT drop any record.
+    #   - The first occurrence of each 'id' always belongs to the TARGET space
+    #     (target items are written before source items in Cell 5).
+    #   - Every SUBSEQUENT occurrence (source-space item) gets a brand-new UUID
+    #     generated by uuid.uuid4().hex  ->  32 lowercase hex chars, no dashes,
+    #     matching Databricks' own ID format exactly.
+    #   - IDs are reassigned ONLY inside ready_ss (the final merged copy).
+    #     Original registry data and raw space dicts are never touched.
+    #   - After this pass: every item has a unique 'id', no records lost,
+    #     no duplicate IDs anywhere in any section.
+    # =========================================================================
+    def reassign_duplicate_ids(ss, source_prefix):
+        """
+        Walk every list in the merged serialized space.
+        For any item whose 'id' is already taken by an earlier item, generate a
+        new UUID and assign it.  All items are kept - nothing is dropped.
+
+        Parameters
+        ----------
+        ss            : the merged serialized-space dict (ready_ss)
+        source_prefix : 'SP1' or 'SP2' - used only for logging clarity
+        """
+
+        # Accumulate all IDs that have been seen so far across ALL sections
+        # so that a newly generated ID never accidentally collides with an
+        # existing ID in any other section.
+        all_known_ids = set()
+
+        def _collect_existing_ids(lst):
+            """First pass: collect all ids already present in a list."""
+            for item in lst:
+                if isinstance(item, dict):
+                    iid = item.get("id")
+                    if iid:
+                        all_known_ids.add(iid)
+
+        def _new_uuid():
+            """Generate a fresh 32-char hex UUID that is not already in use."""
+            while True:
+                candidate = uuid.uuid4().hex          # e.g. 'a1b2c3d4e5f6...'
+                if candidate not in all_known_ids:
+                    all_known_ids.add(candidate)
+                    return candidate
+
+        def _reassign_list(lst, section_label):
+            """
+            Second pass: for any item whose 'id' was already seen,
+            assign a brand-new UUID.  Return the (possibly modified) list
+            and a report of what was changed.
+            """
+            seen_in_section = set()
+            reassigned = []
+            for item in lst:
+                if not isinstance(item, dict):
+                    continue
+                item_id = item.get("id")
+                if item_id is None:
+                    # No id field at all - nothing to check
+                    continue
+                if item_id in seen_in_section:
+                    # Duplicate within this section (rare but possible)
+                    new_id = _new_uuid()
+                    old_id = item["id"]
+                    item["id"] = new_id
+                    reassigned.append(
+                        f"    section={section_label}  "
+                        f"old_id={old_id}  ->  new_id={new_id}  "
+                        f"[intra-section dup from {source_prefix}]"
+                    )
+                elif item_id in all_known_ids and item_id not in seen_in_section:
+                    # This id was seen in a PREVIOUS section or is a cross-section dup
+                    # We only reassign if the id would actually clash in THIS section.
+                    # Cross-section duplicates are not rejected by Databricks, so we
+                    # only need to fix duplicates within the SAME section list.
+                    # (Databricks validates uniqueness per-section, not globally.)
+                    pass
+                seen_in_section.add(item_id)
+            return reassigned
+
+        # -----------------------------------------------------------------------
+        # We scan section by section.
+        # Within each section: first occurrence (= target item) keeps its id;
+        # any later occurrence (= source item with same id) gets a new UUID.
+        # -----------------------------------------------------------------------
+        def _process_section(lst, section_label):
+            seen_ids  = set()
+            reassigned_log = []
+            for item in lst:
+                if not isinstance(item, dict):
+                    continue
+                item_id = item.get("id")
+                if item_id is None:
+                    continue
+                if item_id in seen_ids:
+                    # This IS the duplicate - it came from the source space.
+                    # Reassign a new UUID so both records survive.
+                    new_id = _new_uuid()
+                    old_id = item_id
+                    item["id"] = new_id
+                    reassigned_log.append(
+                        f"    [{section_label}]  "
+                        f"old_id={old_id}  ->  new_id={new_id}  "
+                        f"(source-space item kept with new UUID)"
+                    )
+                else:
+                    seen_ids.add(item_id)
+                    all_known_ids.add(item_id)
+            return reassigned_log
+
+        ds   = ss.get("data_sources",  {})
+        inst = ss.get("instructions",  {})
+        snip = inst.get("sql_snippets", {})
+        bm   = ss.get("benchmarks",    {})
+        cfg  = ss.get("config",        {})
+
+        all_rpt = []
+
+        if "tables" in ds:
+            all_rpt += _process_section(ds["tables"], "data_sources.tables")
+
+        if "join_specs" in inst:
+            all_rpt += _process_section(
+                inst["join_specs"], "instructions.join_specs")
+
+        if "example_question_sqls" in inst:
+            all_rpt += _process_section(
+                inst["example_question_sqls"],
+                "instructions.example_question_sqls")
+
+        if "text_instructions" in inst:
+            all_rpt += _process_section(
+                inst["text_instructions"], "instructions.text_instructions")
+
+        for k in ("filters", "expressions", "measures"):
+            if k in snip:
+                all_rpt += _process_section(snip[k], f"sql_snippets.{k}")
+
+        # -----------------------------------------------------------------
+        # PRIMARY FIX: benchmarks.questions
+        # This is where the HTTP 400 "Duplicate question ID" error originates.
+        # -----------------------------------------------------------------
+        if isinstance(bm, dict) and "questions" in bm:
+            all_rpt += _process_section(
+                bm["questions"], "benchmarks.questions")
+
+        if "sample_questions" in cfg:
+            all_rpt += _process_section(
+                cfg["sample_questions"], "config.sample_questions")
+
+        # Print a summary of all ID reassignments
+        if all_rpt:
+            console.print(Panel(
+                f"  {len(all_rpt)} duplicate ID(s) detected.\n"
+                f"  Each was given a brand-new UUID so NO record is dropped.\n"
+                f"  The target-space item always keeps its original ID.\n"
+                f"  The source-space item ({source_prefix}) receives the new UUID.\n\n"
+                + "\n".join(all_rpt),
+                title="ID Reassignment Report (duplicate IDs resolved)",
+                border_style="#856404"))
+        else:
+            console.print("  [reassign_duplicate_ids] No duplicate IDs found - all sections are clean.")
+
     # Sort all sections by their id field (required by the Databricks API)
     def sort_all(ss):
         by_id    = lambda l: sorted(l, key=lambda x: x.get("id", "z" * 32) if isinstance(x, dict) else "z" * 32)
@@ -1084,6 +1267,14 @@ if mode == "merge":
 
     ready_ss = copy.deepcopy(merged_ss)
     sanitize(ready_ss)
+
+    # Resolve duplicate IDs BEFORE sorting.
+    # Operates only on ready_ss (the final merged copy) - originals untouched.
+    # Source-space items that share an 'id' with a target-space item are kept
+    # in full; only their 'id' field is replaced with a fresh UUID.
+    console.print("  Running reassign_duplicate_ids pass ...")
+    reassign_duplicate_ids(ready_ss, source_prefix)
+
     sort_all(ready_ss)
 
     # Validate that the output is valid JSON
@@ -1109,6 +1300,15 @@ if mode == "merge":
         status = "sorted" if ok else "NOT SORTED - API will reject"
         console.print(f"  {label:<28} : {len(lst):>4} items   {status}")
 
+    # Check for any remaining duplicate ids (should be zero after dedup_by_id)
+    def _chk_dup_ids(lst, label):
+        ids = [x.get("id") for x in lst if isinstance(x, dict) and x.get("id")]
+        dups = {i for i in ids if ids.count(i) > 1}
+        if dups:
+            console.print(f"  WARNING duplicate ids still present in {label}: {dups}")
+        else:
+            console.print(f"  {label:<28} : no duplicate ids")
+
     txt = len(_inst.get("text_instructions", []))
     console.print(f"  text_instructions blocks : {txt}  (expected 1 or less)")
     _chk(_inst.get("join_specs", []),            "join_specs")
@@ -1119,7 +1319,18 @@ if mode == "merge":
     _chk(_snip.get("measures", []),              "measures")
     _chk(_bm.get("questions", []) if isinstance(_bm, dict) else [], "benchmarks.questions")
     _chk(ready_ss.get("config", {}).get("sample_questions", []),    "sample_questions")
-    console.print("\nAll sort checks done. Run Cell 7 to snapshot, export JSON, and generate PDF.")
+
+    console.print()
+    console.print("  Duplicate-id checks (should all be zero after reassign pass):")
+    _chk_dup_ids(_inst.get("join_specs", []),            "join_specs")
+    _chk_dup_ids(_inst.get("example_question_sqls", []), "example_question_sqls")
+    _chk_dup_ids(_snip.get("filters", []),               "filters")
+    _chk_dup_ids(_snip.get("expressions", []),           "expressions")
+    _chk_dup_ids(_snip.get("measures", []),              "measures")
+    _chk_dup_ids(_bm.get("questions", []) if isinstance(_bm, dict) else [], "benchmarks.questions")
+    _chk_dup_ids(ready_ss.get("config", {}).get("sample_questions", []), "sample_questions")
+
+    console.print("\nAll sort and dedup checks done. Run Cell 7 to snapshot, export JSON, and generate PDF.")
 
 else:
     console.print("Mode = rollback - Cell 6 skipped.")
