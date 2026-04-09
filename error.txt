@@ -1,3 +1,13 @@
+ Create failed  HTTP 400
+  {"error_code":"INVALID_PARAMETER_VALUE","message":"Invalid serialized_space: Expected an array for content but found \"- There are 6 channels- Veeva calls (Veeva calls is total of both F2F calls and Edetail calls), Mass Email,Veeva Email,Webinar,Portal,Instant Messaging.\\r\\n\\n- Salesforce/Veeva
+channels are Veeva calls, Veeva Email and Webinar.\\r\\n\\n- Veeva channel touchpoint is veeva call channel touchpoint+Veeva Email channel touchpoint + Webinar channel touchpoint.\\r\\n\\n- ONLY use information explicitly stated in the input. DO NOT infer, SPECULATE, or add any information not 
+directly provided.\\r\\n\\n- Always convert strings columns to lowercase.\\r\\n\\n- Commercial Segments/HCP Segment/Rx segment are A, B, C, D, E or unspecified.\\r\\n\\n- Handle nulls explicitly and always 
+  Common causes:
+
+
+
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # CELL 1 — IMPORTS + CONFIG + WIDGETS
 # ─────────────────────────────────────────────────────────────────────────────
