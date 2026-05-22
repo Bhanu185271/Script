@@ -1,0 +1,21 @@
+Current responsibility
+Architect cloud-scale data ecosystems : unifying Batch, Stream, APIs and Orchestration into resilient real-time platforms. 
+Infuse LLMs and RAG into analytics workflows to enable auto-discovery, contextual intelligence and self evolving insight systems.
+Transform data into strategic assets : Co-creating with stakeholders to elevate customer engagement, enhance product analytics and Business foresight.
+
+
+Profile overview
+Integrating Data Engineering and Intelligence : With 4+ Years of experience, I design data pipelines that transform raw inputs into predictive intelligence systems aligned to business goals.
+
+Modern Data Architecture : Experience in designing and deploying scalable cloud native pipelines for structure, semi-structured and streaming data.
+AI-Driven Engineering : Hands-on integration of LLM, RAG and predictive models into real-time analytics and decision systems designed for augmentation.
+Automation &  Intelligence : Skilled in CI/CD, data quality automation and orchestration frameworks for resilient, Insight-ready platforms.
+Data-Centric Integration : Experienced in integrating APIs, Salesforce, Oracle and third-party system using FastAPI, Logic Apps and Informatica IICS to enable unified and consistent data flows.
+Business Aligned Solutions : Collaborated with product , analytics and leadership teams to transform abstract data into Intelligence. 
+
+
+Relevant experience
+
+Built and optimized data pipelines using Databricks, Azure Synapse, ADF  and PySpark to support real-time analytics, deal scoring and customer 360 initiatives.
+Designed churn prediction and customer success models to measure engagement, forecast retention risk, and enabled the product strategy using advanced analytics.
+Integrated LLMs and RAG models into data workflows to automate querying and enable dynamics, prompt-based insights.
