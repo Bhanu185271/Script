@@ -1,0 +1,57 @@
+import os
+from pathlib import Path
+from pydub import AudioSegment
+
+# ------------------------------------------------------------
+# CONFIG — update these paths
+# ------------------------------------------------------------
+DBFS_INPUT_PATH = "/dbfs/mnt/your-folder/input"    # DBFS location with .m4a files (local FUSE mount path)
+DBFS_OUTPUT_PATH = "/dbfs/mnt/your-folder/output"  # DBFS location to save .wav files
+
+# ------------------------------------------------------------
+# Single file conversion
+# ------------------------------------------------------------
+def convert_single_file(input_path: str, output_path: str) -> str:
+    """Convert one M4A file to WAV."""
+    try:
+        audio = AudioSegment.from_file(input_path, format="m4a")
+        audio.export(output_path, format="wav")
+        return f"✅ Converted: {input_path} -> {output_path}"
+    except Exception as e:
+        return f"❌ Failed: {input_path} | Error: {e}"
+
+
+# ------------------------------------------------------------
+# Batch conversion (all .m4a files in a DBFS folder)
+# ------------------------------------------------------------
+def batch_convert_dbfs(input_dir: str, output_dir: str) -> None:
+    """Convert all M4A files in a DBFS directory to WAV format."""
+    input_path = Path(input_dir)
+    output_path = Path(output_dir)
+
+    # Create output directory if it doesn't exist
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    m4a_files = list(input_path.glob("*.m4a"))
+
+    if not m4a_files:
+        print(f"No .m4a files found in {input_dir}")
+        return
+
+    print(f"Found {len(m4a_files)} file(s) to convert.\n")
+
+    results = []
+    for m4a_file in m4a_files:
+        wav_file = output_path / (m4a_file.stem + ".wav")
+        result = convert_single_file(str(m4a_file), str(wav_file))
+        results.append(result)
+        print(result)
+
+    success_count = sum(1 for r in results if r.startswith("✅"))
+    print(f"\nDone. {success_count}/{len(m4a_files)} files converted successfully.")
+
+
+# ------------------------------------------------------------
+# RUN
+# ------------------------------------------------------------
+batch_convert_dbfs(DBFS_INPUT_PATH, DBFS_OUTPUT_PATH)
