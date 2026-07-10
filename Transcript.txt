@@ -1,3 +1,11 @@
+No .m4a files found in /Workspace/Users/chandrabhanu.x.chandrabhanu@gsk.com/FFN_Input/Sjukvården-SE-sound.m4a
+/local_disk0/.ephemeral_nfs/envs/pythonEnv-05482397-9200-49cd-ad7d-35c8cf424837/lib/python3.11/site-packages/pydub/utils.py:170: RuntimeWarning: Couldn't find ffmpeg or avconv - defaulting to ffmpeg, but may not work
+  warn("Couldn't find ffmpeg or avconv - defaulting to ffmpeg, but may not work", RuntimeWarning)
+
+
+
+
+
 import os
 from pathlib import Path
 from pydub import AudioSegment
