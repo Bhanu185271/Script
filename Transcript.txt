@@ -4,44 +4,36 @@ apt-get install -y ffmpeg
 which ffmpeg
 which ffprobe
 
+# ============================================================
+# CELL 3 — COMPLETE CONVERSION CODE (fill in your paths below)
+# ============================================================
 from pydub import AudioSegment
 from pathlib import Path
 
-# Explicitly point pydub to ffmpeg/ffprobe (avoids "couldn't find ffmpeg" warning)
+# Point pydub to ffmpeg/ffprobe explicitly
 AudioSegment.converter = "/usr/bin/ffmpeg"
 AudioSegment.ffprobe = "/usr/bin/ffprobe"
 
+# ------------------------------------------------------------
+# 👉 UPDATE THESE TWO LINES WITH YOUR ACTUAL FILE PATHS
+# ------------------------------------------------------------
+input_file = "/Workspace/Users/chandrabhanu.x.chandrabhanu@gsk.com/FFN_Input/Sjukvården-SE-sound.m4a"
+output_file = "/Workspace/Users/chandrabhanu.x.chandrabhanu@gsk.com/FFN_Input/Sjukvården-SE-sound.wav"
+# ------------------------------------------------------------
 
 def convert_single_file(input_path: str, output_path: str) -> str:
     """Convert one M4A file to WAV."""
     try:
+        # Verify input file exists first
+        if not Path(input_path).exists():
+            return f"❌ File not found: {input_path}"
+
         audio = AudioSegment.from_file(input_path, format="m4a")
         audio.export(output_path, format="wav")
         return f"✅ Converted: {input_path} -> {output_path}"
     except Exception as e:
         return f"❌ Failed: {input_path} | Error: {e}"
 
-
-def batch_convert(input_dir: str, output_dir: str) -> None:
-    """Convert all M4A files in a folder to WAV format."""
-    input_path = Path(input_dir)
-    output_path = Path(output_dir)
-    output_path.mkdir(parents=True, exist_ok=True)
-
-    m4a_files = list(input_path.glob("*.m4a"))
-
-    if not m4a_files:
-        print(f"No .m4a files found in {input_dir}")
-        return
-
-    print(f"Found {len(m4a_files)} file(s) to convert.\n")
-
-    results = []
-    for m4a_file in m4a_files:
-        wav_file = output_path / (m4a_file.stem + ".wav")
-        result = convert_single_file(str(m4a_file), str(wav_file))
-        results.append(result)
-        print(result)
-
-    success_count = sum(1 for r in results if r.startswith("✅"))
-    print(f"\nDone. {success_count}/{len(m4a_files)} files converted successfully.")
+# Run the conversion
+result = convert_single_file(input_file, output_file)
+print(result)
